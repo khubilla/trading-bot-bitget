@@ -96,9 +96,22 @@ def check_daily_ema(daily_df: pd.DataFrame, direction: str) -> tuple[bool, float
 
 # ── Consolidation ─────────────────────────────────────────────────── #
 
-def detect_consolidation(ltf_df: pd.DataFrame) -> tuple[bool, float, float]:
+def detect_consolidation(
+    ltf_df: pd.DataFrame,
+    rsi_series: pd.Series | None = None,
+    rsi_threshold: float | None = None,
+    direction: str = "LONG",
+) -> tuple[bool, float, float]:
     """
-    Returns (is_consolidating, box_high, box_low) for the last N completed candles.
+    Returns (is_consolidating, box_high, box_low).
+
+    Consolidation is only valid if:
+    1. Price range is tight (within CONSOLIDATION_RANGE_PCT)
+    2. RSI was in the correct zone during ALL candles in the window:
+       LONG:  RSI > rsi_threshold (>70) throughout the window
+       SHORT: RSI < rsi_threshold (<30) throughout the window
+
+    This prevents false consolidation detections at RSI 50-60.
     """
     window = ltf_df.iloc[-(CONSOLIDATION_CANDLES + 1):-1]
     if len(window) < CONSOLIDATION_CANDLES:
@@ -113,10 +126,29 @@ def detect_consolidation(ltf_df: pd.DataFrame) -> tuple[bool, float, float]:
     range_pct = (box_high - box_low) / mid
     is_tight  = range_pct <= CONSOLIDATION_RANGE_PCT
 
-    if is_tight:
-        logger.debug(f"  Consolidation: range={range_pct*100:.3f}% H={box_high} L={box_low}")
+    if not is_tight:
+        return False, box_high, box_low
 
-    return is_tight, box_high, box_low
+    # ── RSI zone check: was RSI in the zone for the whole window? ── #
+    if rsi_series is not None and rsi_threshold is not None:
+        window_rsi = rsi_series.iloc[-(CONSOLIDATION_CANDLES + 1):-1]
+        if direction == "LONG":
+            if not (window_rsi > rsi_threshold).all():
+                logger.debug(
+                    f"  Consolidation ❌ RSI not consistently > {rsi_threshold} "
+                    f"during window (min={window_rsi.min():.1f})"
+                )
+                return False, box_high, box_low
+        elif direction == "SHORT":
+            if not (window_rsi < rsi_threshold).all():
+                logger.debug(
+                    f"  Consolidation ❌ RSI not consistently < {rsi_threshold} "
+                    f"during window (max={window_rsi.max():.1f})"
+                )
+                return False, box_high, box_low
+
+    logger.debug(f"  Consolidation ✓ range={range_pct*100:.3f}% H={box_high} L={box_low}")
+    return True, box_high, box_low
 
 
 # ── HTF Check ─────────────────────────────────────────────────────── #
@@ -138,12 +170,18 @@ def check_ltf_long(ltf_df: pd.DataFrame) -> tuple[bool, float, float, float]:
     if len(ltf_df) < RSI_PERIOD + CONSOLIDATION_CANDLES + 2:
         return False, 50.0, 0.0, 0.0
 
-    rsi_val = float(calculate_rsi(ltf_df["close"].astype(float)).iloc[-1])
+    closes  = ltf_df["close"].astype(float)
+    rsi_ser = calculate_rsi(closes)
+    rsi_val = float(rsi_ser.iloc[-1])
 
     if rsi_val <= RSI_LONG_THRESH:
         return False, rsi_val, 0.0, 0.0
 
-    is_coil, box_high, box_low = detect_consolidation(ltf_df)
+    # Pass RSI series so consolidation only counts when RSI was > 70 throughout
+    is_coil, box_high, box_low = detect_consolidation(
+        ltf_df, rsi_series=rsi_ser,
+        rsi_threshold=RSI_LONG_THRESH, direction="LONG"
+    )
     if not is_coil:
         return False, rsi_val, 0.0, 0.0
 
@@ -159,12 +197,18 @@ def check_ltf_short(ltf_df: pd.DataFrame) -> tuple[bool, float, float, float]:
     if len(ltf_df) < RSI_PERIOD + CONSOLIDATION_CANDLES + 2:
         return False, 50.0, 0.0, 0.0
 
-    rsi_val = float(calculate_rsi(ltf_df["close"].astype(float)).iloc[-1])
+    closes  = ltf_df["close"].astype(float)
+    rsi_ser = calculate_rsi(closes)
+    rsi_val = float(rsi_ser.iloc[-1])
 
     if rsi_val >= RSI_SHORT_THRESH:
         return False, rsi_val, 0.0, 0.0
 
-    is_coil, box_high, box_low = detect_consolidation(ltf_df)
+    # Pass RSI series so consolidation only counts when RSI was < 30 throughout
+    is_coil, box_high, box_low = detect_consolidation(
+        ltf_df, rsi_series=rsi_ser,
+        rsi_threshold=RSI_SHORT_THRESH, direction="SHORT"
+    )
     if not is_coil:
         return False, rsi_val, 0.0, 0.0
 
@@ -185,36 +229,33 @@ def check_exit(
 ) -> tuple[ExitFlag, str]:
     """
     Called every tick while a position is open.
-    Checks if the dynamic SL conditions are met.
+    Uses iloc[-2] = last FULLY CLOSED 3m candle (not the forming one).
 
-    LONG exit:
-      - Current 3m candle CLOSED below box_low
-      - RSI dropped below 70
+    LONG  exit: last closed candle closed BELOW box_low
+    SHORT exit: last closed candle closed ABOVE box_high
 
-    SHORT exit:
-      - Current 3m candle CLOSED above box_high
-      - RSI rose above 30
-
-    Returns (flag, reason)
+    Note: The fixed SL/TP orders on Bitget act as the primary protection.
+    This is an additional early-exit check for when the setup invalidates.
     """
-    if len(ltf_df) < RSI_PERIOD + 2:
+    if len(ltf_df) < 3:
         return "HOLD", ""
 
-    closes  = ltf_df["close"].astype(float)
-    rsi_val = float(calculate_rsi(closes).iloc[-1])
-    close   = float(closes.iloc[-1])
+    # iloc[-1] is still forming — use iloc[-2] for the last confirmed close
+    last_closed = float(ltf_df["close"].iloc[-2])
 
-    if side == "LONG":
-        if box_low > 0 and close < box_low:
-            return "EXIT", f"Candle closed below box_low ({close:.5f} < {box_low:.5f})"
-        if rsi_val < RSI_LONG_THRESH:
-            return "EXIT", f"RSI dropped below {RSI_LONG_THRESH} (RSI={rsi_val:.1f})"
+    if side == "LONG" and box_low > 0:
+        if last_closed < box_low:
+            return "EXIT", (
+                f"Last closed 3m candle ({last_closed:.6f}) "
+                f"closed below box_low ({box_low:.6f})"
+            )
 
-    elif side == "SHORT":
-        if box_high > 0 and close > box_high:
-            return "EXIT", f"Candle closed above box_high ({close:.5f} > {box_high:.5f})"
-        if rsi_val > RSI_SHORT_THRESH:
-            return "EXIT", f"RSI rose above {RSI_SHORT_THRESH} (RSI={rsi_val:.1f})"
+    elif side == "SHORT" and box_high > 0:
+        if last_closed > box_high:
+            return "EXIT", (
+                f"Last closed 3m candle ({last_closed:.6f}) "
+                f"closed above box_high ({box_high:.6f})"
+            )
 
     return "HOLD", ""
 

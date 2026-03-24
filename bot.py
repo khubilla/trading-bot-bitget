@@ -150,7 +150,7 @@ class MTFBot:
             logger.error(f"Balance error: {e}")
             return
 
-        # ── 3. Monitor active trade (dynamic SL) ─────────────────── #
+        # ── 3. Monitor active trade ───────────────────────────────── #
         if self.active_symbol:
             try:
                 positions = tr.get_all_open_positions()
@@ -168,10 +168,11 @@ class MTFBot:
                     f"Balance=${balance:.2f} | "
                     f"Box={self.active_box_low:.5f}–{self.active_box_high:.5f}"
                 )
-
-                # ── Dynamic SL check ─────────────────────────────── #
+                # Primary protection: SL/TP orders are live on Bitget
+                # Secondary: also check if closed candle broke below/above box
+                # (catches cases where SL order may not have triggered cleanly)
                 try:
-                    ltf_df = tr.get_candles(self.active_symbol, config.LTF_INTERVAL, limit=60)
+                    ltf_df = tr.get_candles(self.active_symbol, config.LTF_INTERVAL, limit=10)
                     if not ltf_df.empty:
                         exit_flag, exit_reason = check_exit(
                             ltf_df,
@@ -180,33 +181,23 @@ class MTFBot:
                             self.active_box_low,
                         )
                         if exit_flag == "EXIT":
-                            logger.info(f"🔴 [{self.active_symbol}] Dynamic SL triggered: {exit_reason}")
-                            st.add_scan_log(f"[{self.active_symbol}] Dynamic SL: {exit_reason}", "SIGNAL")
-                            closed = tr.close_position(self.active_symbol, self.active_side)
-                            if closed:
-                                pnl = pos["unrealised_pnl"]
-                                result = "WIN" if pnl > 0 else "LOSS"
-                                st.close_trade(self.active_symbol, result, pnl)
-                                _log_trade("DYNAMIC_SL_CLOSE", {
-                                    "symbol": self.active_symbol,
-                                    "side":   self.active_side,
-                                    "pnl":    pnl,
-                                    "reason": exit_reason,
-                                })
-                                self.active_symbol   = None
-                                self.active_side     = None
-                                self.active_box_high = 0.0
-                                self.active_box_low  = 0.0
+                            logger.info(f"⚠️  [{self.active_symbol}] Box exit triggered: {exit_reason}")
+                            st.add_scan_log(
+                                f"[{self.active_symbol}] Box broken — SL should trigger on Bitget | {exit_reason}",
+                                "WARN"
+                            )
+                            # Don't force-close here — let Bitget's SL order handle it
+                            # Just warn so we know the box is broken
                 except Exception as e:
-                    logger.error(f"[{self.active_symbol}] Dynamic SL check error: {e}")
+                    logger.error(f"[{self.active_symbol}] Exit check error: {e}")
 
-                return  # still in trade (or just closed)
+                return
 
             else:
-                # Position closed by TP
-                logger.info(f"✅ [{self.active_symbol}] Position closed by TP")
-                st.close_trade(self.active_symbol, "WIN", 0)
-                st.add_scan_log(f"[{self.active_symbol}] Trade closed (TP hit)", "INFO")
+                # Position closed by Bitget (SL or TP hit)
+                logger.info(f"✅ [{self.active_symbol}] Position closed (SL/TP hit)")
+                st.close_trade(self.active_symbol, "CLOSED", 0)
+                st.add_scan_log(f"[{self.active_symbol}] Trade closed (SL/TP hit)", "INFO")
                 self.active_symbol   = None
                 self.active_side     = None
                 self.active_box_high = 0.0
@@ -264,8 +255,11 @@ class MTFBot:
         # Determine reason for logging
         from strategy import check_daily_ema, calculate_rsi as _rsi, detect_consolidation as _coil
         ema_ok, price, ema10, ema20 = check_daily_ema(daily_df, "LONG" if allowed_direction == "BULLISH" else "SHORT")
-        rsi_val = float(_rsi(ltf_df["close"].astype(float)).iloc[-1])
-        is_coil, bh, bl = _coil(ltf_df)
+        rsi_ser = _rsi(ltf_df["close"].astype(float))
+        rsi_val = float(rsi_ser.iloc[-1])
+        direction_str = "LONG" if allowed_direction == "BULLISH" else "SHORT"
+        thresh = config.RSI_LONG_THRESH if direction_str == "LONG" else config.RSI_SHORT_THRESH
+        is_coil, bh, bl = _coil(ltf_df, rsi_series=rsi_ser, rsi_threshold=thresh, direction=direction_str)
         close = float(ltf_df["close"].iloc[-1])
 
         htf_pass = htf_bull if allowed_direction == "BULLISH" else htf_bear
@@ -311,10 +305,10 @@ class MTFBot:
             st.add_scan_log(
                 f"[{symbol}] 🟢 LONG | RSI={rsi_val:.1f} | "
                 f"Sentiment BULLISH ({self.sentiment.bullish_weight*100:.1f}%) | "
-                f"Daily EMA ✅",
+                f"Daily EMA ✅ | SL=box_low={box_low:.6f}",
                 "SIGNAL"
             )
-            trade = tr.open_long(symbol)
+            trade = tr.open_long(symbol, box_low=box_low)
             _log_trade("OPEN_LONG", trade)
             st.add_open_trade(trade)
             self.active_symbol   = symbol
@@ -327,10 +321,10 @@ class MTFBot:
             st.add_scan_log(
                 f"[{symbol}] 🔴 SHORT | RSI={rsi_val:.1f} | "
                 f"Sentiment BEARISH ({self.sentiment.bullish_weight*100:.1f}%) | "
-                f"Daily EMA ✅",
+                f"Daily EMA ✅ | SL=box_high={box_high:.6f}",
                 "SIGNAL"
             )
-            trade = tr.open_short(symbol)
+            trade = tr.open_short(symbol, box_high=box_high)
             _log_trade("OPEN_SHORT", trade)
             st.add_open_trade(trade)
             self.active_symbol   = symbol

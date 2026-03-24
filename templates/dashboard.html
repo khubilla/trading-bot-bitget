@@ -1018,6 +1018,10 @@ function render(s) {
             <span class="check-val ${htfClass}">${htfLabel}</span>
           </div>
           <div class="pair-check">
+            <span class="check-label">Daily EMA</span>
+            <span class="check-val ${!htfPass ? 'muted' : (ps.ema_ok ? 'pass' : 'fail')}">${!htfPass ? '—' : (ps.ema_ok ? '✓ Aligned' : '✗ Not aligned')}</span>
+          </div>
+          <div class="pair-check">
             <span class="check-label">RSI</span>
             <span class="check-val ${rsiClass}">${rsiLabel}</span>
           </div>
@@ -1032,7 +1036,7 @@ function render(s) {
 
   if (grid.innerHTML !== html) {
     grid.innerHTML = html;
-    if (typeof attachCardClicks === 'function') attachCardClicks();
+    attachCardClicks();
   }
 
   // ── Signal log
@@ -1092,16 +1096,6 @@ async function poll() {
     console.warn('Poll error:', e.message);
   }
 }
-
-// Initial load + 3s interval
-poll();
-setInterval(poll, 3000);
-setInterval(() => {
-  // Refresh relative times without a full poll
-  document.querySelectorAll('.hist-time').forEach(el => {
-    // Handled by full re-render
-  });
-}, 1000);
 
 // ── Chart Modal ────────────────────────────────────────────
 let candleChart   = null;
@@ -1313,6 +1307,10 @@ function attachCardClicks() {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') closeChart({target: $('chartOverlay')});
 });
+
+// ── Start polling ──────────────────────────────────────────
+poll();
+setInterval(poll, 3000);
 </script>
 </body>
 </html>

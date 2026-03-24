@@ -71,11 +71,11 @@ def get_qualified_pairs_and_sentiment() -> tuple[list[str], SentimentResult]:
             vol_usdt     = float(t.get("quoteVolume") or 0)
             change_str   = t.get("change24h") or "0"
             price_change = float(change_str)
-            lastPr       = float(t.get("lastPr") or 0)
+            lastPr        = float(t.get("lastPr") or 0)
         except (ValueError, TypeError):
             continue
 
-        if lastPr > 200:
+        if lastPr >= 150:
             continue
 
         if vol_usdt < MIN_VOLUME_USDT:

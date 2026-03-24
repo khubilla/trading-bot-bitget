@@ -1,0 +1,7 @@
+__pycache__
+venv
+bot.log
+requirements.txt
+state.json
+config.py
+trades.csv

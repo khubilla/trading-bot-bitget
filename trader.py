@@ -175,20 +175,16 @@ def _calculate_qty(symbol: str, mark_price: float, balance: float) -> str:
 
 def open_long(symbol: str) -> dict:
     """
-    Opens a LONG position with market order, then places TP/SL.
-    Execute prices must be real values (not 0) — Bitget rejects 0.
-    Long SL execute = slightly below trigger (slippage buffer)
-    Long TP execute = slightly above trigger (ensure fill)
+    Opens a LONG position with market order, then places only TP.
+    SL is handled dynamically by the bot (no fixed SL order on exchange).
+    TP execute price is slightly above trigger to ensure fill.
     """
     import time as _time
     balance = get_usdt_balance()
     mark    = get_mark_price(symbol)
     qty     = _calculate_qty(symbol, mark, balance)
-    sl_trig = float(_round_price(mark * (1 - STOP_LOSS_PCT),   symbol))
     tp_trig = float(_round_price(mark * (1 + TAKE_PROFIT_PCT), symbol))
-    # Execute prices: SL slightly below trigger, TP slightly above trigger
-    sl_exec = float(_round_price(sl_trig * 0.995, symbol))  # 0.5% slippage buffer
-    tp_exec = float(_round_price(tp_trig * 1.005, symbol))
+    tp_exec = float(_round_price(tp_trig * 1.005, symbol))  # slight buffer for fill
 
     set_leverage(symbol)
 
@@ -205,11 +201,11 @@ def open_long(symbol: str) -> dict:
         "force":       "ioc",
     })
 
-    # 2. Wait for position to register on Bitget's side before placing TP/SL
+    # 2. Wait for position to register
     _time.sleep(2.0)
 
-    # 3. Place TP/SL with retry
-    tpsl_placed = False
+    # 3. Place TP only (SL is dynamic — bot monitors and closes)
+    tp_placed = False
     for attempt in range(3):
         try:
             bc.post("/api/v2/mix/order/place-pos-tpsl", {
@@ -220,46 +216,40 @@ def open_long(symbol: str) -> dict:
                 "stopSurplusTriggerPrice": str(tp_trig),
                 "stopSurplusTriggerType":  "mark_price",
                 "stopSurplusExecutePrice": str(tp_exec),
-                "stopLossTriggerPrice":    str(sl_trig),
-                "stopLossTriggerType":     "mark_price",
-                "stopLossExecutePrice":    str(sl_exec),
             })
-            tpsl_placed = True
+            tp_placed = True
             break
         except Exception as e:
-            logger.warning(f"[{symbol}] TP/SL attempt {attempt + 1}/3 failed: {e}")
+            logger.warning(f"[{symbol}] TP attempt {attempt + 1}/3: {e}")
             if attempt < 2:
                 _time.sleep(1.5)
 
-    if not tpsl_placed:
-        logger.error(f"[{symbol}] ⚠️  COULD NOT SET TP/SL AFTER 3 ATTEMPTS — SET MANUALLY ON BITGET!")
+    if not tp_placed:
+        logger.error(f"[{symbol}] ⚠️  Could not set TP — set manually on Bitget!")
 
     result = {
         "symbol": symbol, "side": "LONG", "qty": qty,
-        "entry": mark, "sl": sl_trig, "tp": tp_trig,
+        "entry": mark, "sl": "dynamic", "tp": tp_trig,
         "margin": round(balance * TRADE_SIZE_PCT, 4),
-        "tpsl_set": tpsl_placed,
+        "tp_set": tp_placed,
     }
     logger.info(
-        f"[{symbol}] 🟢 LONG opened | qty={qty} entry≈{mark} "
-        f"SL={sl_trig} TP={tp_trig} tpsl={'✅' if tpsl_placed else '❌ MANUAL NEEDED'}"
+        f"[{symbol}] 🟢 LONG | qty={qty} entry≈{mark} "
+        f"TP={tp_trig} | SL=dynamic | tp={'✅' if tp_placed else '❌'}"
     )
     return result
 
 
 def open_short(symbol: str) -> dict:
     """
-    Opens a SHORT position with market order, then places TP/SL.
-    Short SL execute = slightly above trigger (slippage buffer)
-    Short TP execute = slightly below trigger (ensure fill)
+    Opens a SHORT position with market order, then places only TP.
+    SL is handled dynamically by the bot.
     """
     import time as _time
     balance = get_usdt_balance()
     mark    = get_mark_price(symbol)
     qty     = _calculate_qty(symbol, mark, balance)
-    sl_trig = float(_round_price(mark * (1 + STOP_LOSS_PCT),   symbol))
     tp_trig = float(_round_price(mark * (1 - TAKE_PROFIT_PCT), symbol))
-    sl_exec = float(_round_price(sl_trig * 1.005, symbol))  # 0.5% slippage buffer
     tp_exec = float(_round_price(tp_trig * 0.995, symbol))
 
     set_leverage(symbol)
@@ -280,8 +270,8 @@ def open_short(symbol: str) -> dict:
     # 2. Wait for position to register
     _time.sleep(2.0)
 
-    # 3. Place TP/SL with retry
-    tpsl_placed = False
+    # 3. Place TP only
+    tp_placed = False
     for attempt in range(3):
         try:
             bc.post("/api/v2/mix/order/place-pos-tpsl", {
@@ -292,29 +282,26 @@ def open_short(symbol: str) -> dict:
                 "stopSurplusTriggerPrice": str(tp_trig),
                 "stopSurplusTriggerType":  "mark_price",
                 "stopSurplusExecutePrice": str(tp_exec),
-                "stopLossTriggerPrice":    str(sl_trig),
-                "stopLossTriggerType":     "mark_price",
-                "stopLossExecutePrice":    str(sl_exec),
             })
-            tpsl_placed = True
+            tp_placed = True
             break
         except Exception as e:
-            logger.warning(f"[{symbol}] TP/SL attempt {attempt + 1}/3 failed: {e}")
+            logger.warning(f"[{symbol}] TP attempt {attempt + 1}/3: {e}")
             if attempt < 2:
                 _time.sleep(1.5)
 
-    if not tpsl_placed:
-        logger.error(f"[{symbol}] ⚠️  COULD NOT SET TP/SL AFTER 3 ATTEMPTS — SET MANUALLY ON BITGET!")
+    if not tp_placed:
+        logger.error(f"[{symbol}] ⚠️  Could not set TP — set manually on Bitget!")
 
     result = {
         "symbol": symbol, "side": "SHORT", "qty": qty,
-        "entry": mark, "sl": sl_trig, "tp": tp_trig,
+        "entry": mark, "sl": "dynamic", "tp": tp_trig,
         "margin": round(balance * TRADE_SIZE_PCT, 4),
-        "tpsl_set": tpsl_placed,
+        "tp_set": tp_placed,
     }
     logger.info(
-        f"[{symbol}] 🔴 SHORT opened | qty={qty} entry≈{mark} "
-        f"SL={sl_trig} TP={tp_trig} tpsl={'✅' if tpsl_placed else '❌ MANUAL NEEDED'}"
+        f"[{symbol}] 🔴 SHORT | qty={qty} entry≈{mark} "
+        f"TP={tp_trig} | SL=dynamic | tp={'✅' if tp_placed else '❌'}"
     )
     return result
 
@@ -329,3 +316,44 @@ def cancel_all_orders(symbol: str):
         })
     except Exception as e:
         logger.warning(f"[{symbol}] cancel_all_orders warn: {e}")
+
+
+def close_position(symbol: str, side: str) -> bool:
+    """
+    Closes an open position with a market order.
+    side: "LONG" or "SHORT"
+    Returns True if successful.
+    """
+    import time as _time
+    close_side = "sell" if side == "LONG" else "buy"
+
+    # Get current qty
+    positions = get_all_open_positions()
+    if symbol not in positions:
+        logger.warning(f"[{symbol}] close_position: no open position found")
+        return False
+
+    qty = str(positions[symbol]["qty"])
+
+    try:
+        # Cancel existing TP/SL orders first
+        cancel_all_orders(symbol)
+        _time.sleep(0.5)
+
+        # Market close
+        bc.post("/api/v2/mix/order/place-order", {
+            "symbol":      symbol,
+            "productType": PRODUCT_TYPE,
+            "marginMode":  "isolated",
+            "marginCoin":  MARGIN_COIN,
+            "size":        qty,
+            "side":        close_side,
+            "tradeSide":   "close",
+            "orderType":   "market",
+            "force":       "ioc",
+        })
+        logger.info(f"[{symbol}] 🔒 Position closed via market order (dynamic SL)")
+        return True
+    except Exception as e:
+        logger.error(f"[{symbol}] close_position failed: {e}")
+        return False

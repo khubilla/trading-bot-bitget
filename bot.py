@@ -1,23 +1,11 @@
 """
-bot.py — Main Trading Bot Entry Point (Bitget USDT Futures)
+bot.py — Main Entry Point
 
-Risk rules:
-  ✅ 5% portfolio margin per trade
-  ✅ 10x leverage (isolated)
-  ✅ TP = +100% margin (10% price move) — placed as Bitget order
-  ✅ Dynamic SL — bot monitors and closes when:
-       LONG:  3m candle closes below box_low  OR  RSI < 70
-       SHORT: 3m candle closes above box_high OR  RSI > 30
-  ✅ 1 active trade MAX
-  ✅ LONG only when BULLISH sentiment
-  ✅ SHORT only when BEARISH sentiment
-  ✅ Daily EMA filter: price > EMA10 > EMA20 (LONG) or price < EMA10 < EMA20 (SHORT)
+Runs Strategy 1 and Strategy 2 simultaneously.
+Only 1 active trade at a time across both strategies.
 
-Run:
-    python bot.py
-
-Dashboard (separate terminal):
-    python dashboard.py  →  http://localhost:8080
+Strategy 1: MTF RSI Breakout (ADX trend filter, 1H break, 3m RSI+coil+breakout)
+Strategy 2: 30-Day Breakout + 3m Consolidation (long candle, squeeze, 3m coil+break)
 """
 
 import time, signal, sys, logging, csv, os
@@ -26,7 +14,12 @@ from datetime import datetime, timezone
 import config
 import state as st
 from scanner import get_qualified_pairs_and_sentiment
-from strategy import evaluate_pair, check_htf, check_exit, calculate_rsi, detect_consolidation
+from strategy import (
+    evaluate_s1, evaluate_s2,
+    check_htf, check_exit,
+    calculate_rsi, detect_consolidation,
+    check_daily_trend,
+)
 import trader as tr
 
 # ── Logging ──────────────────────────────────────────────────────── #
@@ -59,60 +52,53 @@ def _log_trade(action: str, details: dict):
 class MTFBot:
     def __init__(self):
         self.running         = True
-        self.active_symbol   = None      # symbol we're in (or None)
-        self.active_side     = None      # "LONG" or "SHORT"
-        self.active_box_high = 0.0       # consolidation box at entry
-        self.active_box_low  = 0.0
+        # Dict of { symbol: { side, strategy, box_high, box_low } }
+        # Supports MAX_CONCURRENT_TRADES > 1
+        self.active_positions: dict[str, dict] = {}
         self.last_scan_time  = 0
         self.qualified_pairs : list[str] = []
         self.sentiment       = None
 
         st.reset()
         st.set_status("RUNNING")
-        st.add_scan_log("Bitget MTF Bot initialised", "INFO")
+        st.add_scan_log("Bot initialised (S1 + S2)", "INFO")
 
-        logger.info("🤖 Bitget USDT-Futures MTF Bot")
-        logger.info(f"   Mode          : {'DEMO (Paper Trading)' if config.DEMO_MODE else '⚡ LIVE'}")
-        logger.info(f"   Risk/trade    : {config.TRADE_SIZE_PCT*100:.0f}% margin | "
-                    f"{config.LEVERAGE}x | TP={config.TAKE_PROFIT_PCT*100:.0f}%")
-        logger.info(f"   Dynamic SL    : LONG exits when close < box_low OR RSI < {config.RSI_LONG_THRESH}")
-        logger.info(f"                   SHORT exits when close > box_high OR RSI > {config.RSI_SHORT_THRESH}")
-        logger.info(f"   Daily EMA     : price > EMA{config.DAILY_EMA_FAST} > EMA{config.DAILY_EMA_SLOW} (LONG)")
-        logger.info(f"   Sentiment thr.: {config.SENTIMENT_THRESHOLD*100:.0f}% vol-weighted")
-        logger.info("   Dashboard     : python dashboard.py → http://localhost:8080\n")
+        logger.info("🤖 Bitget USDT-Futures MTF Bot — Strategy 1 + 2")
+        logger.info(f"   Mode         : {'DEMO' if config.DEMO_MODE else '⚡ LIVE'}")
+        logger.info(f"   S1 Risk      : {config.TRADE_SIZE_PCT*100:.0f}% | {config.LEVERAGE}x | "
+                    f"SL=box TP={config.TAKE_PROFIT_PCT*100:.0f}%")
+        logger.info(f"   S1 ADX thr.  : {config.ADX_TREND_THRESHOLD}")
+        logger.info(f"   Dashboard    : python dashboard.py → http://localhost:8080\n")
 
-        # ── Sync any existing open position on startup ─────────────── #
+        # ── Startup position sync ─────────────────────────────────── #
         try:
             existing = tr.get_all_open_positions()
-            if existing:
-                sym = list(existing.keys())[0]
-                pos = existing[sym]
-                self.active_symbol = sym
-                self.active_side   = pos["side"]
-                logger.warning(
-                    f"⚠️  Found existing open position: "
-                    f"{sym} {pos['side']} qty={pos['qty']} entry={pos['entry_price']}"
-                )
+            for sym, pos in existing.items():
+                self.active_positions[sym] = {
+                    "side": pos["side"], "strategy": "UNKNOWN",
+                    "box_high": 0.0, "box_low": 0.0,
+                }
+                logger.warning(f"⚠️  Resumed: {sym} {pos['side']} qty={pos['qty']}")
                 st.add_open_trade({
                     "symbol": sym, "side": pos["side"],
                     "qty": pos["qty"], "entry": pos["entry_price"],
-                    "sl": "dynamic", "tp": None, "margin": 0,
+                    "sl": "?", "tp": "?", "margin": 0, "strategy": "UNKNOWN",
                 })
-                st.add_scan_log(f"Resumed existing position: {sym} {pos['side']}", "WARN")
+            if existing:
+                st.add_scan_log(f"Resumed {len(existing)} position(s)", "WARN")
         except Exception as e:
-            logger.error(f"Startup position sync error: {e}")
+            logger.error(f"Startup sync error: {e}")
 
     def stop(self, *_):
         logger.info("🛑 Stopping bot...")
         st.set_status("STOPPED")
-        st.add_scan_log("Bot stopped", "WARN")
         self.running = False
         sys.exit(0)
 
     def run(self):
         signal.signal(signal.SIGINT,  self.stop)
         signal.signal(signal.SIGTERM, self.stop)
-        logger.info("▶️  Bot running...\n")
+        logger.info("▶️  Running...\n")
 
         while self.running:
             try:
@@ -125,15 +111,15 @@ class MTFBot:
     def _tick(self):
         now = time.time()
 
-        # ── 1. Rescan pairs + sentiment ──────────────────────────── #
+        # ── 1. Rescan ────────────────────────────────────────────── #
         if now - self.last_scan_time >= config.SCAN_INTERVAL_SEC:
             self.qualified_pairs, self.sentiment = get_qualified_pairs_and_sentiment()
             st.update_qualified_pairs(self.qualified_pairs)
             st.update_sentiment(self.sentiment)
             st.add_scan_log(
                 f"Market: {self.sentiment.direction} "
-                f"({self.sentiment.bullish_weight*100:.1f}% green by vol) | "
-                f"🟢{self.sentiment.green_count}  🔴{self.sentiment.red_count} "
+                f"({self.sentiment.bullish_weight*100:.1f}% green) | "
+                f"🟢{self.sentiment.green_count} 🔴{self.sentiment.red_count} "
                 f"of {self.sentiment.total_pairs} pairs",
                 "INFO"
             )
@@ -142,7 +128,7 @@ class MTFBot:
         if not self.qualified_pairs or self.sentiment is None:
             return
 
-        # ── 2. Sync balance ──────────────────────────────────────── #
+        # ── 2. Balance ───────────────────────────────────────────── #
         try:
             balance = tr.get_usdt_balance()
             st.update_balance(balance)
@@ -150,88 +136,81 @@ class MTFBot:
             logger.error(f"Balance error: {e}")
             return
 
-        # ── 3. Monitor active trade ───────────────────────────────── #
-        if self.active_symbol:
+        # ── 3. Monitor active trades ──────────────────────────────  #
+        if self.active_positions:
             try:
-                positions = tr.get_all_open_positions()
+                exchange_positions = tr.get_all_open_positions()
             except Exception as e:
                 logger.error(f"Positions error: {e}")
                 return
 
-            if self.active_symbol in positions:
-                pos = positions[self.active_symbol]
-                st.update_open_trade_pnl(self.active_symbol, pos["unrealised_pnl"])
-                logger.info(
-                    f"📊 [{self.active_symbol}] {pos['side']} | "
-                    f"Entry={pos['entry_price']:.5f} | "
-                    f"uPnL={pos['unrealised_pnl']:+.4f} USDT | "
-                    f"Balance=${balance:.2f} | "
-                    f"Box={self.active_box_low:.5f}–{self.active_box_high:.5f}"
-                )
-                # Primary protection: SL/TP orders are live on Bitget
-                # Secondary: also check if closed candle broke below/above box
-                # (catches cases where SL order may not have triggered cleanly)
-                try:
-                    ltf_df = tr.get_candles(self.active_symbol, config.LTF_INTERVAL, limit=10)
-                    if not ltf_df.empty:
-                        exit_flag, exit_reason = check_exit(
-                            ltf_df,
-                            self.active_side,
-                            self.active_box_high,
-                            self.active_box_low,
-                        )
-                        if exit_flag == "EXIT":
-                            logger.info(f"⚠️  [{self.active_symbol}] Box exit triggered: {exit_reason}")
-                            st.add_scan_log(
-                                f"[{self.active_symbol}] Box broken — SL should trigger on Bitget | {exit_reason}",
-                                "WARN"
+            # Sync pnl + detect closed positions
+            for sym in list(self.active_positions.keys()):
+                if sym in exchange_positions:
+                    pos = exchange_positions[sym]
+                    st.update_open_trade_pnl(sym, pos["unrealised_pnl"])
+                    ap = self.active_positions[sym]
+                    logger.info(
+                        f"📊 [{ap['strategy']}][{sym}] {pos['side']} | "
+                        f"Entry={pos['entry_price']:.5f} | "
+                        f"uPnL={pos['unrealised_pnl']:+.4f} USDT | "
+                        f"Box={ap['box_low']:.5f}–{ap['box_high']:.5f}"
+                    )
+                    # Advisory box-break warning
+                    try:
+                        ltf_df = tr.get_candles(sym, config.LTF_INTERVAL, limit=10)
+                        if not ltf_df.empty:
+                            flag, reason = check_exit(
+                                ltf_df, ap["side"], ap["box_high"], ap["box_low"]
                             )
-                            # Don't force-close here — let Bitget's SL order handle it
-                            # Just warn so we know the box is broken
-                except Exception as e:
-                    logger.error(f"[{self.active_symbol}] Exit check error: {e}")
+                            if flag == "EXIT":
+                                logger.info(f"⚠️  [{sym}] Box broken — SL should trigger: {reason}")
+                                st.add_scan_log(f"[{sym}] Box broken: {reason}", "WARN")
+                    except Exception as e:
+                        logger.error(f"Exit check error [{sym}]: {e}")
+                else:
+                    # Position closed by SL/TP
+                    logger.info(f"✅ [{sym}] Closed (SL/TP)")
+                    st.close_trade(sym, "CLOSED", 0)
+                    st.add_scan_log(f"[{sym}] Trade closed", "INFO")
+                    del self.active_positions[sym]
 
-                return
+        # ── 4. Check if we can open more trades ───────────────────── #
+        open_count = len(self.active_positions)
+        if open_count >= config.MAX_CONCURRENT_TRADES:
+            logger.info(
+                f"⏸️  Max trades reached ({open_count}/{config.MAX_CONCURRENT_TRADES}) — waiting"
+            )
+            return
 
-            else:
-                # Position closed by Bitget (SL or TP hit)
-                logger.info(f"✅ [{self.active_symbol}] Position closed (SL/TP hit)")
-                st.close_trade(self.active_symbol, "CLOSED", 0)
-                st.add_scan_log(f"[{self.active_symbol}] Trade closed (SL/TP hit)", "INFO")
-                self.active_symbol   = None
-                self.active_side     = None
-                self.active_box_high = 0.0
-                self.active_box_low  = 0.0
-
-        # ── 4. Sentiment gate ─────────────────────────────────────── #
+        # ── 5. Sentiment gate ─────────────────────────────────────── #
         direction = self.sentiment.direction
         if direction == "NEUTRAL":
-            logger.info(
-                f"⏸️  Sentiment NEUTRAL ({self.sentiment.bullish_weight*100:.1f}%) — "
-                "waiting for clearer market direction"
-            )
-            st.add_scan_log(
-                f"Sentiment NEUTRAL ({self.sentiment.bullish_weight*100:.1f}% green) — no trades",
-                "WARN"
-            )
+            logger.info(f"⏸️  NEUTRAL — waiting")
             return
 
         allowed = "LONG" if direction == "BULLISH" else "SHORT"
         logger.info(
-            f"🌍 {direction} ({self.sentiment.bullish_weight*100:.1f}% green) "
-            f"— scanning for {allowed} setups"
+            f"🌍 {direction} ({self.sentiment.bullish_weight*100:.1f}%) — "
+            f"scanning {allowed} | {open_count}/{config.MAX_CONCURRENT_TRADES} trades open"
         )
 
-        # ── 5. Scan pairs for entry ───────────────────────────────── #
+        # ── 6. Scan pairs for new entries ─────────────────────────── #
         for symbol in self.qualified_pairs:
             if not self.running:
                 break
+            # Re-check limit inside loop (a trade may have opened this cycle)
+            if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
+                break
+            # Skip symbols already in a trade
+            if symbol in self.active_positions:
+                continue
             try:
                 if self._evaluate_pair(symbol, direction, balance):
-                    break
+                    pass  # keep scanning for more if limit allows
             except RuntimeError as e:
                 if "429" in str(e):
-                    logger.warning(f"Rate limited — backing off 5s")
+                    logger.warning("Rate limited — backing off 5s")
                     time.sleep(5)
                 else:
                     logger.error(f"[{symbol}] Error: {e}", exc_info=True)
@@ -242,95 +221,109 @@ class MTFBot:
     def _evaluate_pair(self, symbol: str, allowed_direction: str, balance: float) -> bool:
         htf_df   = tr.get_candles(symbol, config.HTF_INTERVAL,   limit=10)
         ltf_df   = tr.get_candles(symbol, config.LTF_INTERVAL,   limit=60)
-        daily_df = tr.get_candles(symbol, config.DAILY_INTERVAL, limit=30)
+        daily_df = tr.get_candles(symbol, config.DAILY_INTERVAL, limit=60)
 
         if htf_df.empty or ltf_df.empty or daily_df.empty:
             return False
 
-        signal, rsi, box_high, box_low = evaluate_pair(
+        # ── Strategy 1 ───────────────────────────────────────────── #
+        s1_sig, s1_rsi, s1_bh, s1_bl, s1_adx = evaluate_s1(
             symbol, htf_df, ltf_df, daily_df, allowed_direction
         )
         htf_bull, htf_bear = check_htf(htf_df)
 
-        # Determine reason for logging
-        from strategy import check_daily_ema, calculate_rsi as _rsi, detect_consolidation as _coil
-        ema_ok, price, ema10, ema20 = check_daily_ema(daily_df, "LONG" if allowed_direction == "BULLISH" else "SHORT")
-        rsi_ser = _rsi(ltf_df["close"].astype(float))
+        from strategy import check_daily_trend as _trend
+        trend_ok, adx_val = _trend(daily_df, "LONG" if allowed_direction == "BULLISH" else "SHORT")
+        rsi_ser = calculate_rsi(ltf_df["close"].astype(float))
         rsi_val = float(rsi_ser.iloc[-1])
-        direction_str = "LONG" if allowed_direction == "BULLISH" else "SHORT"
-        thresh = config.RSI_LONG_THRESH if direction_str == "LONG" else config.RSI_SHORT_THRESH
-        is_coil, bh, bl = _coil(ltf_df, rsi_series=rsi_ser, rsi_threshold=thresh, direction=direction_str)
+        thresh  = config.RSI_LONG_THRESH if allowed_direction == "BULLISH" else config.RSI_SHORT_THRESH
+        d_str   = "LONG" if allowed_direction == "BULLISH" else "SHORT"
+        is_coil, bh, bl = detect_consolidation(
+            ltf_df, rsi_series=rsi_ser, rsi_threshold=thresh, direction=d_str
+        )
         close = float(ltf_df["close"].iloc[-1])
-
         htf_pass = htf_bull if allowed_direction == "BULLISH" else htf_bear
-        rsi_ok   = rsi_val > config.RSI_LONG_THRESH if allowed_direction == "BULLISH" else rsi_val < config.RSI_SHORT_THRESH
+        rsi_ok   = rsi_val > config.RSI_LONG_THRESH if allowed_direction == "BULLISH" \
+                   else rsi_val < config.RSI_SHORT_THRESH
 
-        if   not htf_pass: reason = "No HTF break"
-        elif not ema_ok:   reason = f"Daily EMA ❌ price={price:.4f} ema10={ema10:.4f} ema20={ema20:.4f}"
-        elif not rsi_ok:   reason = f"RSI {rsi_val:.1f} {'< 70' if allowed_direction == 'BULLISH' else '> 30'}"
-        elif not is_coil:  reason = "No consolidation"
-        elif signal == "HOLD": reason = "Waiting breakout"
-        else:              reason = f"{'LONG' if signal == 'LONG' else 'SHORT'} ✅"
+        if   not htf_pass:   s1_reason = "No HTF break"
+        elif not trend_ok:   s1_reason = f"ADX={adx_val:.1f} < {config.ADX_TREND_THRESHOLD} (sideways)"
+        elif not rsi_ok:     s1_reason = f"RSI {rsi_val:.1f} not in zone"
+        elif not is_coil:    s1_reason = "No RSI-zone consolidation"
+        elif s1_sig == "HOLD": s1_reason = "Waiting breakout"
+        else:                s1_reason = f"{s1_sig} ✅"
 
         logger.info(
-            f"[{symbol}] RSI={rsi_val:.1f} | "
+            f"[S1][{symbol}] RSI={rsi_val:.1f} | ADX={adx_val:.1f} | "
             f"HTF={'▲' if htf_bull else '▼' if htf_bear else '—'} | "
-            f"EMA={'✓' if ema_ok else '✗'} | "
-            f"Coil={'✓' if is_coil else '✗'} | "
-            f"Signal={signal} | {reason}"
+            f"Coil={'✓' if is_coil else '✗'} | {s1_reason}"
         )
 
+        # ── Strategy 2 (evaluate BEFORE update_pair_state) ───────── #
+        s2_sig, s2_rsi, s2_bh, s2_bl, s2_reason = "HOLD", 50.0, 0.0, 0.0, ""
+        if allowed_direction == "BULLISH":
+            s2_sig, s2_rsi, s2_bh, s2_bl, s2_reason = evaluate_s2(symbol, daily_df)
+            logger.info(f"[S2][{symbol}] daily_RSI={s2_rsi:.1f} | {s2_reason}")
+
         st.update_pair_state(symbol, {
-            "rsi":           rsi_val,
-            "htf_bull":      htf_bull,
-            "htf_bear":      htf_bear,
-            "signal":        signal,
-            "price":         float(tr.get_mark_price(symbol)) if signal != "HOLD" else close,
-            "consolidating": is_coil,
-            "box_high":      round(bh, 6) if bh else None,
-            "box_low":       round(bl, 6) if bl else None,
-            "reason":        reason,
-            "rsi_ok":        rsi_ok,
-            "ema_ok":        ema_ok,
+            "rsi": rsi_val, "htf_bull": htf_bull, "htf_bear": htf_bear,
+            "signal": s1_sig if s1_sig != "HOLD" else s2_sig,
+            "price": close,
+            "consolidating": is_coil, "box_high": round(bh,6) if bh else None,
+            "box_low": round(bl,6) if bl else None,
+            "reason": s1_reason if s2_sig == "HOLD" else s2_reason,
+            "rsi_ok": rsi_ok,
+            "adx": round(adx_val, 1), "trend_ok": trend_ok,
+            "strategy": "S1" if s1_sig != "HOLD" else ("S2" if s2_sig != "HOLD" else "S1"),
+            "s2_daily_rsi": s2_rsi,
+            "s2_big_candle": s2_bh > 0 or "big_candle" in s2_reason,
+            "s2_coiling":    s2_bl > 0 and ("Coiling" in s2_reason or s2_sig == "LONG"),
         })
 
-        if signal == "HOLD":
+        # ── Min balance check ─────────────────────────────────────── #
+        min_bal = 5.0 / (config.TRADE_SIZE_PCT * config.LEVERAGE)
+        if balance < min_bal:
+            st.add_scan_log(f"[{symbol}] Skipped — balance ${balance:.2f} < ${min_bal:.2f}", "WARN")
             return False
 
-        if balance < (5.0 / (config.TRADE_SIZE_PCT * config.LEVERAGE)):
-            st.add_scan_log(f"[{symbol}] Skipped — balance ${balance:.2f} too low", "WARN")
-            return False
-
-        if signal == "LONG":
+        # ── Execute S1 ────────────────────────────────────────────── #
+        if s1_sig in ("LONG", "SHORT"):
             st.add_scan_log(
-                f"[{symbol}] 🟢 LONG | RSI={rsi_val:.1f} | "
-                f"Sentiment BULLISH ({self.sentiment.bullish_weight*100:.1f}%) | "
-                f"Daily EMA ✅ | SL=box_low={box_low:.6f}",
+                f"[S1][{symbol}] {'🟢' if s1_sig == 'LONG' else '🔴'} {s1_sig} | "
+                f"RSI={rsi_val:.1f} ADX={adx_val:.1f} | SL=box",
                 "SIGNAL"
             )
-            trade = tr.open_long(symbol, box_low=box_low)
-            _log_trade("OPEN_LONG", trade)
+            if s1_sig == "LONG":
+                trade = tr.open_long(symbol, box_low=s1_bl, leverage=config.LEVERAGE,
+                                     trade_size_pct=config.TRADE_SIZE_PCT,
+                                     take_profit_pct=config.TAKE_PROFIT_PCT)
+            else:
+                trade = tr.open_short(symbol, box_high=s1_bh, leverage=config.LEVERAGE,
+                                      trade_size_pct=config.TRADE_SIZE_PCT,
+                                      take_profit_pct=config.TAKE_PROFIT_PCT)
+            trade["strategy"] = "S1"
+            _log_trade(f"S1_{s1_sig}", trade)
             st.add_open_trade(trade)
-            self.active_symbol   = symbol
-            self.active_side     = "LONG"
-            self.active_box_high = box_high
-            self.active_box_low  = box_low
+            self.active_positions[symbol] = {
+                "side": s1_sig, "strategy": "S1",
+                "box_high": s1_bh, "box_low": s1_bl,
+            }
             return True
 
-        if signal == "SHORT":
-            st.add_scan_log(
-                f"[{symbol}] 🔴 SHORT | RSI={rsi_val:.1f} | "
-                f"Sentiment BEARISH ({self.sentiment.bullish_weight*100:.1f}%) | "
-                f"Daily EMA ✅ | SL=box_high={box_high:.6f}",
-                "SIGNAL"
-            )
-            trade = tr.open_short(symbol, box_high=box_high)
-            _log_trade("OPEN_SHORT", trade)
+        # ── Execute S2 ────────────────────────────────────────────── #
+        if s2_sig == "LONG":
+            from config_s2 import S2_LEVERAGE, S2_TRADE_SIZE_PCT, S2_TAKE_PROFIT_PCT
+            st.add_scan_log(f"[S2][{symbol}] 🟢 LONG | {s2_reason}", "SIGNAL")
+            trade = tr.open_long(symbol, box_low=s2_bl, leverage=S2_LEVERAGE,
+                                 trade_size_pct=S2_TRADE_SIZE_PCT,
+                                 take_profit_pct=S2_TAKE_PROFIT_PCT)
+            trade["strategy"] = "S2"
+            _log_trade("S2_LONG", trade)
             st.add_open_trade(trade)
-            self.active_symbol   = symbol
-            self.active_side     = "SHORT"
-            self.active_box_high = box_high
-            self.active_box_low  = box_low
+            self.active_positions[symbol] = {
+                "side": "LONG", "strategy": "S2",
+                "box_high": s2_bh if s2_bh else 0.0, "box_low": s2_bl,
+            }
             return True
 
         return False

@@ -33,22 +33,46 @@ def get_state():
 @app.get("/api/candles/{symbol}")
 def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
     """
-    Returns OHLCV candles for a symbol, used by the chart modal.
-    Also returns consolidation box and breakout trigger line levels.
+    Returns OHLCV candles + consolidation box + trigger lines.
+    For 3m (S1): uses RSI-zone consolidation detection.
+    For 1D (S2): uses daily RSI + S2 consolidation + entry trigger logic.
     """
     try:
         import trader as tr
         import config
-        from strategy import detect_consolidation, calculate_rsi
+        from strategy import detect_consolidation, calculate_rsi, evaluate_s2
 
-        df = tr.get_candles(symbol, interval, limit=limit)
-        if df.empty:
+        # Fetch extra candles for indicator warmup (EMA/ADX need history to converge)
+        # Then trim to display_limit for the chart
+        is_daily      = interval in ("1D", "1d")
+        display_limit = 80 if is_daily else limit
+        warmup        = 200   # extra candles for indicator warmup
+        fetch_total   = display_limit + warmup
+
+        df_full = tr.get_candles(symbol, interval, limit=fetch_total)
+        if df_full.empty:
             return JSONResponse({"error": "No candle data"})
 
-        # Build lightweight-charts compatible format
+        # Compute all indicators on full history
+        closes_full = df_full["close"].astype(float)
+
+        # Trim to display window AFTER computing indicators
+        df = df_full.tail(display_limit).reset_index(drop=True)
+        closes = df["close"].astype(float)
+
+        # Determine price decimal precision from the data
+        sample_price = float(df["close"].iloc[-1])
+        if sample_price < 0.0001:    price_decimals = 8
+        elif sample_price < 0.01:    price_decimals = 6
+        elif sample_price < 1:       price_decimals = 5
+        elif sample_price < 10:      price_decimals = 4
+        elif sample_price < 1000:    price_decimals = 3
+        else:                        price_decimals = 2
+
+        # lightweight-charts needs UTC seconds
         candles = [
             {
-                "time": int(row["ts"]) // 1000,  # seconds
+                "time":  int(row["ts"]) // 1000,
                 "open":  float(row["open"]),
                 "high":  float(row["high"]),
                 "low":   float(row["low"]),
@@ -57,19 +81,102 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
             for _, row in df.iterrows()
         ]
 
-        # RSI series
-        closes = df["close"].astype(float)
-        rsi_series_raw = calculate_rsi(closes)
-        rsi_series = [
-            {"time": int(df["ts"].iloc[i]) // 1000, "value": round(float(v), 2)}
-            for i, v in enumerate(rsi_series_raw)
-            if not (v != v)  # skip NaN
+        # RSI — compute on full history, slice to display window
+        rsi_full = calculate_rsi(closes_full)
+        rsi_display = rsi_full.tail(display_limit)
+        rsi_series = []
+        for i, v in enumerate(rsi_display):
+            t = int(df["ts"].iloc[i]) // 1000
+            if v != v:
+                continue
+            rsi_series.append({"time": t, "value": round(float(v), 2)})
+
+        from strategy import calculate_ema, calculate_adx as _calc_adx
+        ema10_full = calculate_ema(closes_full, 10).tail(display_limit)
+        ema20_full = calculate_ema(closes_full, 20).tail(display_limit)
+        ema10 = [
+            {"time": int(df["ts"].iloc[i]) // 1000, "value": round(float(v), 8)}
+            for i, v in enumerate(ema10_full) if not (v != v)
+        ]
+        ema20 = [
+            {"time": int(df["ts"].iloc[i]) // 1000, "value": round(float(v), 8)}
+            for i, v in enumerate(ema20_full) if not (v != v)
         ]
 
-        # Consolidation box
-        is_coil, box_high, box_low = detect_consolidation(df)
-        breakout_long  = round(box_high * (1 + config.BREAKOUT_BUFFER_PCT), 8) if box_high else None
-        breakout_short = round(box_low  * (1 - config.BREAKOUT_BUFFER_PCT), 8) if box_low  else None
+        # ADX, +DI, -DI — compute on full history, slice to display window
+        adx_result   = _calc_adx(df_full, period=14)
+        adx_display  = adx_result["adx"].tail(display_limit)
+        pdi_display  = adx_result["plus_di"].tail(display_limit)
+        mdi_display  = adx_result["minus_di"].tail(display_limit)
+        adx_data = [
+            {"time": int(df["ts"].iloc[i]) // 1000, "value": round(float(v), 2)}
+            for i, v in enumerate(adx_display) if not (v != v)
+        ]
+        plus_di_data = [
+            {"time": int(df["ts"].iloc[i]) // 1000, "value": round(float(v), 2)}
+            for i, v in enumerate(pdi_display) if not (v != v)
+        ]
+        minus_di_data = [
+            {"time": int(df["ts"].iloc[i]) // 1000, "value": round(float(v), 2)}
+            for i, v in enumerate(mdi_display) if not (v != v)
+        ]
+
+        # Consolidation box + trigger
+        is_coil       = False
+        box_high      = None
+        box_low       = None
+        breakout_long = None
+        breakout_short= None
+
+        if is_daily:
+            # S2 — use evaluate_s2 to get exact box and trigger
+            sig, daily_rsi, bh, bl, reason = evaluate_s2(symbol, df)
+            # Also check consolidation even if no full signal yet
+            # Try to find coil regardless of big candle (for chart display)
+            from config_s2 import S2_CONSOL_CANDLES, S2_CONSOL_RANGE_PCT, S2_RSI_LONG_THRESH, S2_BREAKOUT_BUFFER, S2_LONG_WICK_RATIO
+            daily_rsi_val = float(rsi_full.iloc[-1])
+            if daily_rsi_val > S2_RSI_LONG_THRESH:
+                for n in range(1, S2_CONSOL_CANDLES + 1):
+                    window = df.iloc[-n - 1:-1]
+                    if len(window) < n:
+                        continue
+                    wh  = float(window["high"].max())
+                    wl  = float(window["low"].min())
+                    mid = (wh + wl) / 2
+                    if mid == 0:
+                        continue
+                    range_pct = (wh - wl) / mid
+                    if range_pct > S2_CONSOL_RANGE_PCT:
+                        continue
+                    window_rsi = rsi_full.iloc[-n - 1:-1]
+                    if not (window_rsi > S2_RSI_LONG_THRESH).all():
+                        continue
+                    # Found coil
+                    is_coil  = True
+                    box_high = round(wh, 8)
+                    box_low  = round(wl, 8)
+                    # Entry trigger
+                    high_candle = window.loc[window["high"].idxmax()]
+                    uw   = float(high_candle["high"]) - max(float(high_candle["close"]), float(high_candle["open"]))
+                    body = abs(float(high_candle["close"]) - float(high_candle["open"]))
+                    if uw > S2_LONG_WICK_RATIO * body:
+                        body_top      = max(float(high_candle["close"]), float(high_candle["open"]))
+                        breakout_long = round(body_top * (1 + S2_BREAKOUT_BUFFER), 8)
+                    else:
+                        breakout_long = round(float(high_candle["high"]) * (1 + S2_BREAKOUT_BUFFER), 8)
+                    break
+        else:
+            # S1 — RSI-zone aware consolidation on 3m
+            rsi_thresh = config.RSI_LONG_THRESH
+            direction  = "LONG"  # default; show long setup
+            is_coil, bh, bl = detect_consolidation(
+                df, rsi_series=rsi_full, rsi_threshold=rsi_thresh, direction=direction
+            )
+            if bh:
+                box_high       = round(bh, 8)
+                box_low        = round(bl, 8)
+                breakout_long  = round(bh * (1 + config.BREAKOUT_BUFFER_PCT), 8)
+                breakout_short = round(bl * (1 - config.BREAKOUT_BUFFER_PCT), 8)
 
         # Current mark price
         try:
@@ -78,22 +185,29 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
             mark = float(df["close"].iloc[-1])
 
         return JSONResponse({
-            "symbol":          symbol,
-            "interval":        interval,
-            "candles":         candles,
-            "rsi":             rsi_series,
-            "consolidating":   is_coil,
-            "box_high":        round(box_high,  8) if box_high  else None,
-            "box_low":         round(box_low,   8) if box_low   else None,
-            "breakout_long":   breakout_long,
-            "breakout_short":  breakout_short,
-            "mark_price":      mark,
+            "symbol":           symbol,
+            "interval":         interval,
+            "candles":          candles,
+            "rsi":              rsi_series,
+            "ema10":            ema10,
+            "ema20":            ema20,
+            "adx":              adx_data,
+            "plus_di":          plus_di_data,
+            "minus_di":         minus_di_data,
+            "consolidating":    is_coil,
+            "box_high":         box_high,
+            "box_low":          box_low,
+            "breakout_long":    breakout_long,
+            "breakout_short":   breakout_short,
+            "mark_price":       mark,
+            "price_decimals":   price_decimals,
             "rsi_long_thresh":  config.RSI_LONG_THRESH,
             "rsi_short_thresh": config.RSI_SHORT_THRESH,
         })
 
     except Exception as e:
-        return JSONResponse({"error": str(e)})
+        import traceback
+        return JSONResponse({"error": str(e), "trace": traceback.format_exc()})
 
 
 @app.get("/", response_class=HTMLResponse)

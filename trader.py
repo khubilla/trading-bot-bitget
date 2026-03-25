@@ -1,13 +1,8 @@
 """
 trader.py — Bitget USDT Futures API Wrapper
 
-SL is placed as a real order on Bitget at:
-  LONG:  box_low  (the bottom of the consolidation box)
-  SHORT: box_high (the top of the consolidation box)
-
-TP is placed at:
-  LONG:  entry * (1 + TAKE_PROFIT_PCT)
-  SHORT: entry * (1 - TAKE_PROFIT_PCT)
+open_long() and open_short() now accept explicit leverage, trade_size_pct,
+and take_profit_pct so Strategy 1 and Strategy 2 can use different risk params.
 """
 
 import math
@@ -15,13 +10,12 @@ import logging
 import pandas as pd
 import bitget_client as bc
 from config import (
-    PRODUCT_TYPE, MARGIN_COIN, LEVERAGE,
-    TRADE_SIZE_PCT, TAKE_PROFIT_PCT,
+    PRODUCT_TYPE, MARGIN_COIN,
+    LEVERAGE, TRADE_SIZE_PCT, TAKE_PROFIT_PCT,
     HTF_INTERVAL, LTF_INTERVAL,
 )
 
 logger = logging.getLogger(__name__)
-
 _sym_cache: dict[str, dict] = {}
 
 
@@ -31,10 +25,7 @@ def _load_symbol_cache():
     global _sym_cache
     if _sym_cache:
         return
-    data = bc.get_public(
-        "/api/v2/mix/market/contracts",
-        params={"productType": PRODUCT_TYPE}
-    )
+    data = bc.get_public("/api/v2/mix/market/contracts", params={"productType": PRODUCT_TYPE})
     for s in data.get("data", []):
         _sym_cache[s["symbol"]] = {
             "price_place":   int(s.get("pricePlace",   2)),
@@ -47,15 +38,12 @@ def _load_symbol_cache():
 
 def _sym_info(symbol: str) -> dict:
     _load_symbol_cache()
-    return _sym_cache.get(symbol, {
-        "price_place": 2, "volume_place": 3,
-        "size_mult": 0.001, "min_trade_num": 0.001
-    })
+    return _sym_cache.get(symbol, {"price_place": 2, "volume_place": 3,
+                                    "size_mult": 0.001, "min_trade_num": 0.001})
 
 
 def _round_price(price: float, symbol: str) -> str:
-    pp = _sym_info(symbol)["price_place"]
-    return str(round(price, pp))
+    return str(round(price, _sym_info(symbol)["price_place"]))
 
 
 def _round_qty(qty: float, symbol: str) -> str:
@@ -63,8 +51,7 @@ def _round_qty(qty: float, symbol: str) -> str:
     mult = info["size_mult"]
     qty  = math.floor(qty / mult) * mult
     qty  = max(qty, info["min_trade_num"])
-    vp   = info["volume_place"]
-    return str(round(qty, vp))
+    return str(round(qty, info["volume_place"]))
 
 
 # ── Market Data ───────────────────────────────────────────────────── #
@@ -72,30 +59,21 @@ def _round_qty(qty: float, symbol: str) -> str:
 def get_candles(symbol: str, interval: str, limit: int = 100) -> pd.DataFrame:
     data = bc.get_public(
         "/api/v2/mix/market/candles",
-        params={
-            "symbol":      symbol,
-            "productType": PRODUCT_TYPE,
-            "granularity": interval,
-            "limit":       str(limit),
-        }
+        params={"symbol": symbol, "productType": PRODUCT_TYPE,
+                "granularity": interval, "limit": str(limit)}
     )
     rows = data.get("data", [])
     if not rows:
         return pd.DataFrame()
-
-    df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "vol", "quote_vol"])
-    df[["open", "high", "low", "close", "vol"]] = \
-        df[["open", "high", "low", "close", "vol"]].astype(float)
+    df = pd.DataFrame(rows, columns=["ts","open","high","low","close","vol","quote_vol"])
+    df[["open","high","low","close","vol"]] = df[["open","high","low","close","vol"]].astype(float)
     df["ts"] = df["ts"].astype(int)
-    df = df.sort_values("ts").reset_index(drop=True)
-    return df
+    return df.sort_values("ts").reset_index(drop=True)
 
 
 def get_mark_price(symbol: str) -> float:
-    data = bc.get_public(
-        "/api/v2/mix/market/symbol-price",
-        params={"symbol": symbol, "productType": PRODUCT_TYPE}
-    )
+    data = bc.get_public("/api/v2/mix/market/symbol-price",
+                         params={"symbol": symbol, "productType": PRODUCT_TYPE})
     return float(data["data"][0]["markPrice"])
 
 
@@ -103,25 +81,22 @@ def get_mark_price(symbol: str) -> float:
 
 def get_usdt_balance() -> float:
     data = bc.get("/api/v2/mix/account/accounts", params={"productType": PRODUCT_TYPE})
-    for acct in data.get("data", []):
-        if acct.get("marginCoin") == MARGIN_COIN:
-            return float(acct.get("available", 0))
+    for a in data.get("data", []):
+        if a.get("marginCoin") == MARGIN_COIN:
+            return float(a.get("available", 0))
     return 0.0
 
 
 def get_all_open_positions() -> dict[str, dict]:
-    data = bc.get(
-        "/api/v2/mix/position/all-position",
-        params={"productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN}
-    )
+    data = bc.get("/api/v2/mix/position/all-position",
+                  params={"productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN})
     result = {}
     for p in data.get("data", []):
         total = float(p.get("total", 0))
         if total <= 0:
             continue
-        side = p.get("holdSide", "long")
         result[p["symbol"]] = {
-            "side":           side.upper(),
+            "side":           p.get("holdSide","long").upper(),
             "entry_price":    float(p.get("openPriceAvg", 0)),
             "qty":            total,
             "unrealised_pnl": float(p.get("unrealizedPL", 0)),
@@ -131,32 +106,28 @@ def get_all_open_positions() -> dict[str, dict]:
 
 # ── Leverage ──────────────────────────────────────────────────────── #
 
-def set_leverage(symbol: str):
+def set_leverage(symbol: str, leverage: int):
+    """Sets leverage for both sides. Always uses the passed leverage value."""
     for hold_side in ("long", "short"):
         try:
             bc.post("/api/v2/mix/account/set-leverage", {
                 "symbol":      symbol,
                 "productType": PRODUCT_TYPE,
                 "marginCoin":  MARGIN_COIN,
-                "leverage":    str(LEVERAGE),
+                "leverage":    str(leverage),
                 "holdSide":    hold_side,
             })
+            logger.debug(f"[{symbol}] Leverage set to {leverage}x ({hold_side})")
         except Exception as e:
             logger.warning(f"[{symbol}] set_leverage({hold_side}) warn: {e}")
 
 
-# ── Order Placement ───────────────────────────────────────────────── #
+# ── TP/SL Placement ───────────────────────────────────────────────── #
 
-def _calculate_qty(symbol: str, mark_price: float, balance: float) -> str:
-    notional = balance * TRADE_SIZE_PCT * LEVERAGE
-    qty      = notional / mark_price
-    return _round_qty(qty, symbol)
-
-
-def _place_tpsl(symbol: str, hold_side: str, tp_trig: float, tp_exec: float,
+def _place_tpsl(symbol: str, hold_side: str,
+                tp_trig: float, tp_exec: float,
                 sl_trig: float, sl_exec: float) -> bool:
-    """Places TP and SL as position-level orders. Retries 3 times."""
-    import time as _time
+    import time as _t
     for attempt in range(3):
         try:
             bc.post("/api/v2/mix/order/place-pos-tpsl", {
@@ -173,122 +144,114 @@ def _place_tpsl(symbol: str, hold_side: str, tp_trig: float, tp_exec: float,
             })
             return True
         except Exception as e:
-            logger.warning(f"[{symbol}] TP/SL attempt {attempt + 1}/3: {e}")
+            logger.warning(f"[{symbol}] TP/SL attempt {attempt+1}/3: {e}")
             if attempt < 2:
-                _time.sleep(1.5)
+                _t.sleep(1.5)
     return False
 
 
-def open_long(symbol: str, box_low: float) -> dict:
+# ── Order Placement ───────────────────────────────────────────────── #
+
+def open_long(
+    symbol: str,
+    box_low: float,
+    leverage: int        = LEVERAGE,
+    trade_size_pct: float = TRADE_SIZE_PCT,
+    take_profit_pct: float = TAKE_PROFIT_PCT,
+) -> dict:
     """
     Opens a LONG position.
-    SL = box_low (bottom of consolidation box, with small buffer)
-    TP = entry * (1 + TAKE_PROFIT_PCT)
+    SL = box_low * 0.999  (just below the consolidation box)
+    TP = entry * (1 + take_profit_pct)
+    Leverage is explicitly set before the order.
     """
-    import time as _time
-    balance = get_usdt_balance()
-    mark    = get_mark_price(symbol)
-    qty     = _calculate_qty(symbol, mark, balance)
+    import time as _t
+    balance  = get_usdt_balance()
+    mark     = get_mark_price(symbol)
+    notional = balance * trade_size_pct * leverage
+    qty      = _round_qty(notional / mark, symbol)
 
-    # TP above entry
-    tp_trig = float(_round_price(mark * (1 + TAKE_PROFIT_PCT), symbol))
-    tp_exec = float(_round_price(tp_trig * 1.005, symbol))
+    tp_trig  = float(_round_price(mark * (1 + take_profit_pct), symbol))
+    tp_exec  = float(_round_price(tp_trig * 1.005, symbol))
+    sl_trig  = float(_round_price(box_low * 0.999, symbol))
+    sl_exec  = float(_round_price(sl_trig * 0.995, symbol))
 
-    # SL = box_low with 0.1% buffer below (to avoid noise triggers right at the line)
-    sl_trig = float(_round_price(box_low * 0.999, symbol))
-    sl_exec = float(_round_price(sl_trig * 0.995, symbol))  # market fill buffer
+    # Set leverage BEFORE placing order
+    set_leverage(symbol, leverage)
 
-    set_leverage(symbol)
-
-    # 1. Market buy
     bc.post("/api/v2/mix/order/place-order", {
-        "symbol":      symbol,
-        "productType": PRODUCT_TYPE,
-        "marginMode":  "isolated",
-        "marginCoin":  MARGIN_COIN,
-        "size":        qty,
-        "side":        "buy",
-        "tradeSide":   "open",
-        "orderType":   "market",
-        "force":       "ioc",
+        "symbol": symbol, "productType": PRODUCT_TYPE,
+        "marginMode": "isolated", "marginCoin": MARGIN_COIN,
+        "size": qty, "side": "buy", "tradeSide": "open",
+        "orderType": "market", "force": "ioc",
     })
 
-    # 2. Wait for position to register on Bitget's side
-    _time.sleep(2.0)
+    _t.sleep(2.0)
 
-    # 3. Place TP + SL
-    tpsl_ok = _place_tpsl(symbol, "long", tp_trig, tp_exec, sl_trig, sl_exec)
-    if not tpsl_ok:
-        logger.error(f"[{symbol}] ⚠️  TP/SL failed — SET MANUALLY on Bitget! SL={sl_trig} TP={tp_trig}")
+    ok = _place_tpsl(symbol, "long", tp_trig, tp_exec, sl_trig, sl_exec)
+    if not ok:
+        logger.error(f"[{symbol}] ⚠️  TP/SL failed! Set manually: SL={sl_trig} TP={tp_trig}")
 
     result = {
         "symbol": symbol, "side": "LONG", "qty": qty,
         "entry": mark, "sl": sl_trig, "tp": tp_trig,
-        "box_low": box_low,
-        "margin": round(balance * TRADE_SIZE_PCT, 4),
-        "tpsl_set": tpsl_ok,
+        "box_low": box_low, "leverage": leverage,
+        "margin": round(balance * trade_size_pct, 4), "tpsl_set": ok,
     }
     logger.info(
-        f"[{symbol}] 🟢 LONG | qty={qty} entry≈{mark} "
-        f"SL={sl_trig} (box_low={box_low}) TP={tp_trig} | "
-        f"tpsl={'✅' if tpsl_ok else '❌ SET MANUALLY'}"
+        f"[{symbol}] 🟢 LONG {leverage}x | qty={qty} entry≈{mark:.5f} "
+        f"SL={sl_trig} TP={tp_trig} | {'✅' if ok else '❌ SET MANUALLY'}"
     )
     return result
 
 
-def open_short(symbol: str, box_high: float) -> dict:
+def open_short(
+    symbol: str,
+    box_high: float,
+    leverage: int         = LEVERAGE,
+    trade_size_pct: float  = TRADE_SIZE_PCT,
+    take_profit_pct: float = TAKE_PROFIT_PCT,
+) -> dict:
     """
     Opens a SHORT position.
-    SL = box_high (top of consolidation box, with small buffer)
-    TP = entry * (1 - TAKE_PROFIT_PCT)
+    SL = box_high * 1.001 (just above the consolidation box)
+    TP = entry * (1 - take_profit_pct)
     """
-    import time as _time
-    balance = get_usdt_balance()
-    mark    = get_mark_price(symbol)
-    qty     = _calculate_qty(symbol, mark, balance)
+    import time as _t
+    balance  = get_usdt_balance()
+    mark     = get_mark_price(symbol)
+    notional = balance * trade_size_pct * leverage
+    qty      = _round_qty(notional / mark, symbol)
 
-    # TP below entry
-    tp_trig = float(_round_price(mark * (1 - TAKE_PROFIT_PCT), symbol))
-    tp_exec = float(_round_price(tp_trig * 0.995, symbol))
+    tp_trig  = float(_round_price(mark * (1 - take_profit_pct), symbol))
+    tp_exec  = float(_round_price(tp_trig * 0.995, symbol))
+    sl_trig  = float(_round_price(box_high * 1.001, symbol))
+    sl_exec  = float(_round_price(sl_trig * 1.005, symbol))
 
-    # SL = box_high with 0.1% buffer above
-    sl_trig = float(_round_price(box_high * 1.001, symbol))
-    sl_exec = float(_round_price(sl_trig * 1.005, symbol))
+    set_leverage(symbol, leverage)
 
-    set_leverage(symbol)
-
-    # 1. Market sell
     bc.post("/api/v2/mix/order/place-order", {
-        "symbol":      symbol,
-        "productType": PRODUCT_TYPE,
-        "marginMode":  "isolated",
-        "marginCoin":  MARGIN_COIN,
-        "size":        qty,
-        "side":        "sell",
-        "tradeSide":   "open",
-        "orderType":   "market",
-        "force":       "ioc",
+        "symbol": symbol, "productType": PRODUCT_TYPE,
+        "marginMode": "isolated", "marginCoin": MARGIN_COIN,
+        "size": qty, "side": "sell", "tradeSide": "open",
+        "orderType": "market", "force": "ioc",
     })
 
-    # 2. Wait for position to register
-    _time.sleep(2.0)
+    _t.sleep(2.0)
 
-    # 3. Place TP + SL
-    tpsl_ok = _place_tpsl(symbol, "short", tp_trig, tp_exec, sl_trig, sl_exec)
-    if not tpsl_ok:
-        logger.error(f"[{symbol}] ⚠️  TP/SL failed — SET MANUALLY on Bitget! SL={sl_trig} TP={tp_trig}")
+    ok = _place_tpsl(symbol, "short", tp_trig, tp_exec, sl_trig, sl_exec)
+    if not ok:
+        logger.error(f"[{symbol}] ⚠️  TP/SL failed! Set manually: SL={sl_trig} TP={tp_trig}")
 
     result = {
         "symbol": symbol, "side": "SHORT", "qty": qty,
         "entry": mark, "sl": sl_trig, "tp": tp_trig,
-        "box_high": box_high,
-        "margin": round(balance * TRADE_SIZE_PCT, 4),
-        "tpsl_set": tpsl_ok,
+        "box_high": box_high, "leverage": leverage,
+        "margin": round(balance * trade_size_pct, 4), "tpsl_set": ok,
     }
     logger.info(
-        f"[{symbol}] 🔴 SHORT | qty={qty} entry≈{mark} "
-        f"SL={sl_trig} (box_high={box_high}) TP={tp_trig} | "
-        f"tpsl={'✅' if tpsl_ok else '❌ SET MANUALLY'}"
+        f"[{symbol}] 🔴 SHORT {leverage}x | qty={qty} entry≈{mark:.5f} "
+        f"SL={sl_trig} TP={tp_trig} | {'✅' if ok else '❌ SET MANUALLY'}"
     )
     return result
 
@@ -296,9 +259,7 @@ def open_short(symbol: str, box_high: float) -> dict:
 def cancel_all_orders(symbol: str):
     try:
         bc.post("/api/v2/mix/order/cancel-all-orders", {
-            "symbol":      symbol,
-            "productType": PRODUCT_TYPE,
-            "marginCoin":  MARGIN_COIN,
+            "symbol": symbol, "productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN,
         })
     except Exception as e:
-        logger.warning(f"[{symbol}] cancel_all_orders warn: {e}")
+        logger.warning(f"[{symbol}] cancel orders warn: {e}")

@@ -17,7 +17,7 @@ S2_BIG_CANDLE_LOOKBACK  = 30     # Search last 30 daily candles for the big cand
 # ── Daily Consolidation ──────────────────────────────────── #
 S2_RSI_LONG_THRESH  = 70
 S2_CONSOL_CANDLES   = 5          # Max 5 tight daily candles (tries 1 to 5)
-S2_CONSOL_RANGE_PCT = 0.05       # Max 5% range to count as tight consolidation
+S2_CONSOL_RANGE_PCT = 0.15       # Max 15% range to count as tight consolidation
 
 # ── Entry Trigger ────────────────────────────────────────── #
 S2_BREAKOUT_BUFFER  = 0.001      # 0.1% buffer above box high for entry

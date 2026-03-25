@@ -425,9 +425,26 @@ def evaluate_s2(
         if mid == 0:
             continue
 
-        range_pct = (wh - wl) / mid
-        if range_pct > S2_CONSOL_RANGE_PCT:
-            continue  # too wide — try fewer candles
+        # ── Inside-bar consolidation check ──────────────────────
+        # All candles in window must be inside the range of the candle
+        # just before the window (the "mother candle" after the big move)
+        mother = daily_df.iloc[-n - 2] if len(daily_df) > n + 1 else None
+        if mother is not None:
+            mother_h = float(mother["high"])
+            mother_l = float(mother["low"])
+            # Each candle in window must be contained within mother's range
+            all_inside = all(
+                float(row["high"]) <= mother_h * 1.02 and  # 2% tolerance
+                float(row["low"])  >= mother_l * 0.98
+                for _, row in window.iterrows()
+            )
+            if not all_inside:
+                continue
+        else:
+            # Fallback to range_pct if no mother candle
+            range_pct = (wh - wl) / mid
+            if range_pct > S2_CONSOL_RANGE_PCT:
+                continue
 
         # RSI must have been > 70 throughout this consolidation window
         window_rsi = rsi_ser.iloc[-n - 1:-1]

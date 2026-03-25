@@ -221,7 +221,7 @@ class MTFBot:
     def _evaluate_pair(self, symbol: str, allowed_direction: str, balance: float) -> bool:
         htf_df   = tr.get_candles(symbol, config.HTF_INTERVAL,   limit=10)
         ltf_df   = tr.get_candles(symbol, config.LTF_INTERVAL,   limit=60)
-        daily_df = tr.get_candles(symbol, config.DAILY_INTERVAL, limit=60)
+        daily_df = tr.get_candles(symbol, config.DAILY_INTERVAL, limit=150)
 
         if htf_df.empty or ltf_df.empty or daily_df.empty:
             return False
@@ -271,7 +271,8 @@ class MTFBot:
             "price": close,
             "consolidating": is_coil, "box_high": round(bh,6) if bh else None,
             "box_low": round(bl,6) if bl else None,
-            "reason": s1_reason if s2_sig == "HOLD" else s2_reason,
+            "reason":    s1_reason,
+            "s2_reason": s2_reason,
             "rsi_ok": rsi_ok,
             "adx": round(adx_val, 1), "trend_ok": trend_ok,
             "strategy": "S1" if s1_sig != "HOLD" else ("S2" if s2_sig != "HOLD" else "S1"),

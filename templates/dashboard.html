@@ -1012,7 +1012,7 @@ function renderPairGrid(s) {
       const htfBull  = ps.htf_bull  || false;
       const htfBear  = ps.htf_bear  || false;
       const coil     = ps.consolidating || false;
-      const reason   = ps.reason || '—';
+      const reason   = activeTab === 's2' ? (ps.s2_reason || ps.reason || '—') : (ps.reason || '—');
       const rsiOk    = ps.rsi_ok    || false;
       const emaOk    = ps.ema_ok    || false;
       const adxVal   = ps.adx       != null ? ps.adx : null;

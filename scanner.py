@@ -75,8 +75,8 @@ def get_qualified_pairs_and_sentiment() -> tuple[list[str], SentimentResult]:
         except (ValueError, TypeError):
             continue
 
-        if lastPr > 200:
-            continue
+        # if lastPr > 200:
+        #     continue
 
         if vol_usdt < MIN_VOLUME_USDT:
             continue

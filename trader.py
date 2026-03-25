@@ -57,6 +57,8 @@ def _round_qty(qty: float, symbol: str) -> str:
 # ── Market Data ───────────────────────────────────────────────────── #
 
 def get_candles(symbol: str, interval: str, limit: int = 100) -> pd.DataFrame:
+    if interval in ("1D", "1d"):
+        return get_daily_candles_utc(symbol, limit)
     data = bc.get_public(
         "/api/v2/mix/market/candles",
         params={"symbol": symbol, "productType": PRODUCT_TYPE,
@@ -68,6 +70,31 @@ def get_candles(symbol: str, interval: str, limit: int = 100) -> pd.DataFrame:
     df = pd.DataFrame(rows, columns=["ts","open","high","low","close","vol","quote_vol"])
     df[["open","high","low","close","vol"]] = df[["open","high","low","close","vol"]].astype(float)
     df["ts"] = df["ts"].astype(int)
+    return df.sort_values("ts").reset_index(drop=True)
+
+
+_ccxt_ex = None
+
+def get_daily_candles_utc(symbol: str, limit: int = 100) -> pd.DataFrame:
+    """
+    Fetch 1D candles via ccxt — matches TradingView exactly (UTC midnight boundaries).
+    Uses cached exchange instance to avoid reloading markets on every call.
+    """
+    import ccxt
+    global _ccxt_ex
+    if _ccxt_ex is None:
+        _ccxt_ex = ccxt.bitget({"options": {"defaultType": "swap"}})
+        _ccxt_ex.load_markets()
+
+    base = symbol.replace("USDT", "")
+    ccxt_symbol = f"{base}/USDT:USDT"
+    ohlcv = _ccxt_ex.fetch_ohlcv(ccxt_symbol, "1d", limit=limit)
+    if not ohlcv:
+        return pd.DataFrame()
+    rows = [{"ts": c[0], "open": float(c[1]), "high": float(c[2]),
+             "low": float(c[3]), "close": float(c[4]), "vol": float(c[5])}
+            for c in ohlcv]
+    df = pd.DataFrame(rows)
     return df.sort_values("ts").reset_index(drop=True)
 
 

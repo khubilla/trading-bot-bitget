@@ -74,12 +74,6 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
         # on the correct UTC+8 date (matching TradingView).
         # All series (candles, RSI, EMA, ADX) use the same offset.
         def ts(row_ts):
-            if is_daily:
-                # For 1D: pass date string "YYYY-MM-DD" in UTC+8
-                # Bitget 1D opens at 16:00 UTC = 00:00 UTC+8, so +8h gives the correct date
-                from datetime import datetime, timezone, timedelta
-                dt = datetime.fromtimestamp(int(row_ts) // 1000, tz=timezone.utc) 
-                return dt.strftime("%Y-%m-%d")
             return int(row_ts) // 1000
 
         candles = [
@@ -156,9 +150,20 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
                     mid = (wh + wl) / 2
                     if mid == 0:
                         continue
-                    range_pct = (wh - wl) / mid
-                    if range_pct > S2_CONSOL_RANGE_PCT:
-                        continue
+                    # Inside-bar check: all candles must be within mother candle's range
+                    mother = df.iloc[-n - 2] if len(df) > n + 1 else None
+                    if mother is not None:
+                        mh = float(mother["high"])
+                        ml = float(mother["low"])
+                        all_inside = all(
+                            float(r["high"]) <= mh * 1.02 and float(r["low"]) >= ml * 0.98
+                            for _, r in window.iterrows()
+                        )
+                        if not all_inside:
+                            continue
+                    else:
+                        if (wh - wl) / mid > S2_CONSOL_RANGE_PCT:
+                            continue
                     window_rsi = rsi_full.iloc[-n - 1:-1]
                     if not (window_rsi > S2_RSI_LONG_THRESH).all():
                         continue

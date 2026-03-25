@@ -803,6 +803,10 @@
       </div>
       <div class="chart-modal-meta">
         <span><span class="lbl" style="font-size:9px;color:var(--muted)">PRICE</span><span class="v" id="chartPrice">—</span></span>
+        <span><span class="lbl" style="font-size:9px;color:var(--muted)">O</span><span class="v" id="chartO" style="color:#a0b4c8">—</span></span>
+        <span><span class="lbl" style="font-size:9px;color:var(--muted)">H</span><span class="v" id="chartH" style="color:var(--emerald)">—</span></span>
+        <span><span class="lbl" style="font-size:9px;color:var(--muted)">L</span><span class="v" id="chartL" style="color:var(--rose)">—</span></span>
+        <span><span class="lbl" style="font-size:9px;color:var(--muted)">C</span><span class="v" id="chartC" style="color:#a0b4c8">—</span></span>
         <span><span class="lbl" style="font-size:9px;color:var(--muted)">RSI 14</span><span class="v" id="chartRsi">—</span></span>
         <span><span class="lbl" style="font-size:9px;color:var(--muted)">ADX 14</span><span class="v" id="chartAdx">—</span></span>
         <span><span class="lbl" style="font-size:9px;color:var(--muted)">STATUS</span><span class="v" id="chartStatus">—</span></span>
@@ -1160,6 +1164,7 @@ let adxSeries     = null;
 let candleOverlays = [];
 let rsiOverlays    = [];
 let adxOverlays    = [];
+let currentChartDecimals = 5;
 let currentSymbol   = null;
 let currentInterval = '3m';
 let chartRefreshTimer = null;
@@ -1205,13 +1210,13 @@ function initCharts() {
     layout:     { background: { color: bg }, textColor: text },
     grid:       { vertLines: { color: grid }, horzLines: { color: grid } },
     crosshair:  { mode: 1 },
-    timeScale:  { borderColor: border, timeVisible: true, secondsVisible: false },
-    rightPriceScale: { borderColor: border },
-    localization: { timeFormatter: ts => {
-      const d = new Date(ts * 1000);
-      return d.toLocaleDateString([], {month:'2-digit',day:'2-digit'}) + ' ' +
-             d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', hour12: false});
-    }},
+    timeScale:  {
+      borderColor: border,
+      timeVisible: true,
+      secondsVisible: false,
+      rightOffset: 5,
+    },
+
     handleScroll: true,
     handleScale:  true,
   };
@@ -1240,6 +1245,20 @@ function initCharts() {
     rightPriceScale: { borderColor: border, scaleMargins: { top: 0.1, bottom: 0.1 } },
   });
   adxSeries = adxChart.addLineSeries({ color: '#60a5fa', lineWidth: 1, priceLineVisible: false });
+
+  // Update OHLC on crosshair move
+  candleChart.subscribeCrosshairMove(p => {
+    if (p.seriesData && p.seriesData.size > 0) {
+      const bar = p.seriesData.get(candleSeries);
+      if (bar) {
+        const d = currentChartDecimals || 5;
+        $('chartO').textContent = parseFloat(bar.open).toFixed(d);
+        $('chartH').textContent = parseFloat(bar.high).toFixed(d);
+        $('chartL').textContent = parseFloat(bar.low).toFixed(d);
+        $('chartC').textContent = parseFloat(bar.close).toFixed(d);
+      }
+    }
+  });
 
   // Sync scroll + crosshair across all 3 charts
   function syncCharts(master, slaves) {
@@ -1271,131 +1290,124 @@ async function loadChart(symbol, interval) {
     const data = await res.json();
     if (data.error) { $('chartAge').textContent = 'Error: ' + data.error; return; }
 
-    // Set price formatter based on asset precision
-    const dec = data.price_decimals || 4;
-    const fmt = v => parseFloat(v).toFixed(dec);
-    candleChart.applyOptions({
-      localization: {
-        priceFormatter: p => fmt(p),
-        timeFormatter: ts => {
-          const d = new Date(ts * 1000);
-          return d.toLocaleDateString([], {month:'2-digit',day:'2-digit'}) + ' ' +
-                 d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', hour12: false});
-        }
-      }
-    });
+    const is1H = interval === '1H';
+    const is3m = ['1m','3m','5m','15m'].includes(interval);
+    const is1D = interval === '1D';
+    const isS2 = activeTab === 's2';
 
-    // ── Candles ───────────────────────────────────────────
-    candleSeries.setData(data.candles);
+    const showRsi = is3m || is1D;
+    const showAdx = is1D && !isS2;
+    $('chart-rsi').style.display = showRsi ? '' : 'none';
+    $('chart-adx').style.display = showAdx ? '' : 'none';
+
+    const candleH = is1H ? 460 : (showRsi && showAdx ? 280 : showRsi ? 370 : 460);
+    $('chart-candles').style.height = candleH + 'px';
+    candleChart.applyOptions({ height: candleH });
+
+    const dec = data.price_decimals || 4;
+    currentChartDecimals = dec;
+    candleChart.applyOptions({ localization: {
+      priceFormatter: p => parseFloat(p).toFixed(dec),
+      timeFormatter: ts => {
+        const d = new Date(ts * 1000);
+        return d.toLocaleDateString([],{month:'2-digit',day:'2-digit'}) + ' ' +
+               d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',hour12:false});
+      }
+    }});
+
+    candleOverlays.forEach(s => { try { candleChart.removeSeries(s); } catch(e){} });
     rsiOverlays.forEach(s   => { try { rsiChart.removeSeries(s);    } catch(e){} });
     adxOverlays.forEach(s   => { try { adxChart.removeSeries(s);    } catch(e){} });
     candleOverlays = []; rsiOverlays = []; adxOverlays = [];
 
-    // Clear price lines from base series by recreating them
     candleSeries.setData(data.candles);
-    rsiLineSeries.setData(data.rsi);
-    adxSeries.setData(data.adx || []);
 
-    // ── EMA10 on candle chart ─────────────────────────────
-    if (data.ema10?.length) {
-      const s = candleChart.addLineSeries({
-        color: '#f0a500', lineWidth: 1, priceLineVisible: false,
-        lastValueVisible: false,
-      });
-      s.setData(data.ema10);
-      candleOverlays.push(s);
-    }
+    // helper
+    const addCandle = (color, lw, style) => {
+      const s = candleChart.addLineSeries({ color, lineWidth: lw, lineStyle: style||0, priceLineVisible: false, lastValueVisible: false });
+      candleOverlays.push(s); return s;
+    };
+    const addRsi = (color, lw, style) => {
+      const s = rsiChart.addLineSeries({ color, lineWidth: lw, lineStyle: style||0, priceLineVisible: false, lastValueVisible: false });
+      rsiOverlays.push(s); return s;
+    };
+    const addAdx = (color, lw, style) => {
+      const s = adxChart.addLineSeries({ color, lineWidth: lw, lineStyle: style||0, priceLineVisible: false, lastValueVisible: false });
+      adxOverlays.push(s); return s;
+    };
 
-    // ── EMA20 on candle chart ─────────────────────────────
-    if (data.ema20?.length) {
-      const s = candleChart.addLineSeries({
-        color: '#a78bfa', lineWidth: 1, priceLineVisible: false,
-        lastValueVisible: false,
-      });
-      s.setData(data.ema20);
-      candleOverlays.push(s);
-    }
-
-    // ── RSI threshold lines ───────────────────────────────
-    const rsiOb = rsiChart.addLineSeries({ color: '#00d68f', lineWidth: 1, lineStyle: 1, priceLineVisible: false, lastValueVisible: false });
-    const rsiOs = rsiChart.addLineSeries({ color: '#ff4d6a', lineWidth: 1, lineStyle: 1, priceLineVisible: false, lastValueVisible: false });
-    const rsiMd = rsiChart.addLineSeries({ color: '#1e2d3d', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false });
-    const times = data.rsi.map(r => r.time);
-    rsiOb.setData(times.map(t => ({ time: t, value: data.rsi_long_thresh  })));
-    rsiOs.setData(times.map(t => ({ time: t, value: data.rsi_short_thresh })));
-    rsiMd.setData(times.map(t => ({ time: t, value: 50 })));
-    rsiOverlays.push(rsiOb, rsiOs, rsiMd);
-
-    // ── ADX threshold + DI lines ──────────────────────────
-    if (data.adx?.length) {
-      const adxTimes = data.adx.map(r => r.time);
-      const adxThr = adxChart.addLineSeries({ color: '#f0a500', lineWidth: 1, lineStyle: 1, priceLineVisible: false, lastValueVisible: false });
-      adxThr.setData(adxTimes.map(t => ({ time: t, value: 25 })));
-      adxOverlays.push(adxThr);
-    }
-    if (data.plus_di?.length) {
-      const s = adxChart.addLineSeries({ color: '#00d68f', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
-      s.setData(data.plus_di);
-      adxOverlays.push(s);
-    }
-    if (data.minus_di?.length) {
-      const s = adxChart.addLineSeries({ color: '#ff4d6a', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
-      s.setData(data.minus_di);
-      adxOverlays.push(s);
+    // ── 1H: show EMA10 + previous high break level
+    if (is1H) {
+      if (data.ema10?.length) addCandle('#f0a500',1).setData(data.ema10);
+      if (data.prev_high) {
+        addCandle('#60a5fa',1,1).setData(data.candles.map(c=>({time:c.time,value:data.prev_high})));
+        addCandle('#60a5fa',1,1).setData(data.candles.map(c=>({time:c.time,value:data.prev_high})));
+      }
     }
 
-    // ── Consolidation box ─────────────────────────────────
-    if (data.box_high && data.box_low) {
-      const boxCandles = data.candles.slice(-15);
-      const bH = candleChart.addLineSeries({ color: 'rgba(0,214,143,0.8)', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false });
-      const bL = candleChart.addLineSeries({ color: 'rgba(0,214,143,0.8)', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false });
-      const fill = candleChart.addAreaSeries({ topColor: 'rgba(0,214,143,0.07)', bottomColor: 'rgba(0,214,143,0.01)', lineColor: 'transparent', priceLineVisible: false, lastValueVisible: false });
-      bH.setData(boxCandles.map(c => ({ time: c.time, value: data.box_high })));
-      bL.setData(boxCandles.map(c => ({ time: c.time, value: data.box_low  })));
-      fill.setData(boxCandles.map(c => ({ time: c.time, value: data.box_high })));
-      candleOverlays.push(bH, bL, fill);
+    // ── 3m: EMA10 + box + entry trigger + RSI
+    if (is3m) {
+      if (data.ema10?.length) addCandle('#f0a500',1).setData(data.ema10);
+      if (data.box_high && data.box_low) {
+        const bc = data.candles.slice(-12);
+        addCandle('rgba(0,214,143,0.8)',1,2).setData(bc.map(c=>({time:c.time,value:data.box_high})));
+        addCandle('rgba(0,214,143,0.8)',1,2).setData(bc.map(c=>({time:c.time,value:data.box_low})));
+        const f=candleChart.addAreaSeries({topColor:'rgba(0,214,143,0.07)',bottomColor:'rgba(0,214,143,0.01)',lineColor:'transparent',priceLineVisible:false,lastValueVisible:false});
+        f.setData(bc.map(c=>({time:c.time,value:data.box_high}))); candleOverlays.push(f);
+      }
+      if (data.breakout_long)  { const s=candleChart.addLineSeries({color:'#00d68f',lineWidth:2,lineStyle:0,priceLineVisible:false,lastValueVisible:false}); s.setData(data.candles.slice(-6).map(c=>({time:c.time,value:data.breakout_long}))); candleOverlays.push(s); }
+      if (data.breakout_short) { const s=candleChart.addLineSeries({color:'#ff4d6a',lineWidth:2,lineStyle:0,priceLineVisible:false,lastValueVisible:false}); s.setData(data.candles.slice(-6).map(c=>({time:c.time,value:data.breakout_short}))); candleOverlays.push(s); }
+      if (showRsi && data.rsi?.length) {
+        rsiLineSeries.setData(data.rsi);
+        const t=data.rsi.map(r=>r.time);
+        addRsi('rgba(0,214,143,0.5)',1,1).setData(t.map(x=>({time:x,value:data.rsi_long_thresh})));
+        addRsi('rgba(255,77,106,0.5)',1,1).setData(t.map(x=>({time:x,value:data.rsi_short_thresh})));
+      }
     }
 
-    // ── Entry trigger lines ───────────────────────────────
-    if (data.breakout_long) {
-      const s = candleChart.addLineSeries({ color: '#00d68f', lineWidth: 2, lineStyle: 0, priceLineVisible: false, lastValueVisible: false });
-      s.setData(data.candles.slice(-5).map(c => ({ time: c.time, value: data.breakout_long })));
-      candleOverlays.push(s);
-    }
-    if (data.breakout_short) {
-      const s = candleChart.addLineSeries({ color: '#ff4d6a', lineWidth: 2, lineStyle: 0, priceLineVisible: false, lastValueVisible: false });
-      s.setData(data.candles.slice(-5).map(c => ({ time: c.time, value: data.breakout_short })));
-      candleOverlays.push(s);
+    // ── 1D: EMA10+EMA20 + RSI + box(S2) + ADX(S1)
+    if (is1D) {
+      if (data.ema10?.length) addCandle('#f0a500',1).setData(data.ema10);
+      if (data.ema20?.length) addCandle('#a78bfa',1).setData(data.ema20);
+      if (showRsi && data.rsi?.length) {
+        rsiLineSeries.setData(data.rsi);
+        const t=data.rsi.map(r=>r.time);
+        addRsi('rgba(0,214,143,0.5)',1,1).setData(t.map(x=>({time:x,value:data.rsi_long_thresh})));
+      }
+      if (isS2 && data.box_high && data.box_low) {
+        const bc=data.candles.slice(-8);
+        addCandle('rgba(0,214,143,0.8)',1,2).setData(bc.map(c=>({time:c.time,value:data.box_high})));
+        addCandle('rgba(0,214,143,0.8)',1,2).setData(bc.map(c=>({time:c.time,value:data.box_low})));
+        const f=candleChart.addAreaSeries({topColor:'rgba(0,214,143,0.07)',bottomColor:'rgba(0,214,143,0.01)',lineColor:'transparent',priceLineVisible:false,lastValueVisible:false});
+        f.setData(bc.map(c=>({time:c.time,value:data.box_high}))); candleOverlays.push(f);
+        if (data.breakout_long) { const s=candleChart.addLineSeries({color:'#00d68f',lineWidth:2,lineStyle:0,priceLineVisible:false,lastValueVisible:false}); s.setData(data.candles.slice(-6).map(c=>({time:c.time,value:data.breakout_long}))); candleOverlays.push(s); }
+      }
+      if (showAdx && data.adx?.length) {
+        adxSeries.setData(data.adx);
+        addAdx('rgba(240,165,0,0.5)',1,1).setData(data.adx.map(r=>({time:r.time,value:25})));
+        if (data.plus_di?.length)  addAdx('#00d68f',1).setData(data.plus_di);
+        if (data.minus_di?.length) addAdx('#ff4d6a',1).setData(data.minus_di);
+      }
     }
 
-    // ── Sync timescales by actual time, not logical index ────
     candleChart.timeScale().fitContent();
-    const firstTime = data.candles[0]?.time;
-    const lastTime  = data.candles[data.candles.length - 1]?.time;
-    if (firstTime && lastTime) {
-      const timeRange = { from: firstTime, to: lastTime };
-      rsiChart.timeScale().setVisibleRange(timeRange);
-      adxChart.timeScale().setVisibleRange(timeRange);
+    const fr=data.candles[0]?.time, to=data.candles[data.candles.length-1]?.time;
+    if (fr && to) {
+      if (showRsi) try { rsiChart.timeScale().setVisibleRange({from:fr,to}); } catch(e){}
+      if (showAdx) try { adxChart.timeScale().setVisibleRange({from:fr,to}); } catch(e){}
     }
 
-    // ── Header ────────────────────────────────────────────
-    const lastRsi = data.rsi[data.rsi.length - 1]?.value;
-    const lastAdx = data.adx?.[data.adx.length - 1]?.value;
-    $('chartPrice').textContent = '$' + parseFloat(data.mark_price).toFixed(dec);
-    if (lastRsi != null) {
-      $('chartRsi').textContent = lastRsi.toFixed(1);
-      $('chartRsi').style.color = lastRsi >= 70 ? 'var(--emerald)' : lastRsi <= 30 ? 'var(--rose)' : 'var(--text)';
-    }
-    if (lastAdx != null) {
-      $('chartAdx').textContent = lastAdx.toFixed(1);
-      $('chartAdx').style.color = lastAdx > 25 ? 'var(--emerald)' : 'var(--muted)';
-    }
-    $('chartStatus').textContent = data.box_high ? '🟡 Watching box' : '⏸ Scanning';
-    $('chartAge').textContent = 'Updated ' + new Date().toLocaleTimeString();
+    const lastRsi=data.rsi[data.rsi.length-1]?.value;
+    const lastAdx=data.adx?.[data.adx.length-1]?.value;
+    $('chartPrice').textContent='$'+parseFloat(data.mark_price).toFixed(dec);
+    if (lastRsi!=null){$('chartRsi').textContent=lastRsi.toFixed(1);$('chartRsi').style.color=lastRsi>=70?'var(--emerald)':lastRsi<=30?'var(--rose)':'var(--text)';}
+    if (lastAdx!=null){$('chartAdx').textContent=lastAdx.toFixed(1);$('chartAdx').style.color=lastAdx>25?'var(--emerald)':'var(--muted)';}
+    $('chartStatus').textContent=data.box_high?'🟡 Watching box':'⏸ Scanning';
+    $('chartAge').textContent='Updated '+new Date().toLocaleTimeString();
 
-  } catch (err) {
-    $('chartAge').textContent = 'Fetch error: ' + err.message;
-    console.error('Chart error:', err);
+  } catch(err) {
+    $('chartAge').textContent='Fetch error: '+err.message;
+    console.error('Chart error:',err);
   }
 }
 

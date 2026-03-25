@@ -69,7 +69,6 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
         elif sample_price < 1000:    price_decimals = 3
         else:                        price_decimals = 2
 
-        # lightweight-charts needs UTC seconds
         candles = [
             {
                 "time":  int(row["ts"]) // 1000,
@@ -103,7 +102,6 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
             for i, v in enumerate(ema20_full) if not (v != v)
         ]
 
-        # ADX, +DI, -DI — compute on full history, slice to display window
         adx_result   = _calc_adx(df_full, period=14)
         adx_display  = adx_result["adx"].tail(display_limit)
         pdi_display  = adx_result["plus_di"].tail(display_limit)
@@ -184,6 +182,11 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
         except Exception:
             mark = float(df["close"].iloc[-1])
 
+        # For 1H: return previous candle high for HTF break visualisation
+        prev_high = None
+        if interval == "1H" and len(df) >= 2:
+            prev_high = round(float(df["high"].iloc[-2]), price_decimals)
+
         return JSONResponse({
             "symbol":           symbol,
             "interval":         interval,
@@ -200,6 +203,7 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
             "breakout_long":    breakout_long,
             "breakout_short":   breakout_short,
             "mark_price":       mark,
+            "prev_high":        prev_high,
             "price_decimals":   price_decimals,
             "rsi_long_thresh":  config.RSI_LONG_THRESH,
             "rsi_short_thresh": config.RSI_SHORT_THRESH,

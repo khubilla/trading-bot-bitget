@@ -276,8 +276,8 @@ class MTFBot:
             "adx": round(adx_val, 1), "trend_ok": trend_ok,
             "strategy": "S1" if s1_sig != "HOLD" else ("S2" if s2_sig != "HOLD" else "S1"),
             "s2_daily_rsi": s2_rsi,
-            "s2_big_candle": s2_bh > 0 or "big_candle" in s2_reason,
-            "s2_coiling":    s2_bl > 0 and ("Coiling" in s2_reason or s2_sig == "LONG"),
+            "s2_big_candle": s2_rsi > 0 and ("big_candle" in s2_reason or "Big candle" in s2_reason or s2_bh > 0),
+            "s2_coiling":    s2_bl > 0 and s2_bh > 0,
         })
 
         # ── Min balance check ─────────────────────────────────────── #

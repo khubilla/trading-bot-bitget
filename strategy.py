@@ -387,6 +387,22 @@ def evaluate_s2(
     if daily_rsi <= S2_RSI_LONG_THRESH:
         return "HOLD", daily_rsi, 0.0, 0.0, f"Daily RSI {daily_rsi:.1f} ≤ {S2_RSI_LONG_THRESH}"
 
+    # ── Step 1: Big momentum candle anywhere in last 30 days ─── #
+    # Search the entire lookback window — includes consolidation candles too
+    lookback_window  = daily_df.iloc[-(S2_BIG_CANDLE_LOOKBACK + 1):-1]
+    big_candle_found = False
+    best_body_pct    = 0.0
+    for _, row in lookback_window.iterrows():
+        bp = _body_pct(row)
+        if bp >= S2_BIG_CANDLE_BODY_PCT:
+            big_candle_found = True
+            best_body_pct = max(best_body_pct, bp)
+
+    if not big_candle_found:
+        return "HOLD", daily_rsi, 0.0, 0.0, (
+            f"Daily RSI {daily_rsi:.1f} ✓ — no big candle ≥{S2_BIG_CANDLE_BODY_PCT*100:.0f}% in last {S2_BIG_CANDLE_LOOKBACK}d"
+        )
+
     # ── Step 3: Find 1–5 tight consolidation candles ─────────── #
     # These are the most recent completed candles (exclude current forming one)
     # Try from 1 candle up to S2_CONSOL_CANDLES to find the tightest valid window
@@ -442,22 +458,8 @@ def evaluate_s2(
         break  # Use smallest valid window (tightest)
 
     if not consol_found:
-        return "HOLD", daily_rsi, 0.0, 0.0, f"Daily RSI {daily_rsi:.1f} — no tight consolidation (1–{S2_CONSOL_CANDLES} candles)"
-
-    # ── Step 1: Big momentum candle within last 30 days ───────── #
-    # Look back S2_BIG_CANDLE_LOOKBACK candles BEFORE the consolidation
-    lookback_window = daily_df.iloc[-(S2_BIG_CANDLE_LOOKBACK + consol_size + 1):-(consol_size + 1)]
-    big_candle_found = False
-    best_body_pct    = 0.0
-    for _, row in lookback_window.iterrows():
-        bp = _body_pct(row)
-        if bp >= S2_BIG_CANDLE_BODY_PCT:
-            big_candle_found = True
-            best_body_pct = max(best_body_pct, bp)
-
-    if not big_candle_found:
-        return "HOLD", daily_rsi, box_high, box_low, (
-            f"Coiling ({consol_size}d, RSI {daily_rsi:.1f}) — no big candle ≥{S2_BIG_CANDLE_BODY_PCT*100:.0f}% in last {S2_BIG_CANDLE_LOOKBACK}d"
+        return "HOLD", daily_rsi, 0.0, 0.0, (
+            f"Big candle ✅ {best_body_pct*100:.0f}% | RSI {daily_rsi:.1f} — no tight consolidation yet (1–{S2_CONSOL_CANDLES} candles)"
         )
 
     # ── Step 4: Current daily candle breaking above entry trigger ─ #

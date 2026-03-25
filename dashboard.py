@@ -69,9 +69,22 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
         elif sample_price < 1000:    price_decimals = 3
         else:                        price_decimals = 2
 
+        # Bitget 1D candle opens at 16:00 UTC = 00:00 UTC+8.
+        # Add 8h to 1D timestamps so lightweight-charts places candles
+        # on the correct UTC+8 date (matching TradingView).
+        # All series (candles, RSI, EMA, ADX) use the same offset.
+        def ts(row_ts):
+            if is_daily:
+                # For 1D: pass date string "YYYY-MM-DD" in UTC+8
+                # Bitget 1D opens at 16:00 UTC = 00:00 UTC+8, so +8h gives the correct date
+                from datetime import datetime, timezone, timedelta
+                dt = datetime.fromtimestamp(int(row_ts) // 1000, tz=timezone.utc) 
+                return dt.strftime("%Y-%m-%d")
+            return int(row_ts) // 1000
+
         candles = [
             {
-                "time":  int(row["ts"]) // 1000,
+                "time":  ts(row["ts"]),
                 "open":  float(row["open"]),
                 "high":  float(row["high"]),
                 "low":   float(row["low"]),
@@ -85,7 +98,7 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
         rsi_display = rsi_full.tail(display_limit)
         rsi_series = []
         for i, v in enumerate(rsi_display):
-            t = int(df["ts"].iloc[i]) // 1000
+            t = ts(df["ts"].iloc[i])
             if v != v:
                 continue
             rsi_series.append({"time": t, "value": round(float(v), 2)})
@@ -94,11 +107,11 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
         ema10_full = calculate_ema(closes_full, 10).tail(display_limit)
         ema20_full = calculate_ema(closes_full, 20).tail(display_limit)
         ema10 = [
-            {"time": int(df["ts"].iloc[i]) // 1000, "value": round(float(v), 8)}
+            {"time": ts(df["ts"].iloc[i]), "value": round(float(v), 8)}
             for i, v in enumerate(ema10_full) if not (v != v)
         ]
         ema20 = [
-            {"time": int(df["ts"].iloc[i]) // 1000, "value": round(float(v), 8)}
+            {"time": ts(df["ts"].iloc[i]), "value": round(float(v), 8)}
             for i, v in enumerate(ema20_full) if not (v != v)
         ]
 
@@ -107,15 +120,15 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
         pdi_display  = adx_result["plus_di"].tail(display_limit)
         mdi_display  = adx_result["minus_di"].tail(display_limit)
         adx_data = [
-            {"time": int(df["ts"].iloc[i]) // 1000, "value": round(float(v), 2)}
+            {"time": ts(df["ts"].iloc[i]), "value": round(float(v), 2)}
             for i, v in enumerate(adx_display) if not (v != v)
         ]
         plus_di_data = [
-            {"time": int(df["ts"].iloc[i]) // 1000, "value": round(float(v), 2)}
+            {"time": ts(df["ts"].iloc[i]), "value": round(float(v), 2)}
             for i, v in enumerate(pdi_display) if not (v != v)
         ]
         minus_di_data = [
-            {"time": int(df["ts"].iloc[i]) // 1000, "value": round(float(v), 2)}
+            {"time": ts(df["ts"].iloc[i]), "value": round(float(v), 2)}
             for i, v in enumerate(mdi_display) if not (v != v)
         ]
 

@@ -28,7 +28,21 @@ Pure daily-chart strategy targeting post-squeeze breakouts.
 
 Risk: 10x leverage, 25% margin per trade, trailing stop after +10%.
 
-Both strategies share a **market sentiment gate** — volume-weighted bull/bear ratio across all pairs filters allowed trade direction.
+### Strategy 3 — Daily Swing Pullback
+Long-only pullback strategy on 15m timeframe with daily trend alignment.
+
+**Daily prerequisites:**
+- EMA10 > EMA20 > EMA50 > EMA200 (golden alignment)
+- ADX > 30 (strong trend)
+
+**15m entry:**
+- Slow Stochastics (5,3) recently oversold (<30)
+- First green candle after oversold = uptick
+- Price closes above uptick high + MACD line > signal
+
+Risk: 10x leverage, 25% margin per trade, SL below pivot low, TP at 2:1 R:R minimum.
+
+All strategies share a **market sentiment gate** — volume-weighted bull/bear ratio across all pairs filters allowed trade direction.
 
 ---
 
@@ -59,6 +73,7 @@ DEMO_MODE      = True   # set False for live trading
 |------|---------|
 | `config_s1.py` | Strategy 1 — timeframes, RSI, ADX, risk params |
 | `config_s2.py` | Strategy 2 — big candle detection, coil, risk params |
+| `config_s3.py` | Strategy 3 — EMA alignment, Stochastics, MACD, risk params |
 
 ---
 
@@ -92,6 +107,7 @@ Then open [http://localhost:8080](http://localhost:8080).
 ├── config_template.py  # Copy to config.py and add your keys
 ├── config_s1.py        # Strategy 1 parameters
 ├── config_s2.py        # Strategy 2 parameters
+├── config_s3.py        # Strategy 3 parameters
 │
 ├── trades.csv          # Trade log
 └── bot.log             # Runtime log

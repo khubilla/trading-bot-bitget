@@ -36,6 +36,7 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
     Returns OHLCV candles + consolidation box + trigger lines.
     For 3m (S1): uses RSI-zone consolidation detection.
     For 1D (S2): uses daily RSI + S2 consolidation + entry trigger logic.
+    For 15m (S3): uses Slow Stochastics + MACD + S3 pullback evaluation.
     """
     try:
         import trader as tr
@@ -46,6 +47,7 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
         # Fetch extra candles for indicator warmup (EMA/ADX need history to converge)
         # Then trim to display_limit for the chart
         is_daily      = interval in ("1D", "1d")
+        is_15m        = interval == "15m"
         display_limit = 80 if is_daily else limit
         warmup        = 200   # extra candles for indicator warmup
         fetch_total   = display_limit + warmup
@@ -195,6 +197,76 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
                 breakout_long  = round(bh * (1 + config_s1.BREAKOUT_BUFFER_PCT), 8)
                 breakout_short = round(bl * (1 - config_s1.BREAKOUT_BUFFER_PCT), 8)
 
+        # ── S3 indicators (15m only) ──────────────────────────── #
+        stoch_k_series    = []
+        stoch_d_series    = []
+        macd_line_series  = []
+        macd_sig_series   = []
+        macd_hist_series  = []
+        s3_entry_trigger  = None
+        s3_sl_price       = None
+        s3_stoch_last     = None
+        s3_macd_last      = None
+
+        if is_15m:
+            import numpy as _np
+            from strategy import calculate_stoch, calculate_macd, evaluate_s3
+            from config_s3 import (
+                S3_STOCH_K_PERIOD, S3_STOCH_D_SMOOTH,
+                S3_MACD_FAST, S3_MACD_SLOW, S3_MACD_SIGNAL,
+            )
+
+            slow_k_full, slow_d_full = calculate_stoch(
+                df_full, S3_STOCH_K_PERIOD, S3_STOCH_D_SMOOTH
+            )
+            ml_full, ms_full, mh_full = calculate_macd(
+                closes_full, S3_MACD_FAST, S3_MACD_SLOW, S3_MACD_SIGNAL
+            )
+
+            sk_disp = slow_k_full.tail(display_limit)
+            sd_disp = slow_d_full.tail(display_limit)
+            ml_disp = ml_full.tail(display_limit)
+            ms_disp = ms_full.tail(display_limit)
+            mh_disp = mh_full.tail(display_limit)
+
+            for i, v in enumerate(sk_disp):
+                if v == v:  # not NaN
+                    stoch_k_series.append({"time": ts(df["ts"].iloc[i]), "value": round(float(v), 2)})
+            for i, v in enumerate(sd_disp):
+                if v == v:
+                    stoch_d_series.append({"time": ts(df["ts"].iloc[i]), "value": round(float(v), 2)})
+            for i, v in enumerate(ml_disp):
+                if v == v:
+                    macd_line_series.append({"time": ts(df["ts"].iloc[i]), "value": round(float(v), 8)})
+            for i, v in enumerate(ms_disp):
+                if v == v:
+                    macd_sig_series.append({"time": ts(df["ts"].iloc[i]), "value": round(float(v), 8)})
+            for i, v in enumerate(mh_disp):
+                if v == v:
+                    color = "rgba(0,214,143,0.65)" if v >= 0 else "rgba(255,77,106,0.65)"
+                    macd_hist_series.append({
+                        "time": ts(df["ts"].iloc[i]),
+                        "value": round(float(v), 8),
+                        "color": color,
+                    })
+
+            if stoch_k_series:
+                s3_stoch_last = stoch_k_series[-1]["value"]
+            if macd_hist_series:
+                s3_macd_last = macd_hist_series[-1]["value"]
+
+            # Run S3 evaluator to get entry trigger + SL levels
+            try:
+                daily_df_s3 = tr.get_candles(symbol, "1D", limit=250)
+                if not daily_df_s3.empty:
+                    _, _, entry_t, sl_p, _ = evaluate_s3(symbol, daily_df_s3, df_full)
+                    if entry_t > 0:
+                        s3_entry_trigger = round(entry_t, max(2, price_decimals + 1))
+                    if sl_p > 0:
+                        s3_sl_price = round(sl_p, max(2, price_decimals + 1))
+            except Exception:
+                pass
+
         # Current mark price
         try:
             mark = tr.get_mark_price(symbol)
@@ -226,6 +298,16 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
             "price_decimals":   price_decimals,
             "rsi_long_thresh":  config_s1.RSI_LONG_THRESH,
             "rsi_short_thresh": config_s1.RSI_SHORT_THRESH,
+            # S3 — 15m indicators
+            "stoch_k":          stoch_k_series,
+            "stoch_d":          stoch_d_series,
+            "macd_line":        macd_line_series,
+            "macd_signal":      macd_sig_series,
+            "macd_hist":        macd_hist_series,
+            "s3_entry_trigger": s3_entry_trigger,
+            "s3_sl_price":      s3_sl_price,
+            "s3_stoch_last":    s3_stoch_last,
+            "s3_macd_last":     s3_macd_last,
         })
 
     except Exception as e:

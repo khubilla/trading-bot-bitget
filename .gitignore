@@ -9,3 +9,4 @@ trades.csv
 backtest_report.html
 /data/daily
 .claude
+settings.json

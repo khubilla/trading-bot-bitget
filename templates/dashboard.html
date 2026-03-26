@@ -755,6 +755,7 @@
         <div style="display:flex;gap:4px;align-items:center;">
           <button class="strat-tab active" id="tab-s1">S1</button>
           <button class="strat-tab" id="tab-s2">S2</button>
+          <button class="strat-tab" id="tab-s3">S3</button>
           <span class="panel-badge" id="pair-count" style="margin-left:6px;">0 pairs</span>
         </div>
       </div>
@@ -807,34 +808,50 @@
         <span><span class="lbl" style="font-size:9px;color:var(--muted)">H</span><span class="v" id="chartH" style="color:var(--emerald)">—</span></span>
         <span><span class="lbl" style="font-size:9px;color:var(--muted)">L</span><span class="v" id="chartL" style="color:var(--rose)">—</span></span>
         <span><span class="lbl" style="font-size:9px;color:var(--muted)">C</span><span class="v" id="chartC" style="color:#a0b4c8">—</span></span>
-        <span><span class="lbl" style="font-size:9px;color:var(--muted)">RSI 14</span><span class="v" id="chartRsi">—</span></span>
-        <span><span class="lbl" style="font-size:9px;color:var(--muted)">ADX 14</span><span class="v" id="chartAdx">—</span></span>
+        <span><span class="lbl" id="chartRsiLbl" style="font-size:9px;color:var(--muted)">RSI 14</span><span class="v" id="chartRsi">—</span></span>
+        <span><span class="lbl" id="chartAdxLbl" style="font-size:9px;color:var(--muted)">ADX 14</span><span class="v" id="chartAdx">—</span></span>
         <span><span class="lbl" style="font-size:9px;color:var(--muted)">STATUS</span><span class="v" id="chartStatus">—</span></span>
       </div>
       <button class="chart-close-btn" onclick="closeChart()">✕</button>
     </div>
 
     <!-- Legend -->
-    <div class="chart-legend">
-      <div class="legend-item">
+    <div class="chart-legend" id="chartLegend">
+      <div class="legend-item" id="leg-box">
         <div class="legend-box" style="background:rgba(0,214,143,0.4);border:1px solid var(--emerald)"></div>
         <span style="color:var(--muted)">Box</span>
       </div>
-      <div class="legend-item">
+      <div class="legend-item" id="leg-trigger">
         <div class="legend-line" style="background:var(--emerald)"></div>
         <span style="color:var(--muted)">Entry trigger</span>
       </div>
-      <div class="legend-item">
+      <div class="legend-item" id="leg-sl" style="display:none">
+        <div style="width:14px;height:2px;background:#ff4d6a;border-top:1px dashed #ff4d6a;display:inline-block;"></div>
+        <span style="color:var(--muted)">SL (pivot low)</span>
+      </div>
+      <div class="legend-item" id="leg-ema10">
         <div style="width:14px;height:2px;background:#f0a500;display:inline-block;"></div>
         <span style="color:var(--muted)">EMA10</span>
       </div>
-      <div class="legend-item">
+      <div class="legend-item" id="leg-ema20" style="display:none">
         <div style="width:14px;height:2px;background:#a78bfa;display:inline-block;"></div>
         <span style="color:var(--muted)">EMA20</span>
       </div>
-      <div class="legend-item">
+      <div class="legend-item" id="leg-adx">
         <div style="width:14px;height:2px;background:#60a5fa;display:inline-block;"></div>
         <span style="color:var(--muted)">ADX</span>
+      </div>
+      <div class="legend-item" id="leg-stoch" style="display:none">
+        <div style="width:14px;height:2px;background:#c9d8e8;display:inline-block;"></div>
+        <span style="color:var(--muted)">Stoch K</span>
+      </div>
+      <div class="legend-item" id="leg-stoch-d" style="display:none">
+        <div style="width:14px;height:2px;background:#f0a500;display:inline-block;"></div>
+        <span style="color:var(--muted)">Stoch D</span>
+      </div>
+      <div class="legend-item" id="leg-macd" style="display:none">
+        <div style="width:14px;height:8px;background:rgba(0,214,143,0.4);display:inline-block;"></div>
+        <span style="color:var(--muted)">MACD</span>
       </div>
       <span style="margin-left:auto;font-size:9px;color:var(--muted)" id="chartAge">—</span>
     </div>
@@ -905,6 +922,7 @@ function switchTab(tab) {
 window.addEventListener('load', () => {
   document.getElementById('tab-s1').addEventListener('click', () => switchTab('s1'));
   document.getElementById('tab-s2').addEventListener('click', () => switchTab('s2'));
+  document.getElementById('tab-s3').addEventListener('click', () => switchTab('s3'));
 });
 
 // ── State renderer ─────────────────────────────────────────
@@ -1105,7 +1123,7 @@ function renderPairGrid(s) {
             </div>
             <div class="pair-reason ${reasonClass}">${reason} · ${age}</div>
           </div>`;
-      } else {
+      } else if (activeTab === 's2') {
         // S2 tab — daily chart only: RSI daily + daily consolidation + big candle
         const s2rsi    = ps.s2_daily_rsi != null ? ps.s2_daily_rsi : rsi;
         const s2rsiOk  = s2rsi > 70;
@@ -1140,6 +1158,56 @@ function renderPairGrid(s) {
               </div>
             </div>
             <div class="pair-reason ${reasonClass}">${reason} · ${age}</div>
+          </div>`;
+      } else {
+        // S3 tab — Daily EMA alignment + ADX + 15m pullback status
+        const s3sig    = ps.s3_signal || 'HOLD';
+        const s3reason = ps.s3_reason || '—';
+        const s3adx    = ps.s3_adx    != null ? ps.s3_adx : (ps.adx != null ? ps.adx : null);
+        const s3cardCls= s3sig === 'LONG' ? 'signal-long' : '';
+        // Parse EMA aligned from reason (if reason starts with "Daily EMA not aligned" it failed)
+        const emaAligned  = s3reason !== '—' && !s3reason.includes('not aligned') && !s3reason.includes('daily candles');
+        const adxOk       = s3adx != null && s3adx >= 30;
+        const stochOvs    = s3reason.includes('Stoch oversold') || s3reason.includes('oversold');
+        const uptickReady = s3reason.includes('Green uptick') || s3reason.includes('Uptick') || s3sig === 'LONG';
+        const emaClass    = !emaAligned && s3reason !== '—' ? 'fail' : emaAligned ? 'pass' : 'muted';
+        const adxClass    = !emaAligned ? 'muted' : adxOk ? 'pass' : 'fail';
+        const stochClass  = !emaAligned || !adxOk ? 'muted' : stochOvs ? 'pass' : 'fail';
+        const uptickClass = !stochOvs ? 'muted' : uptickReady ? 'pass' : 'warn';
+        const s3reasonCls = s3sig !== 'HOLD' ? 'signal' : emaAligned ? 'active' : '';
+        const adxDisplay  = s3adx != null ? `ADX ${s3adx.toFixed(1)}` : 'ADX —';
+        return `
+          <div class="pair-card ${s3cardCls}" data-symbol="${sym}">
+            <div class="pair-top">
+              <div class="pair-name" title="${sym}">${symShort}</div>
+              <span class="pair-sig-badge ${s3sig}">${s3sig}</span>
+            </div>
+            <div class="pair-rsi-bar">
+              <div class="pair-rsi-fill" style="width:${s3adx != null ? Math.min(100, s3adx*2) : 0}%;background:${adxOk ? 'var(--emerald)' : 'var(--rose)'}"></div>
+            </div>
+            <div class="pair-rsi-row">
+              <span class="pair-rsi-val" style="color:${adxOk ? 'var(--emerald)' : 'var(--muted)'}">${adxDisplay}</span>
+              <span>$${price < 1 ? price.toFixed(5) : price.toFixed(2)}</span>
+            </div>
+            <div class="pair-checks">
+              <div class="pair-check">
+                <span class="check-label">EMA 10>20>50>200</span>
+                <span class="check-val ${emaClass}">${s3reason === '—' ? '—' : emaAligned ? '✓ Aligned' : '✗ Not aligned'}</span>
+              </div>
+              <div class="pair-check">
+                <span class="check-label">Daily ADX</span>
+                <span class="check-val ${adxClass}">${!emaAligned ? '—' : adxOk ? `✓ ${adxDisplay}` : `✗ ${adxDisplay}`}</span>
+              </div>
+              <div class="pair-check">
+                <span class="check-label">Stoch Oversold</span>
+                <span class="check-val ${stochClass}">${!emaAligned || !adxOk ? '—' : stochOvs ? '✓ Oversold' : '✗ Not yet'}</span>
+              </div>
+              <div class="pair-check">
+                <span class="check-label">Uptick Break</span>
+                <span class="check-val ${uptickClass}">${!stochOvs ? '—' : uptickReady ? '✓ Triggered' : '⏳ Waiting'}</span>
+              </div>
+            </div>
+            <div class="pair-reason ${s3reasonCls}">${s3reason} · ${age}</div>
           </div>`;
       }
     }).join('');
@@ -1192,7 +1260,7 @@ function openChart(symbol) {
   currentSymbol = symbol;
   $('chartOverlay').classList.add('open');
   $('chartSymbol').textContent = symbol.replace('USDT','');
-  currentInterval = (activeTab === 's2') ? '1D' : '3m';
+  currentInterval = (activeTab === 's2') ? '1D' : (activeTab === 's3') ? '15m' : '3m';
   document.querySelectorAll('.chart-interval-btn').forEach(b => {
     b.classList.toggle('active', b.textContent === currentInterval);
   });
@@ -1309,15 +1377,23 @@ async function loadChart(symbol, interval) {
     const data = await res.json();
     if (data.error) { $('chartAge').textContent = 'Error: ' + data.error; return; }
 
-    const is1H = interval === '1H';
-    const is3m = ['1m','3m','5m','15m'].includes(interval);
-    const is1D = interval === '1D';
-    const isS2 = activeTab === 's2';
+    const is1H      = interval === '1H';
+    const is3m      = ['1m','3m','5m','15m'].includes(interval);
+    const is1D      = interval === '1D';
+    const isS2      = activeTab === 's2';
+    const isS3      = activeTab === 's3';
+    const isS3_15m  = isS3 && interval === '15m';
 
     const showRsi = is3m || is1D;
-    const showAdx = is1D && !isS2;
+    const showAdx = (is1D && !isS2) || isS3_15m;
     $('chart-rsi').style.display = showRsi ? '' : 'none';
     $('chart-adx').style.display = showAdx ? '' : 'none';
+
+    // Update panel labels for S3
+    const rsiLblEl = $('chartRsiLbl');
+    const adxLblEl = $('chartAdxLbl');
+    if (rsiLblEl) rsiLblEl.textContent = isS3_15m ? 'STOCH 5,3' : 'RSI 14';
+    if (adxLblEl) adxLblEl.textContent = isS3_15m ? 'MACD 12,26' : 'ADX 14';
 
     const candleH = is1H ? 460 : (showRsi && showAdx ? 280 : showRsi ? 370 : 460);
     $('chart-candles').style.height = candleH + 'px';
@@ -1343,6 +1419,18 @@ async function loadChart(symbol, interval) {
     rsiOverlays.forEach(s   => { try { rsiChart.removeSeries(s);    } catch(e){} });
     adxOverlays.forEach(s   => { try { adxChart.removeSeries(s);    } catch(e){} });
     candleOverlays = []; rsiOverlays = []; adxOverlays = [];
+
+    // Update legend visibility for active strategy tab
+    const show = (id, v) => { const el=$( id); if(el) el.style.display=v?'':'none'; };
+    show('leg-box',     !isS3_15m);
+    show('leg-trigger', true);
+    show('leg-sl',      isS3_15m);
+    show('leg-ema10',   !isS3_15m);
+    show('leg-ema20',   isS3_15m || is1D);
+    show('leg-adx',     !isS3_15m);
+    show('leg-stoch',   isS3_15m);
+    show('leg-stoch-d', isS3_15m);
+    show('leg-macd',    isS3_15m);
 
     candleSeries.setData(data.candles);
 
@@ -1370,7 +1458,7 @@ async function loadChart(symbol, interval) {
     }
 
     // ── 3m: EMA10 + box + entry trigger + RSI
-    if (is3m) {
+    if (is3m && !isS3_15m) {
       if (data.ema10?.length) addCandle('#f0a500',1).setData(data.ema10);
       if (data.box_high && data.box_low) {
         const bc = data.candles.slice(-12);
@@ -1386,6 +1474,50 @@ async function loadChart(symbol, interval) {
         const t=data.rsi.map(r=>r.time);
         addRsi('rgba(0,214,143,0.5)',1,1).setData(t.map(x=>({time:x,value:data.rsi_long_thresh})));
         addRsi('rgba(255,77,106,0.5)',1,1).setData(t.map(x=>({time:x,value:data.rsi_short_thresh})));
+      }
+    }
+
+    // ── S3 15m: EMA20 + entry trigger + SL + Stochastics + MACD
+    if (isS3_15m) {
+      // EMA 20 on candles (pullback support level)
+      if (data.ema20?.length) addCandle('#a78bfa',1).setData(data.ema20);
+
+      // Entry trigger — green solid line
+      if (data.s3_entry_trigger) {
+        const trig = data.s3_entry_trigger;
+        const s = candleChart.addLineSeries({color:'#00d68f',lineWidth:2,lineStyle:0,priceLineVisible:false,lastValueVisible:true});
+        s.setData(data.candles.slice(-20).map(c=>({time:c.time,value:trig})));
+        candleOverlays.push(s);
+      }
+      // SL level — red dashed line
+      if (data.s3_sl_price) {
+        const sl = data.s3_sl_price;
+        const s = candleChart.addLineSeries({color:'#ff4d6a',lineWidth:1,lineStyle:2,priceLineVisible:false,lastValueVisible:true});
+        s.setData(data.candles.slice(-20).map(c=>({time:c.time,value:sl})));
+        candleOverlays.push(s);
+      }
+
+      // RSI pane → Stochastics K + D + threshold 30
+      if (data.stoch_k?.length) {
+        rsiLineSeries.setData(data.stoch_k);
+        if (data.stoch_d?.length) addRsi('#f0a500',1).setData(data.stoch_d);
+        const t = data.stoch_k.map(r=>r.time);
+        addRsi('rgba(255,77,106,0.5)',1,1).setData(t.map(x=>({time:x,value:30})));
+        addRsi('rgba(0,214,143,0.3)',1,1).setData(t.map(x=>({time:x,value:70})));
+      }
+
+      // ADX pane → MACD histogram + line + signal
+      if (data.macd_hist?.length) {
+        const histSeries = adxChart.addHistogramSeries({priceLineVisible:false,lastValueVisible:false});
+        histSeries.setData(data.macd_hist);
+        adxOverlays.push(histSeries);
+      }
+      if (data.macd_line?.length)   addAdx('#c9d8e8',1).setData(data.macd_line);
+      if (data.macd_signal?.length) addAdx('#f0a500',1).setData(data.macd_signal);
+      // Zero line
+      if (data.macd_line?.length) {
+        const t = data.macd_line.map(r=>r.time);
+        addAdx('rgba(74,101,128,0.6)',1,1).setData(t.map(x=>({time:x,value:0})));
       }
     }
 
@@ -1421,12 +1553,24 @@ async function loadChart(symbol, interval) {
       if (showAdx) try { adxChart.timeScale().setVisibleRange({from:fr,to}); } catch(e){}
     }
 
-    const lastRsi=data.rsi[data.rsi.length-1]?.value;
+    const lastRsi=data.rsi?.[data.rsi.length-1]?.value;
     const lastAdx=data.adx?.[data.adx.length-1]?.value;
     $('chartPrice').textContent='$'+parseFloat(data.mark_price).toFixed(dec);
-    if (lastRsi!=null){$('chartRsi').textContent=lastRsi.toFixed(1);$('chartRsi').style.color=lastRsi>=70?'var(--emerald)':lastRsi<=30?'var(--rose)':'var(--text)';}
-    if (lastAdx!=null){$('chartAdx').textContent=lastAdx.toFixed(1);$('chartAdx').style.color=lastAdx>25?'var(--emerald)':'var(--muted)';}
-    $('chartStatus').textContent=data.box_high?'🟡 Watching box':'⏸ Scanning';
+    if (isS3_15m) {
+      // RSI slot → Stoch K
+      const sk = data.s3_stoch_last;
+      if (sk!=null){$('chartRsi').textContent=sk.toFixed(1);$('chartRsi').style.color=sk<30?'var(--rose)':sk>70?'var(--emerald)':'var(--text)';}
+      // ADX slot → MACD hist
+      const mh = data.s3_macd_last;
+      if (mh!=null){$('chartAdx').textContent=mh.toFixed(4);$('chartAdx').style.color=mh>0?'var(--emerald)':'var(--rose)';}
+      // Status
+      if (data.s3_entry_trigger) $('chartStatus').textContent='🟢 Uptick trigger '+parseFloat(data.s3_entry_trigger).toFixed(dec);
+      else $('chartStatus').textContent='⏸ Waiting pullback';
+    } else {
+      if (lastRsi!=null){$('chartRsi').textContent=lastRsi.toFixed(1);$('chartRsi').style.color=lastRsi>=70?'var(--emerald)':lastRsi<=30?'var(--rose)':'var(--text)';}
+      if (lastAdx!=null){$('chartAdx').textContent=lastAdx.toFixed(1);$('chartAdx').style.color=lastAdx>25?'var(--emerald)':'var(--muted)';}
+      $('chartStatus').textContent=data.box_high?'🟡 Watching box':'⏸ Scanning';
+    }
     $('chartAge').textContent='Updated '+new Date().toLocaleTimeString();
 
   } catch(err) {

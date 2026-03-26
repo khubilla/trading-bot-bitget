@@ -13,10 +13,11 @@ from datetime import datetime, timezone
 
 import config
 import config_s1
+import config_s3
 import state as st
 from scanner import get_qualified_pairs_and_sentiment
 from strategy import (
-    evaluate_s1, evaluate_s2,
+    evaluate_s1, evaluate_s2, evaluate_s3,
     check_htf, check_exit,
     calculate_rsi, detect_consolidation,
     check_daily_trend,
@@ -226,7 +227,7 @@ class MTFBot:
     def _evaluate_pair(self, symbol: str, allowed_direction: str, balance: float) -> bool:
         htf_df   = tr.get_candles(symbol, config_s1.HTF_INTERVAL,   limit=10)
         ltf_df   = tr.get_candles(symbol, config_s1.LTF_INTERVAL,   limit=60)
-        daily_df = tr.get_candles(symbol, config_s1.DAILY_INTERVAL, limit=150)
+        daily_df = tr.get_candles(symbol, config_s1.DAILY_INTERVAL, limit=250)
 
         if htf_df.empty or ltf_df.empty or daily_df.empty:
             return False
@@ -270,17 +271,30 @@ class MTFBot:
             s2_sig, s2_rsi, s2_bh, s2_bl, s2_reason = evaluate_s2(symbol, daily_df)
             logger.info(f"[S2][{symbol}] daily_RSI={s2_rsi:.1f} | {s2_reason}")
 
+        # ── Strategy 3 ───────────────────────────────────────────── #
+        s3_sig, s3_adx, s3_trigger, s3_sl, s3_reason = "HOLD", 0.0, 0.0, 0.0, ""
+        if config_s3.S3_ENABLED and self.sentiment.direction != "BEARISH":
+            m15_df = tr.get_candles(symbol, config_s3.S3_LTF_INTERVAL, limit=100)
+            if not m15_df.empty:
+                s3_sig, s3_adx, s3_trigger, s3_sl, s3_reason = evaluate_s3(
+                    symbol, daily_df, m15_df
+                )
+                logger.info(f"[S3][{symbol}] {s3_reason}")
+
         st.update_pair_state(symbol, {
             "rsi": rsi_val, "htf_bull": htf_bull, "htf_bear": htf_bear,
-            "signal": s1_sig if s1_sig != "HOLD" else s2_sig,
+            "signal": s1_sig if s1_sig != "HOLD" else (s2_sig if s2_sig != "HOLD" else s3_sig),
             "price": close,
             "consolidating": is_coil, "box_high": round(bh,6) if bh else None,
             "box_low": round(bl,6) if bl else None,
             "reason":    s1_reason,
             "s2_reason": s2_reason,
+            "s3_reason": s3_reason,
+            "s3_signal": s3_sig,
+            "s3_adx": round(s3_adx, 1) if s3_adx else None,
             "rsi_ok": rsi_ok,
             "adx": round(adx_val, 1), "trend_ok": trend_ok,
-            "strategy": "S1" if s1_sig != "HOLD" else ("S2" if s2_sig != "HOLD" else "S1"),
+            "strategy": "S1" if s1_sig != "HOLD" else ("S2" if s2_sig != "HOLD" else ("S3" if s3_sig != "HOLD" else "S1")),
             "s2_daily_rsi": s2_rsi,
             "s2_big_candle": s2_rsi > 0 and ("big_candle" in s2_reason or "Big candle" in s2_reason or s2_bh > 0),
             "s2_coiling":    s2_bl > 0 and s2_bh > 0,
@@ -331,6 +345,30 @@ class MTFBot:
             self.active_positions[symbol] = {
                 "side": "LONG", "strategy": "S2",
                 "box_high": s2_bh if s2_bh else 0.0, "box_low": s2_bl,
+            }
+            return True
+
+        # ── Execute S3 ────────────────────────────────────────────── #
+        if s3_sig == "LONG":
+            # SL is derived from the pullback pivot low; compute % from current price
+            current_price = float(tr.get_mark_price(symbol))
+            risk_pct      = max((current_price - s3_sl) / current_price, 0.005)
+            tp_pct        = max(config_s3.S3_MIN_RR * risk_pct, config_s3.S3_TAKE_PROFIT_PCT)
+            st.add_scan_log(f"[S3][{symbol}] 🟢 LONG | {s3_reason}", "SIGNAL")
+            trade = tr.open_long(
+                symbol,
+                box_low         = s3_sl,
+                leverage        = config_s3.S3_LEVERAGE,
+                trade_size_pct  = config_s3.S3_TRADE_SIZE_PCT,
+                take_profit_pct = tp_pct,
+                stop_loss_pct   = risk_pct,
+            )
+            trade["strategy"] = "S3"
+            _log_trade("S3_LONG", trade)
+            st.add_open_trade(trade)
+            self.active_positions[symbol] = {
+                "side": "LONG", "strategy": "S3",
+                "box_high": s3_trigger, "box_low": s3_sl,
             }
             return True
 

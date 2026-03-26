@@ -15,7 +15,7 @@ import uvicorn
 import os as _os
 import sys as _sys
 from pathlib import Path as _Path
-PAPER_MODE = "--paper" in _sys.argv
+PAPER_MODE = "--paper" in _sys.argv or _os.environ.get("PAPER_MODE", "") == "1"
 _DATA_DIR  = _Path(_os.environ.get("DATA_DIR", "."))
 STATE_FILE = str(_DATA_DIR / ("state_paper.json" if PAPER_MODE else "state.json"))
 PORT       = int(_os.environ.get("PORT", 8081 if PAPER_MODE else 8080))

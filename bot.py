@@ -186,10 +186,15 @@ class MTFBot:
         # ── 5. Sentiment gate ─────────────────────────────────────── #
         direction = self.sentiment.direction
         if direction == "NEUTRAL":
-            logger.info(f"⏸️  NEUTRAL — waiting")
+            logger.info(f"⏸️  NEUTRAL — S1 paused, S2 scanning...")
             return
 
-        allowed = "LONG" if direction == "BULLISH" else "SHORT"
+        if direction == "BULLISH":
+            allowed = "BULLISH"
+        elif direction == "BEARISH":
+            allowed = "BEARISH"
+        else:
+            allowed = "NEUTRAL" 
         logger.info(
             f"🌍 {direction} ({self.sentiment.bullish_weight*100:.1f}%) — "
             f"scanning {allowed} | {open_count}/{config.MAX_CONCURRENT_TRADES} trades open"
@@ -261,7 +266,7 @@ class MTFBot:
 
         # ── Strategy 2 (evaluate BEFORE update_pair_state) ───────── #
         s2_sig, s2_rsi, s2_bh, s2_bl, s2_reason = "HOLD", 50.0, 0.0, 0.0, ""
-        if allowed_direction == "BULLISH":
+        if self.sentiment.direction != "BEARISH":
             s2_sig, s2_rsi, s2_bh, s2_bl, s2_reason = evaluate_s2(symbol, daily_df)
             logger.info(f"[S2][{symbol}] daily_RSI={s2_rsi:.1f} | {s2_reason}")
 
@@ -313,11 +318,12 @@ class MTFBot:
 
         # ── Execute S2 ────────────────────────────────────────────── #
         if s2_sig == "LONG":
-            from config_s2 import S2_LEVERAGE, S2_TRADE_SIZE_PCT, S2_TAKE_PROFIT_PCT
+            from config_s2 import S2_LEVERAGE, S2_TRADE_SIZE_PCT, S2_TAKE_PROFIT_PCT, S2_STOP_LOSS_PCT
             st.add_scan_log(f"[S2][{symbol}] 🟢 LONG | {s2_reason}", "SIGNAL")
             trade = tr.open_long(symbol, box_low=s2_bl, leverage=S2_LEVERAGE,
                                  trade_size_pct=S2_TRADE_SIZE_PCT,
-                                 take_profit_pct=S2_TAKE_PROFIT_PCT)
+                                 take_profit_pct=S2_TAKE_PROFIT_PCT,
+                                 stop_loss_pct=S2_STOP_LOSS_PCT)
             trade["strategy"] = "S2"
             _log_trade("S2_LONG", trade)
             st.add_open_trade(trade)

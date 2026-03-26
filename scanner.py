@@ -36,10 +36,11 @@ class SentimentResult:
     green_volume:   float
     red_volume:     float
 
-
 def get_qualified_pairs_and_sentiment() -> tuple[list[str], SentimentResult]:
     """
     Single API call → qualified pairs + volume-weighted sentiment.
+    Weight = volume × magnitude of price change, so a coin up 30%
+    contributes 30× more than a coin up 1% at the same volume.
     """
     try:
         data = bc.get_public(
@@ -57,11 +58,11 @@ def get_qualified_pairs_and_sentiment() -> tuple[list[str], SentimentResult]:
     red_volume   = 0.0
     green_count  = 0
     red_count    = 0
+    btc_change   = 0.0          # ← NEW: for BTC veto
 
     for t in tickers:
         symbol = t.get("symbol", "")
 
-        # Skip non-USDT and delivery contracts (contain underscore date suffixes)
         if not symbol.endswith("USDT"):
             continue
         if "_" in symbol:
@@ -70,32 +71,42 @@ def get_qualified_pairs_and_sentiment() -> tuple[list[str], SentimentResult]:
         try:
             vol_usdt     = float(t.get("quoteVolume") or 0)
             change_str   = t.get("change24h") or "0"
-            price_change = float(change_str)
-            lastPr        = float(t.get("lastPr") or 0)
+            price_change = float(change_str) * 100
+            lastPr       = float(t.get("lastPr") or 0)
         except (ValueError, TypeError):
             continue
-
-        # if lastPr > 200:
-        #     continue
 
         if vol_usdt < MIN_VOLUME_USDT:
             continue
 
         qualified.append(symbol)
 
+        # ── NEW: capture BTC change for veto ─────────────────────
+        if symbol == "BTCUSDT":
+            btc_change = price_change
+
+        # ── NEW: weight = volume × magnitude of change ────────────
+        # Floor at 0.5% so near-zero movers don't get zeroed out
+        # but still contribute less than strong movers
+        magnitude = max(abs(price_change), 0.5)
+        weight    = vol_usdt * magnitude
+
         if price_change > 0:
-            green_volume += vol_usdt
+            green_volume += weight      # ← was: vol_usdt
             green_count  += 1
         else:
-            red_volume += vol_usdt
-            red_count  += 1
+            red_volume   += weight      # ← was: vol_usdt
+            red_count    += 1
 
     qualified.sort()
 
     total_volume = green_volume + red_volume
     bullish_w    = (green_volume / total_volume) if total_volume > 0 else 0.5
 
-    if bullish_w >= SENTIMENT_THRESHOLD:
+    # ── NEW: BTC veto — force BEARISH if BTC drops > 3% ──────────
+    if btc_change < -3.0:
+        direction = "BEARISH"
+    elif bullish_w >= SENTIMENT_THRESHOLD:
         direction = "BULLISH"
     elif bullish_w <= (1 - SENTIMENT_THRESHOLD):
         direction = "BEARISH"
@@ -114,8 +125,9 @@ def get_qualified_pairs_and_sentiment() -> tuple[list[str], SentimentResult]:
 
     logger.info(
         f"Scanner: {len(qualified)} pairs | "
-        f"Sentiment: {direction} ({bullish_w*100:.1f}% green by vol) | "
-        f"🟢 {green_count}  🔴 {red_count}"
+        f"Sentiment: {direction} ({bullish_w*100:.1f}% green by vol×magnitude) | "
+        f"🟢 {green_count}  🔴 {red_count} | "
+        f"BTC={btc_change:+.1f}%"      # ← NEW: show BTC change in log
     )
     return qualified, sentiment
 

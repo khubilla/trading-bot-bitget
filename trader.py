@@ -12,7 +12,7 @@ import bitget_client as bc
 from config import (
     PRODUCT_TYPE, MARGIN_COIN,
     LEVERAGE, TRADE_SIZE_PCT, TAKE_PROFIT_PCT,
-    HTF_INTERVAL, LTF_INTERVAL,
+    HTF_INTERVAL, LTF_INTERVAL,STOP_LOSS_PCT
 )
 
 logger = logging.getLogger(__name__)
@@ -185,6 +185,7 @@ def open_long(
     leverage: int        = LEVERAGE,
     trade_size_pct: float = TRADE_SIZE_PCT,
     take_profit_pct: float = TAKE_PROFIT_PCT,
+    stop_loss_pct: float = STOP_LOSS_PCT
 ) -> dict:
     """
     Opens a LONG position.
@@ -200,7 +201,8 @@ def open_long(
 
     tp_trig  = float(_round_price(mark * (1 + take_profit_pct), symbol))
     tp_exec  = float(_round_price(tp_trig * 1.005, symbol))
-    sl_trig  = float(_round_price(box_low * 0.999, symbol))
+    #sl_trig  = float(_round_price(box_low * 0.999, symbol))
+    sl_trig  = float(_round_price(mark * (1 - stop_loss_pct), symbol))
     sl_exec  = float(_round_price(sl_trig * 0.995, symbol))
 
     # Set leverage BEFORE placing order

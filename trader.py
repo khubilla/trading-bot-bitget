@@ -95,7 +95,16 @@ def get_daily_candles_utc(symbol: str, limit: int = 100) -> pd.DataFrame:
              "low": float(c[3]), "close": float(c[4]), "vol": float(c[5])}
             for c in ohlcv]
     df = pd.DataFrame(rows)
-    return df.sort_values("ts").reset_index(drop=True)
+    df = df.sort_values("ts").reset_index(drop=True)
+    # Patch today's candle close with live mark price
+    try:
+        mark = get_mark_price(symbol)
+        df.at[df.index[-1], "close"] = mark
+        df.at[df.index[-1], "high"]  = max(float(df.iloc[-1]["high"]), mark)
+        df.at[df.index[-1], "low"]   = min(float(df.iloc[-1]["low"]),  mark)
+    except Exception:
+        pass
+    return df
 
 
 def get_mark_price(symbol: str) -> float:

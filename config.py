@@ -4,10 +4,18 @@
 
 import os
 
+# Load .env file if present (local development convenience)
+_env_file = os.path.join(os.path.dirname(__file__), ".env")
+if os.path.exists(_env_file):
+    with open(_env_file) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _, _v = _line.partition("=")
+                os.environ.setdefault(_k.strip(), _v.strip())
+
 # --- Bitget API Credentials ---
-# Set via environment variables on Render (or locally via .env / shell export).
-# Fallback to empty string so the app starts; API calls will fail with auth errors
-# if the vars are not set.
+# Set via environment variables on Render, or in a local .env file.
 API_KEY        = os.environ.get("BITGET_API_KEY",        "")
 API_SECRET     = os.environ.get("BITGET_API_SECRET",     "")
 API_PASSPHRASE = os.environ.get("BITGET_API_PASSPHRASE", "")

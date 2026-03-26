@@ -79,6 +79,9 @@ def get_qualified_pairs_and_sentiment() -> tuple[list[str], SentimentResult]:
         if vol_usdt < MIN_VOLUME_USDT:
             continue
 
+        if lastPr > 150:
+            continue
+
         qualified.append(symbol)
 
         # ── NEW: capture BTC change for veto ─────────────────────

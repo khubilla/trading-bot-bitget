@@ -70,9 +70,9 @@ def get_qualified_pairs_and_sentiment() -> tuple[list[str], SentimentResult]:
 
         try:
             vol_usdt     = float(t.get("quoteVolume") or 0)
-            change_str   = t.get("change24h") or "0"
-            price_change = float(change_str) * 100
+            openUtc      = float(t.get("openUtc") or t.get("open24h") or 0)
             lastPr       = float(t.get("lastPr") or 0)
+            price_change = ((lastPr - openUtc) / openUtc * 100) if openUtc > 0 else 0.0
         except (ValueError, TypeError):
             continue
 

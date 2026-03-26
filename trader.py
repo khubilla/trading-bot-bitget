@@ -186,21 +186,81 @@ def _place_tpsl(symbol: str, hold_side: str,
     return False
 
 
-# ── Order Placement ───────────────────────────────────────────────── #
+def _place_s2_exits(symbol: str, hold_side: str, qty_str: str,
+                    sl_trig: float, sl_exec: float,
+                    trail_trigger: float, trail_range: float) -> bool:
+    """
+    S2 exit orders placed at entry:
+    1. SL at box_low (place-pos-tpsl loss_plan)
+    2. Partial TP — sell 50% at trail_trigger (place-tpsl-order profit_plan)
+    3. Trailing stop on remaining 50% (place-plan-order moving_plan)
+    """
+    import time as _t
+    half_qty   = str(round(float(qty_str) / 2, 4))
+    close_side = "sell" if hold_side == "long" else "buy"
+
+    for attempt in range(3):
+        try:
+            # 1. SL on full position
+            bc.post("/api/v2/mix/order/place-pos-tpsl", {
+                "symbol":               symbol,
+                "productType":          PRODUCT_TYPE,
+                "marginCoin":           MARGIN_COIN,
+                "holdSide":             hold_side,
+                "stopLossTriggerPrice": str(sl_trig),
+                "stopLossTriggerType":  "mark_price",
+                "stopLossExecutePrice": str(sl_exec),
+            })
+            _t.sleep(0.5)
+
+            # 2. Partial TP — sell 50% when trail_trigger hit
+            bc.post("/api/v2/mix/order/place-tpsl-order", {
+                "symbol":       symbol,
+                "productType":  PRODUCT_TYPE,
+                "marginCoin":   MARGIN_COIN,
+                "planType":     "profit_plan",
+                "triggerPrice": str(trail_trigger),
+                "triggerType":  "mark_price",
+                "executePrice": "0",
+                "holdSide":     hold_side,
+                "size":         half_qty,
+            })
+            _t.sleep(0.5)
+
+            # 3. Trailing stop on remaining 50%
+            bc.post("/api/v2/mix/order/place-plan-order", {
+                "symbol":        symbol,
+                "productType":   PRODUCT_TYPE,
+                "marginCoin":    MARGIN_COIN,
+                "planType":      "moving_plan",
+                "size":          half_qty,
+                "side":          close_side,
+                "tradeSide":     "close",
+                "triggerPrice":  str(trail_trigger),
+                "triggerType":   "mark_price",
+                "callbackRatio": str(trail_range),
+                "orderType":     "market",
+            })
+            return True
+        except Exception as e:
+            logger.warning(f"[{symbol}] S2 exits attempt {attempt+1}/3: {e}")
+            if attempt < 2:
+                _t.sleep(1.5)
+    return False
 
 def open_long(
     symbol: str,
     box_low: float,
-    leverage: int        = LEVERAGE,
-    trade_size_pct: float = TRADE_SIZE_PCT,
+    leverage: int          = LEVERAGE,
+    trade_size_pct: float  = TRADE_SIZE_PCT,
     take_profit_pct: float = TAKE_PROFIT_PCT,
-    stop_loss_pct: float = STOP_LOSS_PCT
+    stop_loss_pct: float   = STOP_LOSS_PCT,
+    use_s2_exits: bool     = False,
 ) -> dict:
     """
     Opens a LONG position.
-    SL = box_low * 0.999  (just below the consolidation box)
-    TP = entry * (1 + take_profit_pct)
-    Leverage is explicitly set before the order.
+    SL = mark * (1 - stop_loss_pct)  default
+    S2: SL at box_low + partial TP at +100% margin + trailing stop on remaining 50%
     """
     import time as _t
     balance  = get_usdt_balance()
@@ -210,11 +270,9 @@ def open_long(
 
     tp_trig  = float(_round_price(mark * (1 + take_profit_pct), symbol))
     tp_exec  = float(_round_price(tp_trig * 1.005, symbol))
-    #sl_trig  = float(_round_price(box_low * 0.999, symbol))
     sl_trig  = float(_round_price(mark * (1 - stop_loss_pct), symbol))
     sl_exec  = float(_round_price(sl_trig * 0.995, symbol))
 
-    # Set leverage BEFORE placing order
     set_leverage(symbol, leverage)
 
     bc.post("/api/v2/mix/order/place-order", {
@@ -226,9 +284,19 @@ def open_long(
 
     _t.sleep(2.0)
 
-    ok = _place_tpsl(symbol, "long", tp_trig, tp_exec, sl_trig, sl_exec)
+    if use_s2_exits:
+        from config_s2 import S2_TRAILING_TRIGGER_PCT, S2_TRAILING_RANGE_PCT
+        trail_trig = float(_round_price(mark * (1 + S2_TRAILING_TRIGGER_PCT), symbol))
+        sl_s2_trig = float(_round_price(box_low * 0.999, symbol))
+        sl_s2_exec = float(_round_price(sl_s2_trig * 0.995, symbol))
+        ok = _place_s2_exits(symbol, "long", qty,
+                             sl_s2_trig, sl_s2_exec,
+                             trail_trig, S2_TRAILING_RANGE_PCT)
+    else:
+        ok = _place_tpsl(symbol, "long", tp_trig, tp_exec, sl_trig, sl_exec)
+
     if not ok:
-        logger.error(f"[{symbol}] ⚠️  TP/SL failed! Set manually: SL={sl_trig} TP={tp_trig}")
+        logger.error(f"[{symbol}] ⚠️  TP/SL failed! Set manually: SL={sl_trig}")
 
     result = {
         "symbol": symbol, "side": "LONG", "qty": qty,
@@ -238,7 +306,7 @@ def open_long(
     }
     logger.info(
         f"[{symbol}] 🟢 LONG {leverage}x | qty={qty} entry≈{mark:.5f} "
-        f"SL={sl_trig} TP={tp_trig} | {'✅' if ok else '❌ SET MANUALLY'}"
+        f"SL={sl_trig} | {'✅ S2 exits' if use_s2_exits else 'TP='+str(tp_trig)} | {'✅' if ok else '❌ SET MANUALLY'}"
     )
     return result
 

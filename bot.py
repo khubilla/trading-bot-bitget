@@ -322,7 +322,8 @@ class MTFBot:
             trade = tr.open_long(symbol, box_low=s2_bl, leverage=S2_LEVERAGE,
                                  trade_size_pct=S2_TRADE_SIZE_PCT,
                                  take_profit_pct=S2_TAKE_PROFIT_PCT,
-                                 stop_loss_pct=S2_STOP_LOSS_PCT)
+                                 stop_loss_pct=S2_STOP_LOSS_PCT,
+                                 use_s2_exits=True)
             trade["strategy"] = "S2"
             _log_trade("S2_LONG", trade)
             st.add_open_trade(trade)

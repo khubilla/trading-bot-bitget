@@ -875,7 +875,7 @@
 const $ = id => document.getElementById(id);
 
 function fmt(n, dec=2) {
-  if (n == null) return '—';
+  if (n == null || n === "?" || Number.isNaN(Number(n))) return '—';
   return Number(n).toFixed(dec);
 }
 
@@ -1361,7 +1361,7 @@ function initCharts() {
 
   // Sync crosshair between charts
   candleChart.subscribeCrosshairMove(p => {
-    if (p.time) rsiChart.setCrosshairPosition(p.point?.y ?? 0, p.time, rsiLineSeries);
+    if (p.time) try { rsiChart.setCrosshairPosition(p.point?.y ?? 0, p.time, rsiLineSeries); } catch(_) {}
   });
 }
 
@@ -1422,7 +1422,7 @@ async function loadChart(symbol, interval) {
         });
         // Sync crosshair
         candleChart.subscribeCrosshairMove(p => {
-          if (p.time && macdChart && macdFirstSeries) macdChart.setCrosshairPosition(p.point?.y ?? 0, p.time, macdFirstSeries);
+          if (p.time && macdChart && macdFirstSeries) try { macdChart.setCrosshairPosition(p.point?.y ?? 0, p.time, macdFirstSeries); } catch(_) {}
         });
       } else {
         // Clear old macd series

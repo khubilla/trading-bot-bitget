@@ -153,7 +153,7 @@ def set_leverage(symbol: str, leverage: int):
                 "leverage":    str(leverage),
                 "holdSide":    hold_side,
             })
-            logger.debug(f"[{symbol}] Leverage set to {leverage}x ({hold_side})")
+            logger.info(f"[{symbol}] Leverage set to {leverage}x ({hold_side})")
         except Exception as e:
             logger.warning(f"[{symbol}] set_leverage({hold_side}) warn: {e}")
 
@@ -287,13 +287,14 @@ def open_long(
         from config_s2 import S2_TRAILING_TRIGGER_PCT, S2_TRAILING_RANGE_PCT
         trail_trig = float(_round_price(mark * (1 + S2_TRAILING_TRIGGER_PCT), symbol))
         if sl_floor > 0:
-            sl_s2_trig = float(_round_price(sl_floor, symbol))
+            sl_trig = float(_round_price(sl_floor, symbol))
         else:
-            sl_s2_trig = float(_round_price(box_low * 0.999, symbol))
-        sl_s2_exec = float(_round_price(sl_s2_trig * 0.995, symbol))
+            sl_trig = float(_round_price(box_low * 0.999, symbol))
+        sl_exec = float(_round_price(sl_trig * 0.995, symbol))
         ok = _place_s2_exits(symbol, "long", qty,
-                             sl_s2_trig, sl_s2_exec,
+                             sl_trig, sl_exec,
                              trail_trig, S2_TRAILING_RANGE_PCT)
+        tp_trig = trail_trig  # For dashboard display: show where partial TP triggers
     else:
         if sl_floor > 0:
             sl_trig = float(_round_price(sl_floor, symbol))

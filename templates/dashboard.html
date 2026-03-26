@@ -866,7 +866,7 @@ function fmtUSD(n) {
 function relTime(iso) {
   if (!iso) return '—';
   const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (diff < 60)  return Math.floor(diff) + 's ago';
+  if (diff < 120) return Math.floor(diff) + 's ago';
   if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
   return Math.floor(diff / 3600) + 'h ago';
 }
@@ -991,6 +991,25 @@ function render(s) {
           </div>
         </div>`;
     }).join('');
+  }
+
+  // ── Signal log
+  const logs = s.scan_log || [];
+  const logEl = $('log-feed');
+  if (logEl) {
+    if (logs.length === 0) {
+      logEl.innerHTML = '<div style="color:var(--muted);padding:12px;font-size:11px">No signals yet...</div>';
+    } else {
+      logEl.innerHTML = logs.slice(0, 50).map(l => {
+        const age = relTime(l.time);
+        const lvl = l.level || 'INFO';
+        return `<div class="log-entry">
+          <span class="log-level ${lvl}">${lvl}</span>
+          <span class="log-msg">${l.msg}</span>
+          <span class="log-time">${age}</span>
+        </div>`;
+      }).join('');
+    }
   }
 
   // ── Pair scanner grid

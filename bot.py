@@ -187,9 +187,8 @@ class MTFBot:
         direction = self.sentiment.direction
         if direction == "NEUTRAL":
             logger.info(f"⏸️  NEUTRAL — S1 paused, S2 scanning...")
-            return
-
-        if direction == "BULLISH":
+            allowed = "BULLISH"  # S2 is LONG-only, still scan on neutral
+        elif direction == "BULLISH":
             allowed = "BULLISH"
         elif direction == "BEARISH":
             allowed = "BEARISH"
@@ -293,7 +292,7 @@ class MTFBot:
             return False
 
         # ── Execute S1 ────────────────────────────────────────────── #
-        if s1_sig in ("LONG", "SHORT"):
+        if s1_sig in ("LONG", "SHORT") and allowed_direction != "NEUTRAL":
             st.add_scan_log(
                 f"[S1][{symbol}] {'🟢' if s1_sig == 'LONG' else '🔴'} {s1_sig} | "
                 f"RSI={rsi_val:.1f} ADX={adx_val:.1f} | SL=box",

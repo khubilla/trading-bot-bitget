@@ -13,9 +13,10 @@
 #   - Current 15m candle closes above uptick candle's high = entry trigger
 #   - MACD (12,26,9) line > signal line (momentum turning up)
 #
-# Exit:
+# Exit (same as S2):
 #   - SL: below pullback pivot low
-#   - TP: computed from R:R minimum (S3_MIN_RR × risk)
+#   - Partial TP: close 50% at +10% price move (+100% margin at 10x)
+#   - Trailing stop: 10% callback on remaining 50%
 
 S3_ENABLED = True
 
@@ -45,5 +46,6 @@ S3_ENTRY_BUFFER_PCT = 0.001     # 0.1% above uptick candle's high
 S3_LEVERAGE         = 10
 S3_TRADE_SIZE_PCT   = 0.25      # 25% of balance as margin
 S3_SL_BUFFER_PCT    = 0.002     # 0.2% below pivot low for SL
-S3_MIN_RR           = 2.0       # Minimum reward:risk ratio
-S3_TAKE_PROFIT_PCT  = 0.05      # 5% price move = +50% margin at 10x (fallback TP)
+S3_MIN_RR               = 2.0   # Minimum reward:risk ratio (vs partial TP level)
+S3_TRAILING_TRIGGER_PCT = 0.10  # 10% price move → close 50% (+100% margin at 10x)
+S3_TRAILING_RANGE_PCT   = 10    # 10% trailing callback on remaining 50%

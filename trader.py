@@ -197,7 +197,6 @@ def _place_s2_exits(symbol: str, hold_side: str, qty_str: str,
     """
     import time as _t
     half_qty   = str(round(float(qty_str) / 2, 4))
-    close_side = "sell" if hold_side == "long" else "buy"
 
     for attempt in range(3):
         try:
@@ -228,18 +227,16 @@ def _place_s2_exits(symbol: str, hold_side: str, qty_str: str,
             _t.sleep(0.5)
 
             # 3. Trailing stop on remaining 50%
-            bc.post("/api/v2/mix/order/place-plan-order", {
-                "symbol":        symbol,
-                "productType":   PRODUCT_TYPE,
-                "marginCoin":    MARGIN_COIN,
-                "planType":      "moving_plan",
-                "size":          half_qty,
-                "side":          close_side,
-                "tradeSide":     "close",
-                "triggerPrice":  str(trail_trigger),
-                "triggerType":   "mark_price",
-                "callbackRatio": str(trail_range),
-                "orderType":     "market",
+            bc.post("/api/v2/mix/order/place-tpsl-order", {
+                "symbol":       symbol,
+                "productType":  PRODUCT_TYPE,
+                "marginCoin":   MARGIN_COIN,
+                "planType":     "moving_plan",
+                "triggerPrice": str(trail_trigger),
+                "triggerType":  "mark_price",
+                "holdSide":     hold_side,
+                "size":         half_qty,
+                "rangeRate":    str(round(trail_range / 100, 4)),  # API expects decimal: 10% → "0.1"
             })
             return True
         except Exception as e:
@@ -250,7 +247,8 @@ def _place_s2_exits(symbol: str, hold_side: str, qty_str: str,
 
 def open_long(
     symbol: str,
-    box_low: float,
+    box_low: float         = 0,
+    sl_floor: float        = 0,
     leverage: int          = LEVERAGE,
     trade_size_pct: float  = TRADE_SIZE_PCT,
     take_profit_pct: float = TAKE_PROFIT_PCT,
@@ -260,7 +258,8 @@ def open_long(
     """
     Opens a LONG position.
     SL = mark * (1 - stop_loss_pct)  default
-    S2: SL at box_low + partial TP at +100% margin + trailing stop on remaining 50%
+    S2/S3: partial TP at +100% margin + trailing stop on remaining 50%
+      S2 uses box_low for SL; S3 passes sl_floor (pre-computed pivot SL)
     """
     import time as _t
     balance  = get_usdt_balance()
@@ -287,12 +286,18 @@ def open_long(
     if use_s2_exits:
         from config_s2 import S2_TRAILING_TRIGGER_PCT, S2_TRAILING_RANGE_PCT
         trail_trig = float(_round_price(mark * (1 + S2_TRAILING_TRIGGER_PCT), symbol))
-        sl_s2_trig = float(_round_price(box_low * 0.999, symbol))
+        if sl_floor > 0:
+            sl_s2_trig = float(_round_price(sl_floor, symbol))
+        else:
+            sl_s2_trig = float(_round_price(box_low * 0.999, symbol))
         sl_s2_exec = float(_round_price(sl_s2_trig * 0.995, symbol))
         ok = _place_s2_exits(symbol, "long", qty,
                              sl_s2_trig, sl_s2_exec,
                              trail_trig, S2_TRAILING_RANGE_PCT)
     else:
+        if sl_floor > 0:
+            sl_trig = float(_round_price(sl_floor, symbol))
+            sl_exec = float(_round_price(sl_floor * 0.995, symbol))
         ok = _place_tpsl(symbol, "long", tp_trig, tp_exec, sl_trig, sl_exec)
 
     if not ok:
@@ -313,14 +318,15 @@ def open_long(
 
 def open_short(
     symbol: str,
-    box_high: float,
-    leverage: int         = LEVERAGE,
+    box_high: float        = 0,
+    sl_floor: float        = 0,
+    leverage: int          = LEVERAGE,
     trade_size_pct: float  = TRADE_SIZE_PCT,
     take_profit_pct: float = TAKE_PROFIT_PCT,
 ) -> dict:
     """
     Opens a SHORT position.
-    SL = box_high * 1.001 (just above the consolidation box)
+    SL = sl_floor if provided, else box_high * 1.001 (just above the consolidation box)
     TP = entry * (1 - take_profit_pct)
     """
     import time as _t
@@ -331,7 +337,10 @@ def open_short(
 
     tp_trig  = float(_round_price(mark * (1 - take_profit_pct), symbol))
     tp_exec  = float(_round_price(tp_trig * 0.995, symbol))
-    sl_trig  = float(_round_price(box_high * 1.001, symbol))
+    if sl_floor > 0:
+        sl_trig = float(_round_price(sl_floor, symbol))
+    else:
+        sl_trig = float(_round_price(box_high * 1.001, symbol))
     sl_exec  = float(_round_price(sl_trig * 1.005, symbol))
 
     set_leverage(symbol, leverage)

@@ -86,8 +86,9 @@ config_s3_mod.S3_ENTRY_BUFFER_PCT   = 0.001
 config_s3_mod.S3_LEVERAGE           = 10
 config_s3_mod.S3_TRADE_SIZE_PCT     = 0.25
 config_s3_mod.S3_SL_BUFFER_PCT      = 0.002
-config_s3_mod.S3_MIN_RR             = 2.0
-config_s3_mod.S3_TAKE_PROFIT_PCT    = 0.05
+config_s3_mod.S3_MIN_RR               = 2.0
+config_s3_mod.S3_TRAILING_TRIGGER_PCT = 0.10
+config_s3_mod.S3_TRAILING_RANGE_PCT   = 10
 sys.modules["config_s3"] = config_s3_mod
 
 from strategy import (
@@ -580,7 +581,7 @@ def backtest_s3_symbol(sym: str, days: int = 180, debug: bool = False) -> list[d
         S3_ADX_MIN, S3_STOCH_K_PERIOD, S3_STOCH_D_SMOOTH, S3_STOCH_OVERSOLD,
         S3_STOCH_LOOKBACK, S3_MACD_FAST, S3_MACD_SLOW, S3_MACD_SIGNAL,
         S3_ENTRY_BUFFER_PCT, S3_SL_BUFFER_PCT, S3_MIN_RR,
-        S3_TAKE_PROFIT_PCT, S3_LEVERAGE,
+        S3_TRAILING_TRIGGER_PCT, S3_LEVERAGE,
     )
 
     # Fetch 15m data — need 210+ candles for EMA200 warmup
@@ -690,15 +691,15 @@ def backtest_s3_symbol(sym: str, days: int = 180, debug: bool = False) -> list[d
         if risk <= 0:
             i += 1
             continue
-        reward = S3_TAKE_PROFIT_PCT * entry_price
+        reward = S3_TRAILING_TRIGGER_PCT * entry_price
         rr = reward / risk
         if rr < S3_MIN_RR:
             i += 1
             continue
         dbg["rr_ok"] += 1
 
-        # Execute trade simulation
-        tp_price = entry_price * (1 + S3_TAKE_PROFIT_PCT)
+        # Execute trade simulation (partial TP at +10%, trailing stop on rest)
+        tp_price = entry_price * (1 + S3_TRAILING_TRIGGER_PCT)
         result   = "OPEN"
         exit_price = exit_i = None
 

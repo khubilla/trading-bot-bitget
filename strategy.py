@@ -570,7 +570,7 @@ def evaluate_s3(
         S3_ADX_MIN,
         S3_STOCH_K_PERIOD, S3_STOCH_D_SMOOTH, S3_STOCH_OVERSOLD, S3_STOCH_LOOKBACK,
         S3_MACD_FAST, S3_MACD_SLOW, S3_MACD_SIGNAL,
-        S3_ENTRY_BUFFER_PCT, S3_SL_BUFFER_PCT, S3_MIN_RR, S3_TAKE_PROFIT_PCT,
+        S3_ENTRY_BUFFER_PCT, S3_SL_BUFFER_PCT, S3_MIN_RR, S3_TRAILING_TRIGGER_PCT,
     )
 
     if not S3_ENABLED:
@@ -663,7 +663,7 @@ def evaluate_s3(
     if risk <= 0:
         return "HOLD", adx_val, entry_trigger, sl_price, "SL >= entry — invalid setup"
 
-    reward = S3_TAKE_PROFIT_PCT * current_close
+    reward = S3_TRAILING_TRIGGER_PCT * current_close
     rr     = reward / risk
     if rr < S3_MIN_RR:
         return "HOLD", adx_val, entry_trigger, sl_price, (

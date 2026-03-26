@@ -1,9 +1,9 @@
 __pycache__
 venv
 bot.log
-requirements.txt
 state.json
-config.py
+state_paper.json
+paper_state.json
 trades.csv
 .DS_Store
 backtest_report.html

@@ -5,9 +5,16 @@ Bot writes here → dashboard.py reads state.json every 3 seconds.
 
 import json, os, threading
 from datetime import datetime, timezone
+from pathlib import Path
 
-STATE_FILE = "state.json"
+_DATA_DIR  = Path(os.environ.get("DATA_DIR", "."))
+STATE_FILE = str(_DATA_DIR / "state.json")
 _lock = threading.Lock()
+
+def set_file(path: str):
+    """Call once at startup to redirect all state I/O to a different file (e.g. paper mode)."""
+    global STATE_FILE
+    STATE_FILE = path
 
 _default: dict = {
     "status":          "STOPPED",

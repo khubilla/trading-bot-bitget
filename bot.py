@@ -22,7 +22,13 @@ from strategy import (
     calculate_rsi, detect_consolidation,
     check_daily_trend,
 )
-import trader as tr
+PAPER_MODE = "--paper" in sys.argv
+if PAPER_MODE:
+    import paper_trader as tr
+    st.set_file("state_paper.json")
+    print("📝 PAPER TRADING MODE — no real orders will be placed")
+else:
+    import trader as tr
 
 # ── Logging ──────────────────────────────────────────────────────── #
 
@@ -70,7 +76,11 @@ class MTFBot:
         logger.info(f"   S1 Risk      : {config_s1.TRADE_SIZE_PCT*100:.0f}% | {config_s1.LEVERAGE}x | "
                     f"SL=box TP={config_s1.TAKE_PROFIT_PCT*100:.0f}%")
         logger.info(f"   S1 ADX thr.  : {config_s1.ADX_TREND_THRESHOLD}")
-        logger.info(f"   Dashboard    : python dashboard.py → http://localhost:8080\n")
+        logger.info(f"   Dashboard    : python dashboard.py → http://localhost:8080")
+        if PAPER_MODE:
+            logger.info(f"   ⚠️  PAPER MODE : orders simulated | balance in paper_state.json\n")
+        else:
+            logger.info(f"")
 
         # ── Startup position sync ─────────────────────────────────── #
         try:
@@ -313,15 +323,37 @@ class MTFBot:
                 f"RSI={rsi_val:.1f} ADX={adx_val:.1f} | SL=box",
                 "SIGNAL"
             )
+            # SL = lower of (-50% P/L) or (last swing candle × buffer)
+            lev = config_s1.LEVERAGE
+            mark_now = float(ltf_df["close"].iloc[-1])
+            pnl50_long  = mark_now * (1 - 0.50 / lev)   # -50% P/L at leverage
+            pnl50_short = mark_now * (1 + 0.50 / lev)   # -50% P/L for short
+            last_red_low = next(
+                (float(r["low"])  for _, r in ltf_df.iloc[::-1].iterrows() if float(r["close"]) < float(r["open"])),
+                None
+            )
+            last_grn_high = next(
+                (float(r["high"]) for _, r in ltf_df.iloc[::-1].iterrows() if float(r["close"]) > float(r["open"])),
+                None
+            )
+            sl_long  = min(pnl50_long,  last_red_low  * 0.998 if last_red_low  else pnl50_long)
+            sl_short = max(pnl50_short, last_grn_high * 1.002 if last_grn_high else pnl50_short)
+
             if s1_sig == "LONG":
-                trade = tr.open_long(symbol, box_low=s1_bl, leverage=config_s1.LEVERAGE,
+                trade = tr.open_long(symbol, sl_floor=sl_long, leverage=config_s1.LEVERAGE,
                                      trade_size_pct=config_s1.TRADE_SIZE_PCT,
                                      take_profit_pct=config_s1.TAKE_PROFIT_PCT)
             else:
-                trade = tr.open_short(symbol, box_high=s1_bh, leverage=config_s1.LEVERAGE,
+                trade = tr.open_short(symbol, sl_floor=sl_short, leverage=config_s1.LEVERAGE,
                                       trade_size_pct=config_s1.TRADE_SIZE_PCT,
                                       take_profit_pct=config_s1.TAKE_PROFIT_PCT)
             trade["strategy"] = "S1"
+            trade["snap_rsi"]         = round(rsi_val, 1)
+            trade["snap_adx"]         = round(adx_val, 1)
+            trade["snap_htf"]         = "BULL" if htf_bull else "BEAR" if htf_bear else "NONE"
+            trade["snap_coil"]        = is_coil
+            trade["snap_box_range_pct"] = round((s1_bh - s1_bl) / s1_bl * 100, 3) if s1_bh and s1_bl else None
+            trade["snap_sentiment"]   = self.sentiment.direction
             _log_trade(f"S1_{s1_sig}", trade)
             st.add_open_trade(trade)
             self.active_positions[symbol] = {
@@ -340,6 +372,9 @@ class MTFBot:
                                  stop_loss_pct=S2_STOP_LOSS_PCT,
                                  use_s2_exits=True)
             trade["strategy"] = "S2"
+            trade["snap_daily_rsi"]   = round(s2_rsi, 1)
+            trade["snap_box_range_pct"] = round((s2_bh - s2_bl) / s2_bl * 100, 3) if s2_bh and s2_bl else None
+            trade["snap_sentiment"]   = self.sentiment.direction
             _log_trade("S2_LONG", trade)
             st.add_open_trade(trade)
             self.active_positions[symbol] = {
@@ -350,20 +385,22 @@ class MTFBot:
 
         # ── Execute S3 ────────────────────────────────────────────── #
         if s3_sig == "LONG":
-            # SL is derived from the pullback pivot low; compute % from current price
-            current_price = float(tr.get_mark_price(symbol))
-            risk_pct      = max((current_price - s3_sl) / current_price, 0.005)
-            tp_pct        = max(config_s3.S3_MIN_RR * risk_pct, config_s3.S3_TAKE_PROFIT_PCT)
             st.add_scan_log(f"[S3][{symbol}] 🟢 LONG | {s3_reason}", "SIGNAL")
             trade = tr.open_long(
                 symbol,
-                box_low         = s3_sl,
+                sl_floor        = s3_sl,
                 leverage        = config_s3.S3_LEVERAGE,
                 trade_size_pct  = config_s3.S3_TRADE_SIZE_PCT,
-                take_profit_pct = tp_pct,
-                stop_loss_pct   = risk_pct,
+                use_s2_exits    = True,
             )
             trade["strategy"] = "S3"
+            trade["snap_adx"]           = round(s3_adx, 1) if s3_adx else None
+            trade["snap_entry_trigger"] = round(s3_trigger, 8) if s3_trigger else None
+            trade["snap_sl"]            = round(s3_sl, 8) if s3_sl else None
+            trade["snap_rr"]            = round(
+                config_s3.S3_TRAILING_TRIGGER_PCT * s3_trigger / (s3_trigger - s3_sl), 2
+            ) if s3_trigger and s3_sl and s3_trigger > s3_sl else None
+            trade["snap_sentiment"]     = self.sentiment.direction
             _log_trade("S3_LONG", trade)
             st.add_open_trade(trade)
             self.active_positions[symbol] = {

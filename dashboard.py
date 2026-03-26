@@ -12,8 +12,14 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
 
-STATE_FILE = "state.json"
-app = FastAPI(title="Bitget MTF Bot Dashboard")
+import os as _os
+import sys as _sys
+from pathlib import Path as _Path
+PAPER_MODE = "--paper" in _sys.argv
+_DATA_DIR  = _Path(_os.environ.get("DATA_DIR", "."))
+STATE_FILE = str(_DATA_DIR / ("state_paper.json" if PAPER_MODE else "state.json"))
+PORT       = int(_os.environ.get("PORT", 8081 if PAPER_MODE else 8080))
+app = FastAPI(title="Bitget MTF Bot Dashboard" + (" [PAPER]" if PAPER_MODE else ""))
 
 # Add bot directory to path so we can import trader + config
 sys.path.insert(0, str(Path(__file__).parent))
@@ -320,5 +326,6 @@ def index():
 
 
 if __name__ == "__main__":
-    print("🚀 Dashboard: http://localhost:8080")
-    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="warning")
+    label = " [PAPER]" if PAPER_MODE else ""
+    print(f"🚀 Dashboard{label}: http://localhost:{PORT}")
+    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="warning")

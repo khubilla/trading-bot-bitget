@@ -1,6 +1,6 @@
 
 """
-backtest.py — Walk-forward backtest for Strategy 1 (S1) and Strategy 2 (S2)
+backtest.py — Walk-forward backtest for Strategy 1 (S1), Strategy 2 (S2), and Strategy 3 (S3)
 
 FIXES APPLIED:
   B1. fetch_daily() bypasses ccxt entirely — uses Bitget REST API directly
@@ -18,6 +18,7 @@ Usage:
     python backtest.py --s2-only --debug --symbols BTCUSDT ETHUSDT
     python backtest.py --s2-only --days 365
     python backtest.py --s1-only
+    python backtest.py --s3-only
 """
 
 import argparse
@@ -48,6 +49,7 @@ config_mod.LEVERAGE               = 30
 config_mod.TRADE_SIZE_PCT         = 0.05
 config_mod.TAKE_PROFIT_PCT        = 0.10
 config_mod.STOP_LOSS_PCT          = 0.05
+config_mod.PRODUCT_TYPE           = "usdt-futures"
 sys.modules["config"] = config_mod
 
 config_s2_mod = types.ModuleType("config_s2")
@@ -65,9 +67,33 @@ config_s2_mod.S2_TAKE_PROFIT_PCT    = 0.10
 config_s2_mod.S2_STOP_LOSS_PCT      = 0.05
 sys.modules["config_s2"] = config_s2_mod
 
+config_s3_mod = types.ModuleType("config_s3")
+config_s3_mod.S3_ENABLED            = True
+config_s3_mod.S3_EMA_FAST           = 10
+config_s3_mod.S3_EMA_MED            = 20
+config_s3_mod.S3_EMA_SLOW           = 50
+config_s3_mod.S3_EMA_TREND          = 200
+config_s3_mod.S3_ADX_MIN            = 30
+config_s3_mod.S3_STOCH_K_PERIOD     = 5
+config_s3_mod.S3_STOCH_D_SMOOTH     = 3
+config_s3_mod.S3_STOCH_OVERSOLD     = 30
+config_s3_mod.S3_STOCH_LOOKBACK     = 8
+config_s3_mod.S3_MACD_FAST          = 12
+config_s3_mod.S3_MACD_SLOW          = 26
+config_s3_mod.S3_MACD_SIGNAL        = 9
+config_s3_mod.S3_LTF_INTERVAL       = "15m"
+config_s3_mod.S3_ENTRY_BUFFER_PCT   = 0.001
+config_s3_mod.S3_LEVERAGE           = 10
+config_s3_mod.S3_TRADE_SIZE_PCT     = 0.25
+config_s3_mod.S3_SL_BUFFER_PCT      = 0.002
+config_s3_mod.S3_MIN_RR             = 2.0
+config_s3_mod.S3_TAKE_PROFIT_PCT    = 0.05
+sys.modules["config_s3"] = config_s3_mod
+
 from strategy import (
     calculate_rsi, calculate_ema, calculate_adx,
     detect_consolidation, _body_pct, _upper_wick, _body_size,
+    calculate_stoch, calculate_macd,
 )
 
 logging.basicConfig(level=logging.WARNING)
@@ -163,6 +189,74 @@ def fetch_daily(sym: str, days: int = 1095) -> pd.DataFrame:
     df = pd.DataFrame(all_rows, columns=["ts", "open", "high", "low", "close", "vol"])
     df = df.drop_duplicates("ts").sort_values("ts").reset_index(drop=True)
     df = df[df["ts"] >= start_ms].reset_index(drop=True)
+    return df
+
+
+def fetch_m15(sym: str, days: int = 90) -> pd.DataFrame:
+    """
+    Fetch 15m candles via Bitget REST API with forward pagination.
+    15m candles: 96 per day. 200 per request max.
+    """
+    BASE     = "https://api.bitget.com"
+    ENDPOINT = "/api/v2/mix/market/candles"
+    GRAN     = "15m"
+    MIN_MS   = 15 * 60 * 1000
+
+    now_ms    = int(datetime.now(timezone.utc).timestamp() * 1000)
+    start_ms  = now_ms - days * 86_400_000
+    cursor_ms = start_ms
+    all_rows  = []
+    batch_num = 0
+
+    while cursor_ms < now_ms:
+        params = {
+            "symbol":      sym,
+            "productType": "usdt-futures",
+            "granularity": GRAN,
+            "startTime":   str(cursor_ms),
+            "limit":       "200",
+        }
+        try:
+            resp = requests.get(BASE + ENDPOINT, params=params, timeout=15)
+            data = resp.json()
+        except Exception as e:
+            print(f"  ❌ [{sym}] 15m batch {batch_num} error: {e}")
+            break
+
+        if data.get("code") != "00000":
+            break
+
+        rows_raw = data.get("data") or []
+        if not rows_raw:
+            break
+
+        parsed = []
+        for r in rows_raw:
+            try:
+                parsed.append([int(r[0]), float(r[1]), float(r[2]),
+                                float(r[3]), float(r[4]), float(r[5])])
+            except (IndexError, ValueError):
+                continue
+
+        if not parsed:
+            break
+
+        all_rows.extend(parsed)
+        batch_num += 1
+
+        newest_ts = max(r[0] for r in parsed)
+        cursor_ms = newest_ts + MIN_MS
+
+        if cursor_ms >= now_ms:
+            break
+
+        time.sleep(0.1)
+
+    if not all_rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(all_rows, columns=["ts", "open", "high", "low", "close", "vol"])
+    df = df.drop_duplicates("ts").sort_values("ts").reset_index(drop=True)
     return df
 
 
@@ -475,6 +569,188 @@ def backtest_s1_symbol(sym: str) -> list[dict]:
     return trades
 
 
+def backtest_s3_symbol(sym: str, days: int = 180, debug: bool = False) -> list[dict]:
+    """
+    S3 — 15m Swing Pullback (Long-only). All indicators on 15m.
+    Prerequisites: 15m EMA alignment + ADX > 30
+    Entry: 15m Stoch oversold → green uptick → break above entry trigger + MACD bullish
+    """
+    from config_s3 import (
+        S3_EMA_FAST, S3_EMA_MED, S3_EMA_SLOW, S3_EMA_TREND,
+        S3_ADX_MIN, S3_STOCH_K_PERIOD, S3_STOCH_D_SMOOTH, S3_STOCH_OVERSOLD,
+        S3_STOCH_LOOKBACK, S3_MACD_FAST, S3_MACD_SLOW, S3_MACD_SIGNAL,
+        S3_ENTRY_BUFFER_PCT, S3_SL_BUFFER_PCT, S3_MIN_RR,
+        S3_TAKE_PROFIT_PCT, S3_LEVERAGE,
+    )
+
+    # Fetch 15m data — need 210+ candles for EMA200 warmup
+    df_15m = fetch_m15(sym, days=days)
+    if df_15m.empty or len(df_15m) < 210:
+        return []
+
+    trades = []
+    min_15m = max(210, S3_STOCH_K_PERIOD + S3_STOCH_D_SMOOTH + S3_STOCH_LOOKBACK + S3_MACD_SLOW + 10)
+
+    dbg = dict(total=len(df_15m), ema=0, adx=0,
+               stoch_os=0, green_uptick=0, breakout=0, macd_ok=0, rr_ok=0)
+
+    i = min_15m
+    while i < len(df_15m) - 1:
+        # ── 15m prerequisites ─────────────────────────────────── #
+        m15_window = df_15m.iloc[:i+1]
+        closes_15  = m15_window["close"].astype(float)
+
+        ema10  = float(calculate_ema(closes_15, S3_EMA_FAST).iloc[-1])
+        ema20  = float(calculate_ema(closes_15, S3_EMA_MED).iloc[-1])
+        ema50  = float(calculate_ema(closes_15, S3_EMA_SLOW).iloc[-1])
+        ema200 = float(calculate_ema(closes_15, S3_EMA_TREND).iloc[-1])
+
+        if not (ema10 > ema20 > ema50 > ema200):
+            i += 1
+            continue
+        dbg["ema"] += 1
+
+        adx_val = float(calculate_adx(m15_window)["adx"].iloc[-1])
+        if adx_val < S3_ADX_MIN:
+            i += 1
+            continue
+        dbg["adx"] += 1
+
+        slow_k, _ = calculate_stoch(m15_window, S3_STOCH_K_PERIOD, S3_STOCH_D_SMOOTH)
+        macd_line, sig_line, _ = calculate_macd(closes_15, S3_MACD_FAST, S3_MACD_SLOW, S3_MACD_SIGNAL)
+
+        # Look for oversold in last S3_STOCH_LOOKBACK completed candles
+        if i < S3_STOCH_LOOKBACK + 1:
+            i += 1
+            continue
+        lookback_k = slow_k.iloc[-S3_STOCH_LOOKBACK - 1:-1]
+        oversold_positions = [idx for idx, v in enumerate(lookback_k) if not np.isnan(v) and v < S3_STOCH_OVERSOLD]
+
+        if not oversold_positions:
+            i += 1
+            continue
+        dbg["stoch_os"] += 1
+
+        # Find pivot low
+        last_os_rel  = oversold_positions[-1]
+        first_os_rel = oversold_positions[0]
+        abs_last_os  = i - S3_STOCH_LOOKBACK + last_os_rel
+        abs_first_os = i - S3_STOCH_LOOKBACK + first_os_rel
+
+        os_period_df = df_15m.iloc[abs_first_os : abs_last_os + 1]
+        pivot_low    = float(os_period_df["low"].min())
+        sl_price     = pivot_low * (1 - S3_SL_BUFFER_PCT)
+
+        # First green candle after last oversold
+        after_os_df = df_15m.iloc[abs_last_os + 1 : i]
+        if after_os_df.empty:
+            i += 1
+            continue
+
+        first_green = None
+        for _, row in after_os_df.iterrows():
+            if float(row["close"]) > float(row["open"]):
+                first_green = row
+                break
+
+        if first_green is None:
+            i += 1
+            continue
+        dbg["green_uptick"] += 1
+
+        entry_trigger = float(first_green["high"]) * (1 + S3_ENTRY_BUFFER_PCT)
+
+        # Check breakout in next candle
+        nxt = df_15m.iloc[i + 1]
+        entry_price = None
+        if float(nxt["open"]) > entry_trigger:
+            entry_price = float(nxt["open"])
+        elif float(nxt["high"]) > entry_trigger:
+            entry_price = entry_trigger
+
+        if entry_price is None:
+            i += 1
+            continue
+        dbg["breakout"] += 1
+
+        # Check MACD at entry
+        # Use window INCLUDING the entry candle (i+1)
+        m15_at_entry = df_15m.iloc[:i+2]
+        closes_at_entry = m15_at_entry["close"].astype(float)
+        ml_entry, ms_entry, _ = calculate_macd(closes_at_entry, S3_MACD_FAST, S3_MACD_SLOW, S3_MACD_SIGNAL)
+        macd_ok = float(ml_entry.iloc[-1]) > float(ms_entry.iloc[-1])
+
+        if not macd_ok:
+            i += 1
+            continue
+        dbg["macd_ok"] += 1
+
+        # Check R:R
+        risk = entry_price - sl_price
+        if risk <= 0:
+            i += 1
+            continue
+        reward = S3_TAKE_PROFIT_PCT * entry_price
+        rr = reward / risk
+        if rr < S3_MIN_RR:
+            i += 1
+            continue
+        dbg["rr_ok"] += 1
+
+        # Execute trade simulation
+        tp_price = entry_price * (1 + S3_TAKE_PROFIT_PCT)
+        result   = "OPEN"
+        exit_price = exit_i = None
+
+        for j in range(i + 2, min(i + 200, len(df_15m))):
+            c = df_15m.iloc[j]
+            if float(c["low"]) <= sl_price:
+                result = "LOSS"; exit_price = sl_price; exit_i = j; break
+            if float(c["high"]) >= tp_price:
+                result = "WIN";  exit_price = tp_price; exit_i = j; break
+
+        if result == "OPEN":
+            exit_i     = min(i + 200, len(df_15m) - 1)
+            exit_price = float(df_15m.iloc[exit_i]["close"])
+            result     = "WIN" if exit_price > entry_price else "LOSS"
+
+        pnl_pct = (exit_price - entry_price) / entry_price
+        entry_dt = datetime.fromtimestamp(int(df_15m.iloc[i+1]["ts"]) / 1000, tz=timezone.utc)
+        exit_dt  = datetime.fromtimestamp(int(df_15m.iloc[exit_i]["ts"]) / 1000, tz=timezone.utc)
+
+        trades.append({
+            "strategy":     "S3",
+            "symbol":       sym,
+            "entry_date":   entry_dt.strftime("%Y-%m-%d %H:%M"),
+            "exit_date":    exit_dt.strftime("%Y-%m-%d %H:%M"),
+            "entry_price":  round(entry_price, 8),
+            "exit_price":   round(exit_price,  8),
+            "sl":           round(sl_price, 8),
+            "tp":           round(tp_price, 8),
+            "result":       result,
+            "pnl_pct":      round(pnl_pct * 100, 2),
+            "margin_pnl":   round(pnl_pct * S3_LEVERAGE * 100, 2),
+            "adx":          round(adx_val, 1),
+            "rr":           round(rr, 1),
+            "candles_held": exit_i - (i + 1),
+        })
+        i = exit_i + 1
+
+    if debug:
+        scanned = dbg["total"] - min_15m
+        print(f"\n  📊 {sym} S3 funnel ({dbg['total']} 15m candles, {scanned} scanned):")
+        print(f"     15m EMA    : {dbg['ema']:>5} pass")
+        print(f"     15m ADX    : {dbg['adx']:>5} pass")
+        print(f"     Stoch OS   : {dbg['stoch_os']:>5} pass")
+        print(f"     Green uptick: {dbg['green_uptick']:>5} pass")
+        print(f"     Breakout   : {dbg['breakout']:>5} pass")
+        print(f"     MACD       : {dbg['macd_ok']:>5} pass")
+        print(f"     R:R >= 2.0 : {dbg['rr_ok']:>5} pass")
+        print(f"     Trades     : {len(trades)}")
+
+    return trades
+
+
 def build_html_report(all_trades: list[dict], run_time: str) -> str:
     def stats(tlist):
         if not tlist:
@@ -494,6 +770,7 @@ def build_html_report(all_trades: list[dict], run_time: str) -> str:
 
     s1 = stats([t for t in all_trades if t["strategy"] == "S1"])
     s2 = stats([t for t in all_trades if t["strategy"] == "S2"])
+    s3 = stats([t for t in all_trades if t["strategy"] == "S3"])
     ov = stats(all_trades)
 
     def col(v):
@@ -512,25 +789,32 @@ def build_html_report(all_trades: list[dict], run_time: str) -> str:
         for t in sorted(tlist, key=lambda x: x["entry_date"], reverse=True):
             rc = "#00d68f" if t["result"]=="WIN" else "#ff4d6a"
             pc = col(t["margin_pnl"])
-            held = f'{t.get("candles_held","?")}d' if strat=="S2" else "—"
+            held = f'{t.get("candles_held","?")}' if strat in ["S2", "S3"] else "—"
+            held_unit = "d" if strat == "S2" else ("×15m" if strat == "S3" else "")
             dir_html = ""
             if strat == "S1":
                 d = t.get("direction","LONG")
                 bg = "#00d68f22" if d=="LONG" else "#ff4d6a22"
                 fc = "#00d68f"   if d=="LONG" else "#ff4d6a"
                 dir_html = f'<span style="background:{bg};color:{fc};padding:2px 6px;border-radius:4px;font-size:11px">{d}</span>'
+            extra_info = ""
+            if strat == "S3":
+                adx_v = t.get("adx", 0)
+                rr_v  = t.get("rr", 0)
+                extra_info = f'ADX={adx_v} R:R={rr_v}'
             rows += (f'<tr><td>{t["symbol"].replace("USDT","")}</td><td>{dir_html}</td>'
-                     f'<td>{t["entry_date"]}</td><td>{t["exit_date"]}</td><td>{held}</td>'
+                     f'<td>{t["entry_date"]}</td><td>{t["exit_date"]}</td><td>{held}{held_unit}</td>'
                      f'<td>{t["entry_price"]}</td><td>{t["exit_price"]}</td>'
                      f'<td style="color:{rc};font-weight:600">{t["result"]}</td>'
-                     f'<td style="color:{pc}">{t["margin_pnl"]:+.1f}%</td></tr>')
+                     f'<td style="color:{pc}">{t["margin_pnl"]:+.1f}%</td><td style="font-size:10px;color:#8899aa">{extra_info}</td></tr>')
         return (f'<div style="overflow-x:auto"><table><thead><tr>'
                 f'<th>Symbol</th><th>Dir</th><th>Entry</th><th>Exit</th>'
-                f'<th>Held</th><th>Entry$</th><th>Exit$</th><th>Result</th><th>Margin PnL</th>'
+                f'<th>Held</th><th>Entry$</th><th>Exit$</th><th>Result</th><th>Margin PnL</th><th>Info</th>'
                 f'</tr></thead><tbody>{rows}</tbody></table></div>')
 
     s1t = [t for t in all_trades if t["strategy"]=="S1"]
     s2t = [t for t in all_trades if t["strategy"]=="S2"]
+    s3t = [t for t in all_trades if t["strategy"]=="S3"]
 
     return f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -555,7 +839,7 @@ tr:hover td{{background:#1a2535}}
 .tc{{display:none}}.tc.active{{display:block}}
 </style></head><body>
 <h1>📊 Backtest Report</h1>
-<div class="meta">Run: {run_time} | S1: {s1["count"]} trades | S2: {s2["count"]} trades</div>
+<div class="meta">Run: {run_time} | S1: {s1["count"]} | S2: {s2["count"]} | S3: {s3["count"]} trades</div>
 <h2>Overall</h2>
 <div class="grid">
 {card("Total Trades",ov["count"])}{card("Win Rate",ov["win_rate"],"%")}
@@ -563,8 +847,9 @@ tr:hover td{{background:#1a2535}}
 {card("Avg Loss",ov["avg_loss"],"%")}{card("Best",ov["best"],"%")}{card("Worst",ov["worst"],"%")}
 </div>
 <div class="tabs">
-<div class="tab active" onclick="sw('s1')">S1 — MTF RSI ({s1["count"]} trades)</div>
-<div class="tab"        onclick="sw('s2')">S2 — Daily Coil ({s2["count"]} trades)</div>
+<div class="tab active" onclick="sw('s1')">S1 — MTF RSI ({s1["count"]})</div>
+<div class="tab"        onclick="sw('s2')">S2 — Daily Coil ({s2["count"]})</div>
+<div class="tab"        onclick="sw('s3')">S3 — Pullback ({s3["count"]})</div>
 </div>
 <div id="ts1" class="tc active">
 <div class="grid">
@@ -578,9 +863,15 @@ tr:hover td{{background:#1a2535}}
 {card("Total Margin",s2["total_margin_pnl"],"%")}{card("Avg Win",s2["avg_win"],"%")}
 {card("Avg Loss",s2["avg_loss"],"%")}{card("Best",s2["best"],"%")}{card("Worst",s2["worst"],"%")}
 </div>{tbl(s2t,"S2")}</div>
+<div id="ts3" class="tc">
+<div class="grid">
+{card("Trades",s3["count"])}{card("Win Rate",s3["win_rate"],"%")}
+{card("Total Margin",s3["total_margin_pnl"],"%")}{card("Avg Win",s3["avg_win"],"%")}
+{card("Avg Loss",s3["avg_loss"],"%")}{card("Best",s3["best"],"%")}{card("Worst",s3["worst"],"%")}
+</div>{tbl(s3t,"S3")}</div>
 <script>
 function sw(t){{
-  document.querySelectorAll('.tab').forEach((e,i)=>e.classList.toggle('active',['s1','s2'][i]===t));
+  document.querySelectorAll('.tab').forEach((e,i)=>e.classList.toggle('active',['s1','s2','s3'][i]===t));
   document.querySelectorAll('.tc').forEach(e=>e.classList.remove('active'));
   document.getElementById('t'+t).classList.add('active');
 }}
@@ -592,6 +883,7 @@ def main():
     parser.add_argument("--symbols",      nargs="*")
     parser.add_argument("--s1-only",      action="store_true")
     parser.add_argument("--s2-only",      action="store_true")
+    parser.add_argument("--s3-only",      action="store_true")
     parser.add_argument("--limit",        type=int,   default=None)
     parser.add_argument("--days",         type=int,   default=1095)
     parser.add_argument("--output",       default="backtest_report.html")
@@ -600,8 +892,9 @@ def main():
     parser.add_argument("--debug",        action="store_true")
     args = parser.parse_args()
 
-    run_s1 = not args.s2_only
-    run_s2 = not args.s1_only
+    run_s1 = not (args.s2_only or args.s3_only)
+    run_s2 = not (args.s1_only or args.s3_only)
+    run_s3 = not (args.s1_only or args.s2_only)
 
     print("🔍 Loading qualified symbols...")
     symbols = args.symbols if args.symbols else get_qualified_symbols()
@@ -647,6 +940,17 @@ def main():
                 print(f"S1:err({e})", end="  ", flush=True)
             time.sleep(0.3)
 
+        if run_s3:
+            try:
+                trades = backtest_s3_symbol(sym, days=args.days, debug=args.debug)
+                all_trades.extend(trades)
+                print(f"S3:{len(trades)}", end="  ", flush=True)
+            except Exception as e:
+                print(f"S3:err({e})", end="  ", flush=True)
+                if args.debug:
+                    import traceback; traceback.print_exc()
+            time.sleep(0.3)
+
     print(f"\n\n{'='*50}")
     print(f"✅ Total trades: {len(all_trades)}")
     if all_trades:
@@ -654,10 +958,12 @@ def main():
         pnl  = sum(t["margin_pnl"] for t in all_trades)
         print(f"   Win rate        : {wins/len(all_trades)*100:.1f}%  ({wins}W / {len(all_trades)-wins}L)")
         print(f"   Total margin PnL: {pnl:+.1f}%")
-        s2l = [t for t in all_trades if t["strategy"]=="S2"]
         s1l = [t for t in all_trades if t["strategy"]=="S1"]
-        if s2l: print(f"   S2: {len(s2l)} trades  win rate {sum(1 for t in s2l if t['result']=='WIN')/len(s2l)*100:.1f}%")
+        s2l = [t for t in all_trades if t["strategy"]=="S2"]
+        s3l = [t for t in all_trades if t["strategy"]=="S3"]
         if s1l: print(f"   S1: {len(s1l)} trades  win rate {sum(1 for t in s1l if t['result']=='WIN')/len(s1l)*100:.1f}%")
+        if s2l: print(f"   S2: {len(s2l)} trades  win rate {sum(1 for t in s2l if t['result']=='WIN')/len(s2l)*100:.1f}%")
+        if s3l: print(f"   S3: {len(s3l)} trades  win rate {sum(1 for t in s3l if t['result']=='WIN')/len(s3l)*100:.1f}%")
 
     print(f"\n📄 Writing → {args.output}")
     with open(args.output, "w", encoding="utf-8") as f:

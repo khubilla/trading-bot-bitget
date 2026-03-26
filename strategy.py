@@ -499,15 +499,12 @@ def evaluate_s2(
 
 
 # ════════════════════════════════════════════════════════════
-#  STRATEGY 3 — Daily Swing Pullback (Long-only)
+#  STRATEGY 3 — 15m Swing Pullback (Long-only)
 #
-#  Prerequisites (daily chart):
+#  All indicators on 15m chart:
 #  ─────────────────────────────────────────────────────────
 #  1. EMA10 > EMA20 > EMA50 > EMA200  (golden alignment)
-#  2. ADX > S3_DAILY_ADX_MIN          (strong trend)
-#
-#  Entry (15m chart):
-#  ─────────────────────────────────────────────────────────
+#  2. ADX > S3_ADX_MIN                (strong trend)
 #  3. Slow Stochastics (5,3) recently oversold (< 30)
 #     — confirms the pullback has happened
 #  4. First green candle after the oversold = uptick signal
@@ -561,17 +558,16 @@ def calculate_macd(
 
 def evaluate_s3(
     symbol: str,
-    daily_df: pd.DataFrame,
     m15_df: pd.DataFrame,
 ) -> tuple[Signal, float, float, float, str]:
     """
-    Strategy 3 — Daily Swing Pullback (Long-only).
+    Strategy 3 — 15m Swing Pullback (Long-only). All indicators on 15m.
     Returns (signal, adx, entry_trigger, sl_price, reason).
     """
     from config_s3 import (
         S3_ENABLED,
-        S3_DAILY_EMA_FAST, S3_DAILY_EMA_MED, S3_DAILY_EMA_SLOW, S3_DAILY_EMA_TREND,
-        S3_DAILY_ADX_MIN,
+        S3_EMA_FAST, S3_EMA_MED, S3_EMA_SLOW, S3_EMA_TREND,
+        S3_ADX_MIN,
         S3_STOCH_K_PERIOD, S3_STOCH_D_SMOOTH, S3_STOCH_OVERSOLD, S3_STOCH_LOOKBACK,
         S3_MACD_FAST, S3_MACD_SLOW, S3_MACD_SIGNAL,
         S3_ENTRY_BUFFER_PCT, S3_SL_BUFFER_PCT, S3_MIN_RR, S3_TAKE_PROFIT_PCT,
@@ -580,34 +576,28 @@ def evaluate_s3(
     if not S3_ENABLED:
         return "HOLD", 0.0, 0.0, 0.0, "S3 disabled"
 
-    # ── Daily prerequisites ────────────────────────────────── #
-    if len(daily_df) < 210:
-        return "HOLD", 0.0, 0.0, 0.0, "Not enough daily candles for EMA200"
-
-    closes_d = daily_df["close"].astype(float)
-    ema10_d  = float(calculate_ema(closes_d, S3_DAILY_EMA_FAST).iloc[-1])
-    ema20_d  = float(calculate_ema(closes_d, S3_DAILY_EMA_MED).iloc[-1])
-    ema50_d  = float(calculate_ema(closes_d, S3_DAILY_EMA_SLOW).iloc[-1])
-    ema200_d = float(calculate_ema(closes_d, S3_DAILY_EMA_TREND).iloc[-1])
-
-    if not (ema10_d > ema20_d > ema50_d > ema200_d):
-        return "HOLD", 0.0, 0.0, 0.0, "Daily EMA not aligned (need 10>20>50>200)"
-
-    adx_res = calculate_adx(daily_df)
-    adx_val = float(adx_res["adx"].iloc[-1])
-    if adx_val < S3_DAILY_ADX_MIN:
-        return "HOLD", adx_val, 0.0, 0.0, (
-            f"Daily ADX={adx_val:.1f} < {S3_DAILY_ADX_MIN} (not trending)"
-        )
-
-    # ── 15m setup ─────────────────────────────────────────── #
-    min_15m = S3_STOCH_K_PERIOD + S3_STOCH_D_SMOOTH + S3_STOCH_LOOKBACK + S3_MACD_SLOW + 10
+    # ── 15m prerequisites ─────────────────────────────────── #
+    min_15m = max(210, S3_STOCH_K_PERIOD + S3_STOCH_D_SMOOTH + S3_STOCH_LOOKBACK + S3_MACD_SLOW + 10)
     if len(m15_df) < min_15m:
-        return "HOLD", adx_val, 0.0, 0.0, "Not enough 15m candles"
+        return "HOLD", 0.0, 0.0, 0.0, f"Not enough 15m candles (need {min_15m})"
 
     closes_15 = m15_df["close"].astype(float)
+    ema10  = float(calculate_ema(closes_15, S3_EMA_FAST).iloc[-1])
+    ema20  = float(calculate_ema(closes_15, S3_EMA_MED).iloc[-1])
+    ema50  = float(calculate_ema(closes_15, S3_EMA_SLOW).iloc[-1])
+    ema200 = float(calculate_ema(closes_15, S3_EMA_TREND).iloc[-1])
 
-    # Slow Stochastics and MACD on full 15m history for accurate values
+    if not (ema10 > ema20 > ema50 > ema200):
+        return "HOLD", 0.0, 0.0, 0.0, "15m EMA not aligned (need 10>20>50>200)"
+
+    adx_res = calculate_adx(m15_df)
+    adx_val = float(adx_res["adx"].iloc[-1])
+    if adx_val < S3_ADX_MIN:
+        return "HOLD", adx_val, 0.0, 0.0, (
+            f"15m ADX={adx_val:.1f} < {S3_ADX_MIN} (not trending)"
+        )
+
+    # Slow Stochastics and MACD
     slow_k, _    = calculate_stoch(m15_df, S3_STOCH_K_PERIOD, S3_STOCH_D_SMOOTH)
     macd_line, sig_line, _ = calculate_macd(closes_15, S3_MACD_FAST, S3_MACD_SLOW, S3_MACD_SIGNAL)
     stoch_now = float(slow_k.iloc[-1])
@@ -619,13 +609,11 @@ def evaluate_s3(
 
     if not oversold_positions:
         return "HOLD", adx_val, 0.0, 0.0, (
-            f"Daily ✅ ADX={adx_val:.1f} EMA aligned | "
-            f"15m Stoch={stoch_now:.1f} — no oversold (<{S3_STOCH_OVERSOLD}) in last {S3_STOCH_LOOKBACK} candles"
+            f"15m ✅ ADX={adx_val:.1f} EMA aligned | "
+            f"Stoch={stoch_now:.1f} — no oversold (<{S3_STOCH_OVERSOLD}) in last {S3_STOCH_LOOKBACK} candles"
         )
 
     # Absolute positions from end of m15_df
-    # lookback_k = m15_df.iloc[-(S3_STOCH_LOOKBACK+1):-1]
-    # position i in lookback_k → m15_df index: -(S3_STOCH_LOOKBACK+1) + i
     last_os_rel  = oversold_positions[-1]
     first_os_rel = oversold_positions[0]
     abs_last_os  = -(S3_STOCH_LOOKBACK + 1) + last_os_rel
@@ -641,7 +629,7 @@ def evaluate_s3(
 
     if after_os_df.empty:
         return "HOLD", adx_val, 0.0, sl_price, (
-            f"Daily ✅ ADX={adx_val:.1f} | "
+            f"15m ✅ ADX={adx_val:.1f} | "
             f"Stoch oversold ✅ ({len(oversold_positions)} bars) | "
             f"Waiting for first green uptick candle | MACD={'✅' if macd_ok else '❌'}"
         )
@@ -655,7 +643,7 @@ def evaluate_s3(
 
     if first_green is None:
         return "HOLD", adx_val, 0.0, sl_price, (
-            f"Daily ✅ ADX={adx_val:.1f} | "
+            f"15m ✅ ADX={adx_val:.1f} | "
             f"Stoch oversold ✅ | No green uptick yet | MACD={'✅' if macd_ok else '❌'}"
         )
 
@@ -664,7 +652,7 @@ def evaluate_s3(
 
     if current_close <= entry_trigger:
         return "HOLD", adx_val, entry_trigger, sl_price, (
-            f"Daily ✅ ADX={adx_val:.1f} | EMA aligned | "
+            f"15m ✅ ADX={adx_val:.1f} | EMA aligned | "
             f"Stoch oversold ✅ | Green uptick ✅ | "
             f"Waiting breakout > {entry_trigger:.5f} (now {current_close:.5f}) | "
             f"MACD={'✅' if macd_ok else '❌'}"
@@ -688,8 +676,8 @@ def evaluate_s3(
         )
 
     logger.info(
-        f"[S3][{symbol}] ✅ LONG | Daily EMA aligned | ADX={adx_val:.1f} | "
-        f"Stoch oversold | 15m uptick breakout | SL={sl_price:.5f} | R:R={rr:.1f}"
+        f"[S3][{symbol}] ✅ LONG | 15m EMA aligned | ADX={adx_val:.1f} | "
+        f"Stoch oversold | Uptick breakout | SL={sl_price:.5f} | R:R={rr:.1f}"
     )
     return "LONG", adx_val, entry_trigger, sl_price, (
         f"S3 ✅ | ADX={adx_val:.1f} | EMA10>20>50>200 | "

@@ -274,10 +274,10 @@ class MTFBot:
         # ── Strategy 3 ───────────────────────────────────────────── #
         s3_sig, s3_adx, s3_trigger, s3_sl, s3_reason = "HOLD", 0.0, 0.0, 0.0, ""
         if config_s3.S3_ENABLED and self.sentiment.direction != "BEARISH":
-            m15_df = tr.get_candles(symbol, config_s3.S3_LTF_INTERVAL, limit=100)
+            m15_df = tr.get_candles(symbol, config_s3.S3_LTF_INTERVAL, limit=300)
             if not m15_df.empty:
                 s3_sig, s3_adx, s3_trigger, s3_sl, s3_reason = evaluate_s3(
-                    symbol, daily_df, m15_df
+                    symbol, m15_df
                 )
                 logger.info(f"[S3][{symbol}] {s3_reason}")
 

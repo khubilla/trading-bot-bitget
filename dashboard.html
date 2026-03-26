@@ -534,6 +534,23 @@
   .pair-card { cursor: pointer; }
   .pair-card:hover { box-shadow: 0 0 0 1px var(--blue); }
 
+  /* ── Strategy Tabs ── */
+  .strat-tabs {
+    display: flex; gap: 0;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0; background: var(--bg2);
+  }
+  .strat-tab {
+    font-size: 9px; padding: 7px 16px;
+    background: none; border: none; border-bottom: 2px solid transparent;
+    color: var(--muted); cursor: pointer;
+    font-family: 'IBM Plex Mono', monospace;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    transition: color .15s;
+  }
+  .strat-tab:hover { color: var(--text); }
+  .strat-tab.active { color: var(--amber); border-bottom-color: var(--amber); }
+
   /* ── Grid layout assignments ── */
   .col-left   { grid-column: 1; grid-row: 1 / 3; display: flex; flex-direction: column; gap: 8px; }
   .col-center { grid-column: 2; grid-row: 1;     }
@@ -742,6 +759,11 @@
         <span class="panel-title">Pair Scanner</span>
         <span class="panel-badge" id="pair-count">0 pairs</span>
       </div>
+      <div class="strat-tabs">
+        <button class="strat-tab active" id="tab-s1" onclick="switchTab('s1')">S1 — MTF RSI</button>
+        <button class="strat-tab"        id="tab-s2" onclick="switchTab('s2')">S2 — Coil</button>
+        <button class="strat-tab"        id="tab-s3" onclick="switchTab('s3')">S3 — Pullback</button>
+      </div>
       <div class="panel-body" id="pair-grid">
         <div class="pair-grid" id="pair-grid-inner"></div>
       </div>
@@ -782,18 +804,20 @@
           <button class="chart-interval-btn" onclick="switchInterval('5m')">5m</button>
           <button class="chart-interval-btn" onclick="switchInterval('15m')">15m</button>
           <button class="chart-interval-btn" onclick="switchInterval('1H')">1H</button>
+          <button class="chart-interval-btn" onclick="switchInterval('1D')">1D</button>
         </div>
       </div>
       <div class="chart-modal-meta">
         <span><span class="lbl" style="font-size:9px;color:var(--muted)">MARK PRICE</span><span class="v" id="chartPrice">—</span></span>
-        <span><span class="lbl" style="font-size:9px;color:var(--muted)">RSI 14</span><span class="v" id="chartRsi">—</span></span>
+        <span><span class="lbl" id="chartRsiLbl" style="font-size:9px;color:var(--muted)">RSI 14</span><span class="v" id="chartRsi">—</span></span>
+        <span id="chartMacdMeta" style="display:none"><span class="lbl" style="font-size:9px;color:var(--muted)">MACD</span><span class="v" id="chartMacd">—</span></span>
         <span><span class="lbl" style="font-size:9px;color:var(--muted)">STATUS</span><span class="v" id="chartStatus">—</span></span>
       </div>
       <button class="chart-close-btn" onclick="closeChart()">✕</button>
     </div>
 
-    <!-- Legend -->
-    <div class="chart-legend">
+    <!-- Legend S1/S2 -->
+    <div class="chart-legend" id="legend-s1s2">
       <div class="legend-item">
         <div class="legend-box" style="background:rgba(0,214,143,0.4);border:1px solid var(--emerald)"></div>
         <span style="color:var(--muted)">Consolidation box</span>
@@ -812,15 +836,40 @@
       </div>
       <span style="margin-left:auto;font-size:9px;color:var(--muted)" id="chartAge">—</span>
     </div>
+    <!-- Legend S3 (15m) -->
+    <div class="chart-legend" id="legend-s3" style="display:none">
+      <div class="legend-item">
+        <div class="legend-line" style="background:#a78bfa"></div>
+        <span style="color:var(--muted)">EMA 20</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-line" style="background:var(--emerald)"></div>
+        <span style="color:var(--muted)">Entry trigger</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-line" style="background:var(--rose);border-top:1px dashed var(--rose)"></div>
+        <span style="color:var(--muted)">Stop loss</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-line" style="background:#c9d8e8"></div>
+        <span style="color:var(--muted)">Stoch %K &nbsp;<span style="color:var(--amber)">%D</span></span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-line" style="background:var(--amber)"></div>
+        <span style="color:var(--muted)">MACD signal</span>
+      </div>
+      <span style="margin-left:auto;font-size:9px;color:var(--muted)" id="chartAgeS3">—</span>
+    </div>
 
     <div class="chart-modal-body">
-      <div id="chart-candles" style="flex:1;min-height:0;height:320px;"></div>
-      <div id="chart-rsi" style="height:110px;flex-shrink:0;border-top:1px solid var(--border);"></div>
+      <div id="chart-candles" style="flex:1;min-height:0;"></div>
+      <div id="chart-rsi"  style="height:100px;flex-shrink:0;border-top:1px solid var(--border);"></div>
+      <div id="chart-macd" style="height:80px;flex-shrink:0;border-top:1px solid var(--border);display:none;"></div>
     </div>
   </div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/lightweight-charts/4.1.3/lightweight-charts.standalone.production.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <script>
 // ── Helpers ────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -953,87 +1002,8 @@ function render(s) {
   }
 
   // ── Pair scanner grid
-  const pairStates = s.pair_states || {};
-  const pairs = s.qualified_pairs || [];
-  $('pair-count').textContent = pairs.length + ' pairs';
-
-  const grid = $('pair-grid-inner');
-  const html = pairs.map(sym => {
-    const ps     = pairStates[sym] || {};
-    const rsi    = ps.rsi    != null ? ps.rsi    : 50;
-    const sig    = ps.signal || 'HOLD';
-    const price  = ps.price  != null ? ps.price  : 0;
-    const htfBull = ps.htf_bull  || false;
-    const htfBear = ps.htf_bear  || false;
-    const coil    = ps.consolidating || false;
-    const reason  = ps.reason || '—';
-    const rsiOk   = ps.rsi_ok || false;
-
-    const cardClass  = sig === 'LONG' ? 'signal-long' : sig === 'SHORT' ? 'signal-short' : '';
-    const rsiPct     = Math.min(100, Math.max(0, rsi));
-    const color      = rsiColor(rsi);
-    const symShort   = sym.replace('USDT','');
-
-    // HTF direction
-    const htfPass  = htfBull || htfBear;
-    const htfLabel = htfBull ? '▲ Bull break' : htfBear ? '▼ Bear break' : 'No HTF break';
-    const htfClass = htfPass ? 'pass' : 'fail';
-
-    // RSI check — only meaningful if HTF passed
-    const rsiLabel = `RSI ${fmt(rsi,1)}`;
-    const rsiClass = !htfPass ? 'muted' : rsiOk ? 'pass' : 'fail';
-
-    // Consolidation — only meaningful if HTF + RSI passed
-    const coilClass = !htfPass || !rsiOk ? 'muted' : coil ? 'pass' : 'fail';
-
-    // Reason class
-    const reasonClass = sig !== 'HOLD' ? 'signal' : htfPass ? 'active' : '';
-
-    // Age of data
-    const age = ps.updated_at
-      ? (() => {
-          const sec = Math.floor((Date.now() - new Date(ps.updated_at).getTime()) / 1000);
-          if (sec < 60)  return sec + 's ago';
-          if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
-          return Math.floor(sec / 3600) + 'h ago';
-        })()
-      : 'not scanned';
-
-    return `
-      <div class="pair-card ${cardClass}" data-symbol="${sym}">
-        <div class="pair-top">
-          <div class="pair-name" title="${sym}">${symShort}</div>
-          <span class="pair-sig-badge ${sig}">${sig}</span>
-        </div>
-        <div class="pair-rsi-bar">
-          <div class="pair-rsi-fill" style="width:${rsiPct}%;background:${color}"></div>
-        </div>
-        <div class="pair-rsi-row">
-          <span class="pair-rsi-val" style="color:${color}">${fmt(rsi,1)}</span>
-          <span>$${price < 1 ? price.toFixed(5) : price.toFixed(2)}</span>
-        </div>
-        <div class="pair-checks">
-          <div class="pair-check">
-            <span class="check-label">1H Break</span>
-            <span class="check-val ${htfClass}">${htfLabel}</span>
-          </div>
-          <div class="pair-check">
-            <span class="check-label">RSI</span>
-            <span class="check-val ${rsiClass}">${rsiLabel}</span>
-          </div>
-          <div class="pair-check">
-            <span class="check-label">Consolidation</span>
-            <span class="check-val ${coilClass}">${!htfPass || !rsiOk ? '—' : coil ? '✓ Coiling' : '✗ None'}</span>
-          </div>
-        </div>
-        <div class="pair-reason ${reasonClass}">${reason} · ${age}</div>
-      </div>`;
-  }).join('');
-
-  if (grid.innerHTML !== html) {
-    grid.innerHTML = html;
-    if (typeof attachCardClicks === 'function') attachCardClicks();
-  }
+  window._lastState = s;
+  renderPairGrid(s);
 
   // ── Signal log
   const logs = s.scan_log || [];
@@ -1106,14 +1076,218 @@ setInterval(() => {
 // ── Chart Modal ────────────────────────────────────────────
 let candleChart   = null;
 let rsiChart      = null;
+let macdChart     = null;
 let candleSeries  = null;
 let rsiLineSeries = null;
-let currentSymbol = null;
+let currentSymbol   = null;
 let currentInterval = '3m';
 let chartRefreshTimer = null;
+let activeTab = 's1';
+
+// Track extra series manually (LightweightCharts v4 removed getSeries())
+let extraCandleSeries = [];
+let extraRsiSeries    = [];
+let extraMacdSeries   = [];
+let macdFirstSeries   = null;
+// Track price lines (createPriceLine returns an object; must call removePriceLine to clean up)
+let candlePriceLines  = [];
+let rsiPriceLines     = [];
+
+function switchTab(tab) {
+  activeTab = tab;
+  document.querySelectorAll('.strat-tab').forEach(b => {
+    b.classList.toggle('active', b.id === 'tab-' + tab);
+  });
+  if (window._lastState) renderPairGrid(window._lastState);
+}
+
+function s2CardHTML(sym, ps) {
+  const sig      = (ps.strategy === 'S2' && ps.signal !== 'HOLD') ? ps.signal : 'HOLD';
+  const rsi      = ps.s2_daily_rsi != null ? ps.s2_daily_rsi : 0;
+  const bigCandle= ps.s2_big_candle || false;
+  const coiling  = ps.s2_coiling   || false;
+  const reason   = ps.s2_reason || '—';
+  const symShort = sym.replace('USDT', '');
+  const cardClass = sig === 'LONG' ? 'signal-long' : '';
+  const rsiPct  = Math.min(100, Math.max(0, rsi));
+  const rsiOk   = rsi > 70;
+  const rsiColor = rsiOk ? 'var(--emerald)' : rsi > 60 ? 'var(--amber)' : 'var(--muted)';
+  const bcClass  = bigCandle ? 'pass' : 'fail';
+  const rsiClass = !bigCandle ? 'muted' : rsiOk ? 'pass' : 'fail';
+  const coilClass= !bigCandle || !rsiOk ? 'muted' : coiling ? 'pass' : 'fail';
+  const reasonClass = sig !== 'HOLD' ? 'signal' : coiling ? 'active' : bigCandle ? 'active' : '';
+  const age = ps.updated_at ? (() => {
+    const sec = Math.floor((Date.now() - new Date(ps.updated_at).getTime()) / 1000);
+    if (sec < 60) return sec + 's ago';
+    if (sec < 3600) return Math.floor(sec/60) + 'm ago';
+    return Math.floor(sec/3600) + 'h ago';
+  })() : 'not scanned';
+  return `
+    <div class="pair-card ${cardClass}" data-symbol="${sym}">
+      <div class="pair-top">
+        <div class="pair-name" title="${sym}">${symShort}</div>
+        <span class="pair-sig-badge ${sig}">${sig}</span>
+      </div>
+      <div class="pair-rsi-bar">
+        <div class="pair-rsi-fill" style="width:${rsiPct}%;background:${rsiColor}"></div>
+      </div>
+      <div class="pair-rsi-row">
+        <span class="pair-rsi-val" style="color:${rsiColor}">RSI ${fmt(rsi,1)}</span>
+        <span>${rsiOk ? '> 70 ✓' : '≤ 70 ✗'}</span>
+      </div>
+      <div class="pair-checks">
+        <div class="pair-check">
+          <span class="check-label">Big candle</span>
+          <span class="check-val ${bcClass}">${bigCandle ? '≥ 20% body ✓' : 'Not found'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">RSI > 70</span>
+          <span class="check-val ${rsiClass}">${!bigCandle ? '—' : rsiOk ? 'Pass ✓' : 'Fail'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">Coiling</span>
+          <span class="check-val ${coilClass}">${!bigCandle || !rsiOk ? '—' : coiling ? 'Coiling ✓' : 'Not yet'}</span>
+        </div>
+      </div>
+      <div class="pair-reason ${reasonClass}">${reason.slice(0,60)} · ${age}</div>
+    </div>`;
+}
+
+function s3CardHTML(sym, ps) {
+  const sig      = ps.s3_signal || 'HOLD';
+  const adx      = ps.s3_adx != null ? ps.s3_adx : 0;
+  const reason   = ps.s3_reason || '—';
+  const symShort = sym.replace('USDT', '');
+  const cardClass = sig === 'LONG' ? 'signal-long' : '';
+  const adxPct   = Math.min(100, adx * 2);  // ADX 50 → 100%
+  const adxOk    = adx >= 30;
+  const adxColor = adxOk ? 'var(--emerald)' : 'var(--rose)';
+  const emaOk    = reason.includes('EMA aligned') || reason.includes('EMA10>20>50>200') || sig === 'LONG';
+  const stochOs  = reason.includes('Stoch oversold') || sig === 'LONG';
+  const uptickOk = reason.includes('Uptick breakout') || reason.includes('uptick') || sig === 'LONG';
+  const emaClass   = emaOk ? 'pass' : 'fail';
+  const adxClass   = !emaOk ? 'muted' : adxOk ? 'pass' : 'fail';
+  const stochClass = !emaOk || !adxOk ? 'muted' : stochOs ? 'pass' : 'fail';
+  const uptickClass= !stochOs ? 'muted' : uptickOk ? 'pass' : 'warn';
+  const reasonClass = sig !== 'HOLD' ? 'signal' : stochOs ? 'active' : emaOk ? 'active' : '';
+  const age = ps.updated_at ? (() => {
+    const sec = Math.floor((Date.now() - new Date(ps.updated_at).getTime()) / 1000);
+    if (sec < 60) return sec + 's ago';
+    if (sec < 3600) return Math.floor(sec/60) + 'm ago';
+    return Math.floor(sec/3600) + 'h ago';
+  })() : 'not scanned';
+  return `
+    <div class="pair-card ${cardClass}" data-symbol="${sym}">
+      <div class="pair-top">
+        <div class="pair-name" title="${sym}">${symShort}</div>
+        <span class="pair-sig-badge ${sig}">${sig}</span>
+      </div>
+      <div class="pair-rsi-bar">
+        <div class="pair-rsi-fill" style="width:${adxPct}%;background:${adxColor}"></div>
+      </div>
+      <div class="pair-rsi-row">
+        <span class="pair-rsi-val" style="color:${adxColor}">ADX ${fmt(adx,1)}</span>
+        <span>${adxOk ? '≥ 30 ✓' : '< 30 ✗'}</span>
+      </div>
+      <div class="pair-checks">
+        <div class="pair-check">
+          <span class="check-label">15m EMA</span>
+          <span class="check-val ${emaClass}">${emaOk ? '10>20>50>200 ✓' : 'Not aligned'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">Stoch OS</span>
+          <span class="check-val ${stochClass}">${!emaOk || !adxOk ? '—' : stochOs ? 'Oversold ✓' : 'No pullback'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">Uptick break</span>
+          <span class="check-val ${uptickClass}">${!stochOs ? '—' : uptickOk ? 'Triggered ✓' : 'Watching…'}</span>
+        </div>
+      </div>
+      <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').slice(0,60)} · ${age}</div>
+    </div>`;
+}
+
+function renderPairGrid(s) {
+  const pairStates = s.pair_states || {};
+  const pairs = s.qualified_pairs || [];
+  $('pair-count').textContent = pairs.length + ' pairs';
+  const grid = $('pair-grid-inner');
+  let html = '';
+  if (activeTab === 's3') {
+    html = pairs.map(sym => s3CardHTML(sym, pairStates[sym] || {})).join('');
+  } else if (activeTab === 's2') {
+    html = pairs.map(sym => s2CardHTML(sym, pairStates[sym] || {})).join('');
+  } else {
+    // S1 — original card
+    html = pairs.map(sym => {
+      const ps     = pairStates[sym] || {};
+      const rsi    = ps.rsi    != null ? ps.rsi    : 50;
+      const sig    = ps.signal || 'HOLD';
+      const price  = ps.price  != null ? ps.price  : 0;
+      const htfBull = ps.htf_bull  || false;
+      const htfBear = ps.htf_bear  || false;
+      const coil    = ps.consolidating || false;
+      const reason  = ps.reason || '—';
+      const rsiOk   = ps.rsi_ok || false;
+      const cardClass  = sig === 'LONG' ? 'signal-long' : sig === 'SHORT' ? 'signal-short' : '';
+      const rsiPct     = Math.min(100, Math.max(0, rsi));
+      const color      = rsiColor(rsi);
+      const symShort   = sym.replace('USDT','');
+      const htfPass  = htfBull || htfBear;
+      const htfLabel = htfBull ? '▲ Bull break' : htfBear ? '▼ Bear break' : 'No HTF break';
+      const htfClass = htfPass ? 'pass' : 'fail';
+      const rsiLabel = `RSI ${fmt(rsi,1)}`;
+      const rsiClass = !htfPass ? 'muted' : rsiOk ? 'pass' : 'fail';
+      const coilClass = !htfPass || !rsiOk ? 'muted' : coil ? 'pass' : 'fail';
+      const reasonClass = sig !== 'HOLD' ? 'signal' : htfPass ? 'active' : '';
+      const age = ps.updated_at ? (() => {
+        const sec = Math.floor((Date.now() - new Date(ps.updated_at).getTime()) / 1000);
+        if (sec < 60) return sec + 's ago';
+        if (sec < 3600) return Math.floor(sec/60) + 'm ago';
+        return Math.floor(sec/3600) + 'h ago';
+      })() : 'not scanned';
+      return `
+        <div class="pair-card ${cardClass}" data-symbol="${sym}">
+          <div class="pair-top">
+            <div class="pair-name" title="${sym}">${symShort}</div>
+            <span class="pair-sig-badge ${sig}">${sig}</span>
+          </div>
+          <div class="pair-rsi-bar">
+            <div class="pair-rsi-fill" style="width:${rsiPct}%;background:${color}"></div>
+          </div>
+          <div class="pair-rsi-row">
+            <span class="pair-rsi-val" style="color:${color}">${fmt(rsi,1)}</span>
+            <span>$${price < 1 ? price.toFixed(5) : price.toFixed(2)}</span>
+          </div>
+          <div class="pair-checks">
+            <div class="pair-check">
+              <span class="check-label">1H Break</span>
+              <span class="check-val ${htfClass}">${htfLabel}</span>
+            </div>
+            <div class="pair-check">
+              <span class="check-label">RSI</span>
+              <span class="check-val ${rsiClass}">${rsiLabel}</span>
+            </div>
+            <div class="pair-check">
+              <span class="check-label">Consolidation</span>
+              <span class="check-val ${coilClass}">${!htfPass || !rsiOk ? '—' : coil ? '✓ Coiling' : '✗ None'}</span>
+            </div>
+          </div>
+          <div class="pair-reason ${reasonClass}">${reason} · ${age}</div>
+        </div>`;
+    }).join('');
+  }
+  if (grid.innerHTML !== html) {
+    grid.innerHTML = html;
+    attachCardClicks();
+  }
+}
 
 function openChart(symbol) {
   currentSymbol = symbol;
+  // Default interval per tab
+  if (activeTab === 's3') currentInterval = '15m';
+  if (activeTab === 's2') currentInterval = '1D';
   $('chartOverlay').classList.add('open');
   $('chartSymbol').textContent = symbol.replace('USDT','');
 
@@ -1166,6 +1340,10 @@ function initCharts() {
   // Destroy old instances
   if (candleChart) { candleChart.remove(); candleChart = null; }
   if (rsiChart)    { rsiChart.remove();    rsiChart    = null; }
+  if (macdChart)   { macdChart.remove();   macdChart   = null; }
+  $('chart-macd').style.display = 'none';
+  extraCandleSeries = []; extraRsiSeries = []; extraMacdSeries = []; macdFirstSeries = null;
+  candlePriceLines = []; rsiPriceLines = [];
 
   candleChart  = LightweightCharts.createChart($('chart-candles'), { ...baseOpts, height: 320 });
   candleSeries = candleChart.addCandlestickSeries({
@@ -1189,112 +1367,254 @@ function initCharts() {
 
 async function loadChart(symbol, interval) {
   if (!candleChart) return;
-  $('chartAge').textContent = 'Loading...';
+  const ageEl = $('legend-s3').style.display !== 'none' ? $('chartAgeS3') : $('chartAge');
+  ageEl.textContent = 'Loading...';
 
   try {
     const res  = await fetch(`/api/candles/${symbol}?interval=${interval}&limit=80`);
     const data = await res.json();
-    if (data.error) { $('chartAge').textContent = 'Error: ' + data.error; return; }
+    if (data.error) { ageEl.textContent = 'Error: ' + data.error; return; }
 
-    // Set candles
+    const isS3_15m = interval === '15m' && data.stoch_k && data.stoch_k.length > 0;
+
+    // ── Switch legends ──
+    $('legend-s1s2').style.display = isS3_15m ? 'none' : 'flex';
+    $('legend-s3').style.display   = isS3_15m ? 'flex' : 'none';
+
+    // ── Switch RSI label ──
+    $('chartRsiLbl').textContent = isS3_15m ? 'STOCH 5,3' : 'RSI 14';
+    $('chartMacdMeta').style.display = isS3_15m ? 'flex' : 'none';
+
+    // ── Set candles ──
     candleSeries.setData(data.candles);
 
-    // Set RSI
-    rsiLineSeries.setData(data.rsi);
+    // ── Clear old extra series + price lines ──
+    extraCandleSeries.forEach(s => candleChart.removeSeries(s));
+    extraCandleSeries = [];
+    extraRsiSeries.forEach(s => rsiChart.removeSeries(s));
+    extraRsiSeries = [];
+    candlePriceLines.forEach(pl => candleSeries.removePriceLine(pl));
+    candlePriceLines = [];
+    rsiPriceLines.forEach(pl => rsiLineSeries.removePriceLine(pl));
+    rsiPriceLines = [];
 
-    // Clear old price lines & series
-    candleChart.getSeries().forEach(s => {
-      if (s !== candleSeries) candleChart.removeSeries(s);
-    });
-    rsiChart.getSeries().forEach(s => {
-      if (s !== rsiLineSeries) rsiChart.removeSeries(s);
-    });
+    // ── Apply price format to Y-axis ──
+    const pDec = data.price_decimals ?? (data.mark_price < 1 ? 5 : 2);
+    const minMove = parseFloat((Math.pow(10, -pDec)).toFixed(pDec));
+    candleSeries.applyOptions({ priceFormat: { type: 'price', precision: pDec, minMove } });
 
-    const lastCandle = data.candles[data.candles.length - 1];
-    const lastTime   = lastCandle?.time;
+    if (isS3_15m) {
+      // ── S3 / 15m mode ──────────────────────────────────── //
 
-    // ── Consolidation box (as area between two lines) ──
-    if (data.consolidating && data.box_high && data.box_low) {
-      const boxHigh = candleChart.addLineSeries({
-        color: 'rgba(0,214,143,0.6)', lineWidth: 1,
-        lineStyle: 2, priceLineVisible: false, lastValueVisible: false,
-      });
-      const boxLow = candleChart.addLineSeries({
-        color: 'rgba(0,214,143,0.6)', lineWidth: 1,
-        lineStyle: 2, priceLineVisible: false, lastValueVisible: false,
-      });
+      // Show/init MACD pane
+      const macdEl = $('chart-macd');
+      if (macdEl.style.display === 'none') {
+        macdEl.style.display = 'block';
+        const bg = '#0d1117', grid = '#1e2d3d', text = '#4a6580';
+        macdChart = LightweightCharts.createChart(macdEl, {
+          layout:     { background: { color: bg }, textColor: text },
+          grid:       { vertLines: { color: grid }, horzLines: { color: grid } },
+          crosshair:  { mode: 1 },
+          timeScale:  { borderColor: grid, timeVisible: true, secondsVisible: false },
+          rightPriceScale: { borderColor: grid, scaleMargins: { top: 0.1, bottom: 0.1 } },
+          handleScroll: true, handleScale: true,
+          height: 80,
+        });
+        // Sync crosshair
+        candleChart.subscribeCrosshairMove(p => {
+          if (p.time && macdChart && macdFirstSeries) macdChart.setCrosshairPosition(p.point?.y ?? 0, p.time, macdFirstSeries);
+        });
+      } else {
+        // Clear old macd series
+        if (macdChart) {
+          extraMacdSeries.forEach(s => macdChart.removeSeries(s));
+          extraMacdSeries = [];
+          macdFirstSeries = null;
+        }
+      }
 
-      // Draw across last CONSOLIDATION_CANDLES window
-      const boxCandles = data.candles.slice(-10);
-      boxHigh.setData(boxCandles.map(c => ({ time: c.time, value: data.box_high })));
-      boxLow.setData( boxCandles.map(c => ({ time: c.time, value: data.box_low  })));
+      // EMA 20 on candles
+      if (data.ema20 && data.ema20.length > 0) {
+        const ema20Series = candleChart.addLineSeries({
+          color: '#a78bfa', lineWidth: 1,
+          priceLineVisible: false, lastValueVisible: false,
+        });
+        ema20Series.setData(data.ema20);
+        extraCandleSeries.push(ema20Series);
+      }
 
-      // Shaded area
-      const fillSeries = candleChart.addAreaSeries({
-        topColor:     'rgba(0,214,143,0.08)',
-        bottomColor:  'rgba(0,214,143,0.02)',
-        lineColor:    'transparent',
-        priceLineVisible: false, lastValueVisible: false,
-      });
-      fillSeries.setData(boxCandles.map(c => ({ time: c.time, value: data.box_high })));
-    }
+      // Entry trigger line
+      if (data.s3_entry_trigger) {
+        candlePriceLines.push(candleSeries.createPriceLine({
+          price: data.s3_entry_trigger,
+          color: '#00d68f', lineWidth: 2, lineStyle: 0,
+          axisLabelVisible: true, title: '▲ Entry trigger',
+        }));
+      }
 
-    // ── Breakout trigger lines ──
-    if (data.breakout_long) {
-      candleSeries.createPriceLine({
-        price:     data.breakout_long,
-        color:     '#00d68f',
-        lineWidth: 2,
-        lineStyle: 0,
-        axisLabelVisible: true,
-        title:     '▲ Long trigger',
-      });
-    }
-    if (data.breakout_short) {
-      candleSeries.createPriceLine({
-        price:     data.breakout_short,
-        color:     '#ff4d6a',
-        lineWidth: 2,
-        lineStyle: 0,
-        axisLabelVisible: true,
-        title:     '▼ Short trigger',
-      });
-    }
+      // SL line (dashed red)
+      if (data.s3_sl_price) {
+        candlePriceLines.push(candleSeries.createPriceLine({
+          price: data.s3_sl_price,
+          color: '#ff4d6a', lineWidth: 1, lineStyle: 2,
+          axisLabelVisible: true, title: '✕ SL',
+        }));
+      }
 
-    // ── RSI threshold lines ──
-    rsiLineSeries.createPriceLine({ price: data.rsi_long_thresh,  color: '#00d68f', lineWidth: 1, lineStyle: 1, title: 'OB', axisLabelVisible: true });
-    rsiLineSeries.createPriceLine({ price: data.rsi_short_thresh, color: '#ff4d6a', lineWidth: 1, lineStyle: 1, title: 'OS', axisLabelVisible: true });
-    rsiLineSeries.createPriceLine({ price: 50, color: '#243547',  lineWidth: 1, lineStyle: 2, title: '', axisLabelVisible: false });
+      // Stochastics in RSI pane
+      rsiLineSeries.setData(data.stoch_k || []);
+      if (data.stoch_d && data.stoch_d.length > 0) {
+        const stochD = rsiChart.addLineSeries({
+          color: '#f0a500', lineWidth: 1,
+          priceLineVisible: false, lastValueVisible: false,
+        });
+        stochD.setData(data.stoch_d);
+        extraRsiSeries.push(stochD);
+      }
+      rsiPriceLines.push(rsiLineSeries.createPriceLine({ price: 30, color: '#ff4d6a', lineWidth: 1, lineStyle: 1, title: 'OS', axisLabelVisible: true }));
+      rsiPriceLines.push(rsiLineSeries.createPriceLine({ price: 70, color: '#00d68f', lineWidth: 1, lineStyle: 1, title: 'OB', axisLabelVisible: true }));
+      rsiPriceLines.push(rsiLineSeries.createPriceLine({ price: 50, color: '#243547', lineWidth: 1, lineStyle: 2, axisLabelVisible: false }));
 
-    // ── Update header info ──
-    const lastRsi = data.rsi[data.rsi.length - 1]?.value;
-    $('chartPrice').textContent = data.mark_price < 1
-      ? '$' + data.mark_price.toFixed(5)
-      : '$' + data.mark_price.toFixed(2);
-    $('chartPrice').style.color = 'var(--text)';
+      // MACD in macd pane
+      if (macdChart) {
+        if (data.macd_hist && data.macd_hist.length > 0) {
+          const histSeries = macdChart.addHistogramSeries({
+            priceLineVisible: false, lastValueVisible: false,
+            priceScaleId: 'right',
+          });
+          histSeries.setData(data.macd_hist);
+          extraMacdSeries.push(histSeries);
+          if (!macdFirstSeries) macdFirstSeries = histSeries;
+        }
+        if (data.macd_line && data.macd_line.length > 0) {
+          const mlSeries = macdChart.addLineSeries({
+            color: '#c9d8e8', lineWidth: 1,
+            priceLineVisible: false, lastValueVisible: false,
+          });
+          mlSeries.setData(data.macd_line);
+          extraMacdSeries.push(mlSeries);
+          if (!macdFirstSeries) macdFirstSeries = mlSeries;
+        }
+        if (data.macd_signal && data.macd_signal.length > 0) {
+          const msSeries = macdChart.addLineSeries({
+            color: '#f0a500', lineWidth: 1,
+            priceLineVisible: false, lastValueVisible: false,
+          });
+          msSeries.setData(data.macd_signal);
+          extraMacdSeries.push(msSeries);
+        }
+        const zeroLine = macdChart.addLineSeries({
+          color: '#243547', lineWidth: 1, lineStyle: 2,
+          priceLineVisible: false, lastValueVisible: false,
+        });
+        zeroLine.setData(data.candles.map(c => ({ time: c.time, value: 0 })));
+        extraMacdSeries.push(zeroLine);
+        if (!macdFirstSeries) macdFirstSeries = zeroLine;
+        macdChart.timeScale().fitContent();
+      }
 
-    if (lastRsi != null) {
-      $('chartRsi').textContent  = lastRsi.toFixed(1);
-      $('chartRsi').style.color  = lastRsi >= 70 ? 'var(--emerald)' : lastRsi <= 30 ? 'var(--rose)' : 'var(--text)';
-    }
+      // Header: Stoch value
+      const stochLast = data.s3_stoch_last;
+      if (stochLast != null) {
+        $('chartRsi').textContent = stochLast.toFixed(1);
+        $('chartRsi').style.color = stochLast < 30 ? 'var(--rose)' : stochLast > 70 ? 'var(--emerald)' : 'var(--text)';
+      }
+      // Header: MACD hist value
+      const macdLast = data.s3_macd_last;
+      if (macdLast != null) {
+        $('chartMacd').textContent = macdLast.toFixed(6);
+        $('chartMacd').style.color = macdLast >= 0 ? 'var(--emerald)' : 'var(--rose)';
+      }
 
-    const statusMap = {
-      true:  { text: data.consolidating ? '🟡 Coiling' : '🔵 HTF Break', color: 'var(--amber)' },
-    };
-    if (data.consolidating) {
-      $('chartStatus').textContent = '🟡 Coiling — watch breakout';
-      $('chartStatus').style.color = 'var(--amber)';
+      // Status
+      if (data.s3_entry_trigger) {
+        $('chartStatus').textContent = '🟢 Entry set';
+        $('chartStatus').style.color = 'var(--emerald)';
+      } else if (data.s3_stoch_last != null && data.s3_stoch_last < 30) {
+        $('chartStatus').textContent = '🟡 Stoch OS — watching';
+        $('chartStatus').style.color = 'var(--amber)';
+      } else {
+        $('chartStatus').textContent = '⏸ No setup';
+        $('chartStatus').style.color = 'var(--muted)';
+      }
+
+      $('chartAgeS3').textContent = 'Updated ' + new Date().toLocaleTimeString();
+
     } else {
-      $('chartStatus').textContent = '⏸ Watching';
-      $('chartStatus').style.color = 'var(--muted)';
+      // ── S1/S2 / non-15m mode ───────────────────────────── //
+
+      // Hide MACD pane if visible
+      if ($('chart-macd').style.display !== 'none') {
+        $('chart-macd').style.display = 'none';
+        if (macdChart) { macdChart.remove(); macdChart = null; extraMacdSeries = []; macdFirstSeries = null; }
+      }
+
+      rsiLineSeries.setData(data.rsi);
+
+      // Consolidation box
+      if (data.consolidating && data.box_high && data.box_low) {
+        const boxHigh = candleChart.addLineSeries({
+          color: 'rgba(0,214,143,0.6)', lineWidth: 1,
+          lineStyle: 2, priceLineVisible: false, lastValueVisible: false,
+        });
+        const boxLow = candleChart.addLineSeries({
+          color: 'rgba(0,214,143,0.6)', lineWidth: 1,
+          lineStyle: 2, priceLineVisible: false, lastValueVisible: false,
+        });
+        const boxCandles = data.candles.slice(-10);
+        boxHigh.setData(boxCandles.map(c => ({ time: c.time, value: data.box_high })));
+        boxLow.setData( boxCandles.map(c => ({ time: c.time, value: data.box_low  })));
+        extraCandleSeries.push(boxHigh, boxLow);
+        const fillSeries = candleChart.addAreaSeries({
+          topColor: 'rgba(0,214,143,0.08)', bottomColor: 'rgba(0,214,143,0.02)',
+          lineColor: 'transparent', priceLineVisible: false, lastValueVisible: false,
+        });
+        fillSeries.setData(boxCandles.map(c => ({ time: c.time, value: data.box_high })));
+        extraCandleSeries.push(fillSeries);
+      }
+
+      if (data.breakout_long) {
+        candlePriceLines.push(candleSeries.createPriceLine({
+          price: data.breakout_long, color: '#00d68f', lineWidth: 2, lineStyle: 0,
+          axisLabelVisible: true, title: '▲ Long trigger',
+        }));
+      }
+      if (data.breakout_short) {
+        candlePriceLines.push(candleSeries.createPriceLine({
+          price: data.breakout_short, color: '#ff4d6a', lineWidth: 2, lineStyle: 0,
+          axisLabelVisible: true, title: '▼ Short trigger',
+        }));
+      }
+
+      rsiPriceLines.push(rsiLineSeries.createPriceLine({ price: data.rsi_long_thresh,  color: '#00d68f', lineWidth: 1, lineStyle: 1, title: 'OB', axisLabelVisible: true }));
+      rsiPriceLines.push(rsiLineSeries.createPriceLine({ price: data.rsi_short_thresh, color: '#ff4d6a', lineWidth: 1, lineStyle: 1, title: 'OS', axisLabelVisible: true }));
+      rsiPriceLines.push(rsiLineSeries.createPriceLine({ price: 50, color: '#243547',  lineWidth: 1, lineStyle: 2, axisLabelVisible: false }));
+
+      const lastRsi = data.rsi[data.rsi.length - 1]?.value;
+      if (lastRsi != null) {
+        $('chartRsi').textContent = lastRsi.toFixed(1);
+        $('chartRsi').style.color = lastRsi >= 70 ? 'var(--emerald)' : lastRsi <= 30 ? 'var(--rose)' : 'var(--text)';
+      }
+
+      if (data.consolidating) {
+        $('chartStatus').textContent = '🟡 Coiling — watch breakout';
+        $('chartStatus').style.color = 'var(--amber)';
+      } else {
+        $('chartStatus').textContent = '⏸ Watching';
+        $('chartStatus').style.color = 'var(--muted)';
+      }
+
+      $('chartAge').textContent = 'Updated ' + new Date().toLocaleTimeString();
     }
 
-    $('chartAge').textContent = 'Updated ' + new Date().toLocaleTimeString();
+    // ── Common ──
+    $('chartPrice').textContent = '$' + Number(data.mark_price).toFixed(pDec);
+    $('chartPrice').style.color = 'var(--text)';
 
     candleChart.timeScale().fitContent();
 
   } catch (err) {
-    $('chartAge').textContent = 'Fetch error: ' + err.message;
+    ageEl.textContent = 'Fetch error: ' + err.message;
     console.error('Chart error:', err);
   }
 }

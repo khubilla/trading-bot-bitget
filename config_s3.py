@@ -1,13 +1,13 @@
 # ============================================================
-#  Strategy 3 Configuration — Daily Swing Pullback
+#  Strategy 3 Configuration — 15m Swing Pullback
 # ============================================================
-# Long-only pullback strategy based on daily trend alignment.
+# Long-only pullback strategy — all indicators on 15m chart.
 #
-# Prerequisites (daily chart):
+# Prerequisites (15m):
 #   - EMA10 > EMA20 > EMA50 > EMA200 (golden alignment)
 #   - ADX > 30 (strong trend, not sideways)
 #
-# Entry (15m chart):
+# Entry (15m):
 #   - Slow Stochastics (5,3) recently oversold (< 30) — pullback confirmed
 #   - First green candle after oversold = uptick signal
 #   - Current 15m candle closes above uptick candle's high = entry trigger
@@ -19,12 +19,12 @@
 
 S3_ENABLED = True
 
-# ── Daily Trend Prerequisites ────────────────────────────── #
-S3_DAILY_EMA_FAST   = 10
-S3_DAILY_EMA_MED    = 20
-S3_DAILY_EMA_SLOW   = 50
-S3_DAILY_EMA_TREND  = 200
-S3_DAILY_ADX_MIN    = 30        # Minimum ADX for strong trend
+# ── 15m Trend Prerequisites ──────────────────────────────── #
+S3_EMA_FAST   = 10
+S3_EMA_MED    = 20
+S3_EMA_SLOW   = 50
+S3_EMA_TREND  = 200
+S3_ADX_MIN    = 30              # Minimum ADX for strong trend
 
 # ── 15m Slow Stochastics ─────────────────────────────────── #
 S3_STOCH_K_PERIOD   = 5         # Fast %K period

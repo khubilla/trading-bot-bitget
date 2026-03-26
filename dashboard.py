@@ -257,13 +257,11 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
 
             # Run S3 evaluator to get entry trigger + SL levels
             try:
-                daily_df_s3 = tr.get_candles(symbol, "1D", limit=250)
-                if not daily_df_s3.empty:
-                    _, _, entry_t, sl_p, _ = evaluate_s3(symbol, daily_df_s3, df_full)
-                    if entry_t > 0:
-                        s3_entry_trigger = round(entry_t, max(2, price_decimals + 1))
-                    if sl_p > 0:
-                        s3_sl_price = round(sl_p, max(2, price_decimals + 1))
+                _, _, entry_t, sl_p, _ = evaluate_s3(symbol, df_full)
+                if entry_t > 0:
+                    s3_entry_trigger = round(entry_t, max(2, price_decimals + 1))
+                if sl_p > 0:
+                    s3_sl_price = round(sl_p, max(2, price_decimals + 1))
             except Exception:
                 pass
 
@@ -317,7 +315,7 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    html = Path(__file__).parent / "templates" / "dashboard.html"
+    html = Path(__file__).parent / "dashboard.html"
     return HTMLResponse(content=html.read_text(encoding="utf-8"))
 
 

@@ -40,6 +40,7 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
     try:
         import trader as tr
         import config
+        import config_s1
         from strategy import detect_consolidation, calculate_rsi, evaluate_s2
 
         # Fetch extra candles for indicator warmup (EMA/ADX need history to converge)
@@ -183,7 +184,7 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
                     break
         else:
             # S1 — RSI-zone aware consolidation on 3m
-            rsi_thresh = config.RSI_LONG_THRESH
+            rsi_thresh = config_s1.RSI_LONG_THRESH
             direction  = "LONG"  # default; show long setup
             is_coil, bh, bl = detect_consolidation(
                 df, rsi_series=rsi_full, rsi_threshold=rsi_thresh, direction=direction
@@ -191,8 +192,8 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
             if bh:
                 box_high       = round(bh, 8)
                 box_low        = round(bl, 8)
-                breakout_long  = round(bh * (1 + config.BREAKOUT_BUFFER_PCT), 8)
-                breakout_short = round(bl * (1 - config.BREAKOUT_BUFFER_PCT), 8)
+                breakout_long  = round(bh * (1 + config_s1.BREAKOUT_BUFFER_PCT), 8)
+                breakout_short = round(bl * (1 - config_s1.BREAKOUT_BUFFER_PCT), 8)
 
         # Current mark price
         try:
@@ -223,8 +224,8 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
             "mark_price":       mark,
             "prev_high":        prev_high,
             "price_decimals":   price_decimals,
-            "rsi_long_thresh":  config.RSI_LONG_THRESH,
-            "rsi_short_thresh": config.RSI_SHORT_THRESH,
+            "rsi_long_thresh":  config_s1.RSI_LONG_THRESH,
+            "rsi_short_thresh": config_s1.RSI_SHORT_THRESH,
         })
 
     except Exception as e:

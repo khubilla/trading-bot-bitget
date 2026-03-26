@@ -8,3 +8,4 @@ trades.csv
 .DS_Store
 backtest_report.html
 /data/daily
+.claude

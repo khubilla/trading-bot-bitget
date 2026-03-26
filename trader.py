@@ -9,10 +9,10 @@ import math
 import logging
 import pandas as pd
 import bitget_client as bc
-from config import (
-    PRODUCT_TYPE, MARGIN_COIN,
+from config import PRODUCT_TYPE, MARGIN_COIN
+from config_s1 import (
     LEVERAGE, TRADE_SIZE_PCT, TAKE_PROFIT_PCT,
-    HTF_INTERVAL, LTF_INTERVAL,STOP_LOSS_PCT
+    HTF_INTERVAL, LTF_INTERVAL, STOP_LOSS_PCT,
 )
 
 logger = logging.getLogger(__name__)

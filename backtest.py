@@ -371,7 +371,7 @@ def backtest_s2_symbol(sym: str, df: pd.DataFrame,
 
 
 def backtest_s1_symbol(sym: str) -> list[dict]:
-    from config import (
+    from config_s1 import (
         RSI_LONG_THRESH, RSI_SHORT_THRESH, CONSOLIDATION_CANDLES,
         BREAKOUT_BUFFER_PCT, ADX_TREND_THRESHOLD, LEVERAGE, TAKE_PROFIT_PCT,
     )

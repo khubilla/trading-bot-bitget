@@ -12,6 +12,7 @@ import time, signal, sys, logging, csv, os
 from datetime import datetime, timezone
 
 import config
+import config_s1
 import state as st
 from scanner import get_qualified_pairs_and_sentiment
 from strategy import (
@@ -65,9 +66,9 @@ class MTFBot:
 
         logger.info("🤖 Bitget USDT-Futures MTF Bot — Strategy 1 + 2")
         logger.info(f"   Mode         : {'DEMO' if config.DEMO_MODE else '⚡ LIVE'}")
-        logger.info(f"   S1 Risk      : {config.TRADE_SIZE_PCT*100:.0f}% | {config.LEVERAGE}x | "
-                    f"SL=box TP={config.TAKE_PROFIT_PCT*100:.0f}%")
-        logger.info(f"   S1 ADX thr.  : {config.ADX_TREND_THRESHOLD}")
+        logger.info(f"   S1 Risk      : {config_s1.TRADE_SIZE_PCT*100:.0f}% | {config_s1.LEVERAGE}x | "
+                    f"SL=box TP={config_s1.TAKE_PROFIT_PCT*100:.0f}%")
+        logger.info(f"   S1 ADX thr.  : {config_s1.ADX_TREND_THRESHOLD}")
         logger.info(f"   Dashboard    : python dashboard.py → http://localhost:8080\n")
 
         # ── Startup position sync ─────────────────────────────────── #
@@ -158,7 +159,7 @@ class MTFBot:
                     )
                     # Advisory box-break warning
                     try:
-                        ltf_df = tr.get_candles(sym, config.LTF_INTERVAL, limit=10)
+                        ltf_df = tr.get_candles(sym, config_s1.LTF_INTERVAL, limit=10)
                         if not ltf_df.empty:
                             flag, reason = check_exit(
                                 ltf_df, ap["side"], ap["box_high"], ap["box_low"]
@@ -223,9 +224,9 @@ class MTFBot:
             time.sleep(0.4)
 
     def _evaluate_pair(self, symbol: str, allowed_direction: str, balance: float) -> bool:
-        htf_df   = tr.get_candles(symbol, config.HTF_INTERVAL,   limit=10)
-        ltf_df   = tr.get_candles(symbol, config.LTF_INTERVAL,   limit=60)
-        daily_df = tr.get_candles(symbol, config.DAILY_INTERVAL, limit=150)
+        htf_df   = tr.get_candles(symbol, config_s1.HTF_INTERVAL,   limit=10)
+        ltf_df   = tr.get_candles(symbol, config_s1.LTF_INTERVAL,   limit=60)
+        daily_df = tr.get_candles(symbol, config_s1.DAILY_INTERVAL, limit=150)
 
         if htf_df.empty or ltf_df.empty or daily_df.empty:
             return False
@@ -240,18 +241,18 @@ class MTFBot:
         trend_ok, adx_val = _trend(daily_df, "LONG" if allowed_direction == "BULLISH" else "SHORT")
         rsi_ser = calculate_rsi(ltf_df["close"].astype(float))
         rsi_val = float(rsi_ser.iloc[-1])
-        thresh  = config.RSI_LONG_THRESH if allowed_direction == "BULLISH" else config.RSI_SHORT_THRESH
+        thresh  = config_s1.RSI_LONG_THRESH if allowed_direction == "BULLISH" else config_s1.RSI_SHORT_THRESH
         d_str   = "LONG" if allowed_direction == "BULLISH" else "SHORT"
         is_coil, bh, bl = detect_consolidation(
             ltf_df, rsi_series=rsi_ser, rsi_threshold=thresh, direction=d_str
         )
         close = float(ltf_df["close"].iloc[-1])
         htf_pass = htf_bull if allowed_direction == "BULLISH" else htf_bear
-        rsi_ok   = rsi_val > config.RSI_LONG_THRESH if allowed_direction == "BULLISH" \
-                   else rsi_val < config.RSI_SHORT_THRESH
+        rsi_ok   = rsi_val > config_s1.RSI_LONG_THRESH if allowed_direction == "BULLISH" \
+                   else rsi_val < config_s1.RSI_SHORT_THRESH
 
         if   not htf_pass:   s1_reason = "No HTF break"
-        elif not trend_ok:   s1_reason = f"ADX={adx_val:.1f} < {config.ADX_TREND_THRESHOLD} (sideways)"
+        elif not trend_ok:   s1_reason = f"ADX={adx_val:.1f} < {config_s1.ADX_TREND_THRESHOLD} (sideways)"
         elif not rsi_ok:     s1_reason = f"RSI {rsi_val:.1f} not in zone"
         elif not is_coil:    s1_reason = "No RSI-zone consolidation"
         elif s1_sig == "HOLD": s1_reason = "Waiting breakout"
@@ -286,7 +287,7 @@ class MTFBot:
         })
 
         # ── Min balance check ─────────────────────────────────────── #
-        min_bal = 5.0 / (config.TRADE_SIZE_PCT * config.LEVERAGE)
+        min_bal = 5.0 / (config_s1.TRADE_SIZE_PCT * config_s1.LEVERAGE)
         if balance < min_bal:
             st.add_scan_log(f"[{symbol}] Skipped — balance ${balance:.2f} < ${min_bal:.2f}", "WARN")
             return False
@@ -299,13 +300,13 @@ class MTFBot:
                 "SIGNAL"
             )
             if s1_sig == "LONG":
-                trade = tr.open_long(symbol, box_low=s1_bl, leverage=config.LEVERAGE,
-                                     trade_size_pct=config.TRADE_SIZE_PCT,
-                                     take_profit_pct=config.TAKE_PROFIT_PCT)
+                trade = tr.open_long(symbol, box_low=s1_bl, leverage=config_s1.LEVERAGE,
+                                     trade_size_pct=config_s1.TRADE_SIZE_PCT,
+                                     take_profit_pct=config_s1.TAKE_PROFIT_PCT)
             else:
-                trade = tr.open_short(symbol, box_high=s1_bh, leverage=config.LEVERAGE,
-                                      trade_size_pct=config.TRADE_SIZE_PCT,
-                                      take_profit_pct=config.TAKE_PROFIT_PCT)
+                trade = tr.open_short(symbol, box_high=s1_bh, leverage=config_s1.LEVERAGE,
+                                      trade_size_pct=config_s1.TRADE_SIZE_PCT,
+                                      take_profit_pct=config_s1.TAKE_PROFIT_PCT)
             trade["strategy"] = "S1"
             _log_trade(f"S1_{s1_sig}", trade)
             st.add_open_trade(trade)

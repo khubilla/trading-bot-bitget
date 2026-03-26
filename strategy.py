@@ -31,7 +31,7 @@ import numpy as np
 import pandas as pd
 from typing import Literal
 
-from config import (
+from config_s1 import (
     RSI_PERIOD, RSI_LONG_THRESH, RSI_SHORT_THRESH,
     CONSOLIDATION_CANDLES, CONSOLIDATION_RANGE_PCT,
     BREAKOUT_BUFFER_PCT,
@@ -120,7 +120,7 @@ def check_daily_trend(daily_df: pd.DataFrame, direction: str) -> tuple[bool, flo
 
     Returns (passes, adx_value)
     """
-    from config import ADX_TREND_THRESHOLD, DAILY_EMA_SLOW
+    from config_s1 import ADX_TREND_THRESHOLD, DAILY_EMA_SLOW
 
     if len(daily_df) < 30:
         logger.debug("  Daily trend: not enough candles")

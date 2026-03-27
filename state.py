@@ -138,6 +138,25 @@ def close_trade(symbol: str, result: str, pnl: float):
         s["stats"]["total_pnl"] += pnl
     _write(s)
 
+def record_loss(symbol: str):
+    """Increment daily loss counter for a symbol. Resets automatically on a new UTC day."""
+    s = _read()
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    losses = s.setdefault('daily_losses', {})
+    entry = losses.get(symbol, {'date': '', 'count': 0})
+    if entry['date'] != today:
+        entry = {'date': today, 'count': 0}
+    entry['count'] += 1
+    losses[symbol] = entry
+    _write(s)
+
+def is_pair_paused(symbol: str) -> bool:
+    """Returns True if the pair has hit 3 losses today and should be skipped."""
+    s = _read()
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    entry = s.get('daily_losses', {}).get(symbol, {'date': '', 'count': 0})
+    return entry['date'] == today and entry['count'] >= 3
+
 def add_scan_log(msg: str, level: str = "INFO"):
     s = _read()
     s["scan_log"].insert(0, {"time": _now(), "level": level, "msg": msg})

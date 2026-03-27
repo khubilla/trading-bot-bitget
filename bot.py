@@ -239,6 +239,11 @@ class MTFBot:
                     result = "WIN" if last_pnl >= 0 else "LOSS"
                     logger.info(f"{'✅' if result == 'WIN' else '❌'} [{sym}] Closed ({result}) PnL={last_pnl:+.4f}")
                     st.close_trade(sym, result, last_pnl)
+                    if result == "LOSS":
+                        st.record_loss(sym)
+                        if st.is_pair_paused(sym):
+                            logger.info(f"⛔ [{sym}] 3 losses today — paused until tomorrow (UTC)")
+                            st.add_scan_log(f"[{sym}] ⛔ Paused for today — 3 losses reached", "WARN")
                     st.add_scan_log(
                         f"[{ap['strategy']}][{sym}] Closed {result} | PnL={last_pnl:+.4f} USDT", "INFO"
                     )
@@ -281,6 +286,9 @@ class MTFBot:
                 break
             # Skip symbols already in a trade
             if symbol in self.active_positions:
+                continue
+            # Skip pairs paused due to 3 losses today
+            if st.is_pair_paused(symbol):
                 continue
             try:
                 if self._evaluate_pair(symbol, direction, balance):

@@ -919,6 +919,16 @@ function fmt(n, dec=2) {
   return Number(n).toFixed(dec);
 }
 
+function fmtPrice(n) {
+  if (n == null || n === "?" || Number.isNaN(Number(n))) return '—';
+  const v = Number(n);
+  if (v < 0.01)  return v.toFixed(6);
+  if (v < 1)     return v.toFixed(5);
+  if (v < 10)    return v.toFixed(4);
+  if (v < 1000)  return v.toFixed(3);
+  return v.toFixed(2);
+}
+
 function fmtUSD(n) {
   if (n == null) return '$0.00';
   const v = Number(n);
@@ -1056,10 +1066,10 @@ function render(s) {
             </div>
           </div>
           <div class="trade-grid">
-            <div class="tg-row"><span class="tg-key">Entry</span><span class="tg-val">$${fmt(t.entry,2)}</span></div>
+            <div class="tg-row"><span class="tg-key">Entry</span><span class="tg-val">$${fmtPrice(t.entry)}</span></div>
             <div class="tg-row"><span class="tg-key">uPnL</span><span class="tg-val ${pnlClass}">${fmtUSD(pnl)} <span style="font-size:9px;opacity:0.8">(${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)</span></span></div>
-            <div class="tg-row"><span class="tg-key">SL</span><span class="tg-val neg">$${fmt(t.sl,2)}</span></div>
-            <div class="tg-row"><span class="tg-key">TP</span><span class="tg-val pos">$${fmt(t.tp,2)}</span></div>
+            <div class="tg-row"><span class="tg-key">SL</span><span class="tg-val neg">$${fmtPrice(t.sl)}</span></div>
+            <div class="tg-row"><span class="tg-key">TP</span><span class="tg-val pos">$${fmtPrice(t.tp)}</span></div>
             <div class="tg-row" style="grid-column:1/-1"><span class="tg-key">Margin</span><span class="tg-val">$${fmt(margin,2)} @ ${lev}x</span></div>
           </div>
         </div>`;

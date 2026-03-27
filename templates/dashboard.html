@@ -1195,7 +1195,7 @@ function signalScore(sym, ps, tab) {
     const spike   = reason.includes('spike') && !reason.includes('No spike');
     const rsiHot  = reason.includes('RSI peaked') || sig === 'SHORT';
     const div     = reason.includes('RSI div') || sig === 'SHORT';
-    const srClear = ps.sr_support_pct != null && ps.sr_support_pct >= 15;
+    const srClear = ps.s4_sr_support_pct != null && ps.s4_sr_support_pct >= 15;
     return (spike ? 1 : 0) + (spike && rsiHot ? 1 : 0) + (spike && rsiHot && div ? 1 : 0) + (srClear ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
   }
   return 0;
@@ -1349,7 +1349,7 @@ function s4CardHTML(sym, ps) {
   const spikeClass= spikeOk ? 'pass' : 'fail';
   const rsiClass  = !spikeOk ? 'muted' : rsiHot ? 'pass' : 'fail';
   const divClass  = !spikeOk || !rsiHot ? 'muted' : div_ok ? 'pass' : 'warn';
-  const srPct     = ps.sr_support_pct;
+  const srPct     = ps.s4_sr_support_pct;
   const srClass   = srPct == null ? 'muted' : srPct >= 15 ? 'pass' : srPct >= 10 ? 'warn' : 'fail';
   const srLabel   = srPct == null ? '—' : `${srPct.toFixed(1)}% away`;
   const reasonClass = sig !== 'HOLD' ? 'signal' : rsiHot ? 'active' : spikeOk ? 'active' : '';

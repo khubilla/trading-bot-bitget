@@ -140,6 +140,25 @@ def find_nearest_support(daily_df: pd.DataFrame, entry_price: float,
     return max(supports) if supports else None
 
 
+def find_spike_base(daily_df: pd.DataFrame, lookback: int = 30,
+                    min_body_pct: float = 0.20) -> float | None:
+    """
+    Find the open price of the largest spike candle (body ≥ min_body_pct) within
+    the last `lookback` daily candles. This is the pre-pump base level — the price
+    before the big candle fired — which acts as meaningful support after a breakout.
+    Returns None if no qualifying spike candle is found.
+    """
+    df = daily_df.iloc[-(lookback + 1):-1] if len(daily_df) > lookback + 1 else daily_df.iloc[:-1]
+    best_bp, best_open = 0.0, None
+    for _, row in df.iterrows():
+        o, c = float(row["open"]), float(row["close"])
+        bp = abs(c - o) / o if o else 0
+        if bp >= min_body_pct and bp > best_bp:
+            best_bp   = bp
+            best_open = o
+    return best_open
+
+
 # ════════════════════════════════════════════════════════════
 #  STRATEGY 1 COMPONENTS
 # ════════════════════════════════════════════════════════════

@@ -23,7 +23,7 @@ from strategy import (
     check_htf, check_exit,
     calculate_rsi, detect_consolidation,
     check_daily_trend,
-    find_nearest_resistance, find_nearest_support,
+    find_nearest_resistance, find_nearest_support, find_spike_base,
 )
 PAPER_MODE = "--paper" in sys.argv
 if PAPER_MODE:
@@ -374,10 +374,12 @@ class MTFBot:
             logger.info(f"[S4][{symbol}] {s4_reason}")
 
         # ── S/R Clearance (for dashboard display + entry guard) ──── #
-        _sr_res     = find_nearest_resistance(daily_df, close)
-        _sr_sup     = find_nearest_support(daily_df, close)
-        sr_res_pct  = round((_sr_res - close) / close * 100, 1) if _sr_res else None
-        sr_sup_pct  = round((close - _sr_sup) / close * 100, 1) if _sr_sup else None
+        _sr_res        = find_nearest_resistance(daily_df, close)
+        _sr_sup        = find_nearest_support(daily_df, close)
+        _s4_base       = find_spike_base(daily_df)
+        sr_res_pct     = round((_sr_res - close) / close * 100, 1) if _sr_res else None
+        sr_sup_pct     = round((close - _sr_sup) / close * 100, 1) if _sr_sup else None
+        s4_sr_sup_pct  = round((close - _s4_base) / close * 100, 1) if _s4_base else None
 
         st.update_pair_state(symbol, {
             "rsi": rsi_val, "htf_bull": htf_bull, "htf_bear": htf_bear,
@@ -403,6 +405,7 @@ class MTFBot:
             "sr_resistance_pct":    sr_res_pct,
             "s3_sr_resistance_pct": s3_sr_resistance_pct,
             "sr_support_pct":       sr_sup_pct,
+            "s4_sr_support_pct":    s4_sr_sup_pct,
         })
 
         # ── Min balance check ─────────────────────────────────────── #
@@ -549,15 +552,15 @@ class MTFBot:
                     f"below prev_low {prev_low_approx:.5f} (window: {s4_trigger:.5f}–{prev_low_approx*(1-config_s4.S4_MAX_ENTRY_BUFFER):.5f})"
                 )
             if mark_now <= s4_trigger and not too_far:
-                nearest_sup = find_nearest_support(daily_df, mark_now)
-                if nearest_sup is not None:
-                    clearance = (mark_now - nearest_sup) / mark_now
+                spike_base = find_spike_base(daily_df)
+                if spike_base is not None:
+                    clearance = (mark_now - spike_base) / mark_now
                     if clearance < config_s4.S4_MIN_SR_CLEARANCE:
                         logger.info(
-                            f"[S4][{symbol}] ⏸️ SHORT skipped — support {nearest_sup:.5f} "
+                            f"[S4][{symbol}] ⏸️ SHORT skipped — pre-pump base {spike_base:.5f} "
                             f"only {clearance*100:.1f}% away (min {config_s4.S4_MIN_SR_CLEARANCE*100:.0f}%)"
                         )
-                        st.add_scan_log(f"[S4][{symbol}] ⛔ Support {nearest_sup:.5f} too close ({clearance*100:.1f}%)", "WARN")
+                        st.add_scan_log(f"[S4][{symbol}] ⛔ Pre-pump base {spike_base:.5f} too close ({clearance*100:.1f}%)", "WARN")
                         return False
                 st.add_scan_log(
                     f"[S4][{symbol}] 🔴 SHORT | spike={s4_body_pct*100:.0f}% RSI={s4_rsi:.1f} | "

@@ -1057,7 +1057,9 @@ function render(s) {
       const pnlClass = pnl >= 0 ? 'pos' : 'neg';
       const strat   = t.strategy || '';
       return `
-        <div class="trade-row ${side}">
+        <div class="trade-row ${side}" style="cursor:pointer"
+          data-symbol="${t.symbol}" data-strategy="${strat}"
+          data-entry="${t.entry}" data-sl="${t.sl}" data-tp="${t.tp}" data-side="${t.side}">
           <div class="trade-top">
             <div class="trade-sym">${t.symbol}</div>
             <div style="display:flex;gap:4px;align-items:center">
@@ -1157,6 +1159,7 @@ let rsiLineSeries = null;
 let currentSymbol   = null;
 let currentInterval = '3m';
 let chartRefreshTimer = null;
+window._tradeOverlay = null;   // set when opening chart from an active trade card
 let activeTab   = 's1';
 let sortMode    = 'signals';   // 'signals' | 'alpha'
 let searchQuery = '';
@@ -1896,6 +1899,24 @@ async function loadChart(symbol, interval, fitOnLoad = false) {
       }));
     }
 
+    // ── Active trade overlay lines (entry / SL / TP) ──
+    if (window._tradeOverlay) {
+      const ov   = window._tradeOverlay;
+      const isLong = (ov.side || '').toUpperCase() === 'LONG';
+      if (ov.entry) candlePriceLines.push(candleSeries.createPriceLine({
+        price: ov.entry, color: '#e2e8f0', lineWidth: 1, lineStyle: 0,
+        axisLabelVisible: true, title: 'Entry',
+      }));
+      if (ov.sl) candlePriceLines.push(candleSeries.createPriceLine({
+        price: ov.sl, color: '#f43f5e', lineWidth: 1, lineStyle: 0,
+        axisLabelVisible: true, title: 'SL',
+      }));
+      if (ov.tp) candlePriceLines.push(candleSeries.createPriceLine({
+        price: ov.tp, color: '#10b981', lineWidth: 1, lineStyle: 0,
+        axisLabelVisible: true, title: 'TP',
+      }));
+    }
+
     // ── Common ──
     $('chartPrice').textContent = '$' + Number(data.mark_price).toFixed(pDec);
     $('chartPrice').style.color = 'var(--text)';
@@ -1919,7 +1940,29 @@ function attachCardClicks() {
   document.querySelectorAll('.pair-card').forEach(card => {
     card.onclick = () => {
       const sym = card.dataset.symbol;
-      if (sym) openChart(sym);
+      if (sym) { window._tradeOverlay = null; openChart(sym); }
+    };
+  });
+  // Make active trade cards clickable
+  document.querySelectorAll('.trade-row[data-symbol]').forEach(card => {
+    card.onclick = () => {
+      const strat = card.dataset.strategy || '';
+      window._tradeOverlay = {
+        entry:    parseFloat(card.dataset.entry),
+        sl:       parseFloat(card.dataset.sl),
+        tp:       parseFloat(card.dataset.tp),
+        side:     card.dataset.side,
+        strategy: strat,
+      };
+      // Pick interval by strategy
+      if      (strat === 'S3') currentInterval = '15m';
+      else if (strat === 'S2') currentInterval = '1D';
+      else if (strat === 'S4') currentInterval = '1D';
+      else                     currentInterval = '3m';
+      document.querySelectorAll('.chart-interval-btn').forEach(b => {
+        b.classList.toggle('active', b.textContent === currentInterval);
+      });
+      openChart(card.dataset.symbol);
     };
   });
 }

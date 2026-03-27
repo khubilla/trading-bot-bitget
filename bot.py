@@ -371,6 +371,8 @@ class MTFBot:
         st.update_pair_state(symbol, {
             "rsi": rsi_val, "htf_bull": htf_bull, "htf_bear": htf_bear,
             "signal": s1_sig if s1_sig != "HOLD" else (s2_sig if s2_sig != "HOLD" else (s3_sig if s3_sig != "HOLD" else s4_sig)),
+            "s1_signal": s1_sig,
+            "s2_signal": s2_sig,
             "price": close,
             "consolidating": is_coil, "box_high": round(bh,6) if bh else None,
             "box_low": round(bl,6) if bl else None,

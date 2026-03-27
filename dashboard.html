@@ -1169,14 +1169,14 @@ function signalScore(sym, ps, tab) {
     const htfPass = ps.htf_bull || ps.htf_bear;
     const rsiOk   = ps.rsi_ok;
     const coil    = ps.consolidating;
-    const active  = (ps.signal || 'HOLD') !== 'HOLD';
+    const active  = (ps.s1_signal || 'HOLD') !== 'HOLD';
     return (htfPass ? 1 : 0) + (htfPass && rsiOk ? 1 : 0) + (htfPass && rsiOk && coil ? 1 : 0) + (active ? 10 : 0);
   }
   if (tab === 's2') {
     const bc      = ps.s2_big_candle;
     const rsiOk   = (ps.s2_daily_rsi || 0) > 70;
     const coiling = ps.s2_coiling;
-    const active  = ps.strategy === 'S2' && (ps.signal || 'HOLD') !== 'HOLD';
+    const active  = (ps.s2_signal || 'HOLD') !== 'HOLD';
     return (bc ? 1 : 0) + (bc && rsiOk ? 1 : 0) + (bc && rsiOk && coiling ? 1 : 0) + (active ? 10 : 0);
   }
   if (tab === 's3') {
@@ -1216,7 +1216,7 @@ function switchTab(tab) {
 }
 
 function s2CardHTML(sym, ps) {
-  const sig      = (ps.strategy === 'S2' && ps.signal !== 'HOLD') ? ps.signal : 'HOLD';
+  const sig      = ps.s2_signal || 'HOLD';
   const rsi      = ps.s2_daily_rsi != null ? ps.s2_daily_rsi : 0;
   const bigCandle= ps.s2_big_candle || false;
   const coiling  = ps.s2_coiling   || false;
@@ -1396,7 +1396,7 @@ function renderPairGrid(s) {
     html = pairs.map(sym => {
       const ps     = pairStates[sym] || {};
       const rsi    = ps.rsi    != null ? ps.rsi    : 50;
-      const sig    = ps.signal || 'HOLD';
+      const sig    = ps.s1_signal || 'HOLD';
       const price  = ps.price  != null ? ps.price  : 0;
       const htfBull = ps.htf_bull  || false;
       const htfBear = ps.htf_bear  || false;

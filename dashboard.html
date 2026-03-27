@@ -1954,6 +1954,11 @@ function attachCardClicks() {
         side:     card.dataset.side,
         strategy: strat,
       };
+      // Set activeTab to match the trade strategy so chart draws correct lines
+      if      (strat === 'S1') activeTab = 's1';
+      else if (strat === 'S2') activeTab = 's2';
+      else if (strat === 'S3') activeTab = 's3';
+      else if (strat === 'S4') activeTab = 's4';
       // Pick interval by strategy
       if      (strat === 'S3') currentInterval = '15m';
       else if (strat === 'S2') currentInterval = '1D';

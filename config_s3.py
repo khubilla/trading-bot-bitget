@@ -50,3 +50,6 @@ S3_SL_BUFFER_PCT    = 0.002     # 0.2% below pivot low for SL
 S3_MIN_RR               = 2.0   # Minimum reward:risk ratio (vs partial TP level)
 S3_TRAILING_TRIGGER_PCT = 0.10  # 10% price move → close 50% (+100% margin at 10x)
 S3_TRAILING_RANGE_PCT   = 10    # 10% trailing callback on remaining 50%
+
+# ── S/R Clearance ─────────────────────────────────────── #
+S3_MIN_SR_CLEARANCE = 0.15      # Skip LONG if resistance < 15% above entry

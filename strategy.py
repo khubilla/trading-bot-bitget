@@ -103,6 +103,44 @@ def calculate_adx(df: pd.DataFrame, period: int = 14) -> dict:
 
 
 # ════════════════════════════════════════════════════════════
+#  SUPPORT / RESISTANCE DETECTION
+# ════════════════════════════════════════════════════════════
+
+def find_nearest_resistance(daily_df: pd.DataFrame, entry_price: float,
+                            lookback: int = 90, pivot_n: int = 3) -> float | None:
+    """
+    Find nearest swing high above entry_price within the last `lookback` daily candles.
+    A pivot high requires being the highest among pivot_n candles on each side (7-candle window).
+    Returns the closest resistance level above entry, or None if none found.
+    """
+    df = daily_df.iloc[-lookback:] if len(daily_df) > lookback else daily_df
+    highs = df["high"].astype(float).values
+    resistances = []
+    for i in range(pivot_n, len(highs) - pivot_n):
+        window = highs[i - pivot_n: i + pivot_n + 1]
+        if highs[i] == window.max() and highs[i] > entry_price:
+            resistances.append(highs[i])
+    return min(resistances) if resistances else None
+
+
+def find_nearest_support(daily_df: pd.DataFrame, entry_price: float,
+                         lookback: int = 90, pivot_n: int = 3) -> float | None:
+    """
+    Find nearest swing low below entry_price within the last `lookback` daily candles.
+    A pivot low requires being the lowest among pivot_n candles on each side (7-candle window).
+    Returns the closest support level below entry, or None if none found.
+    """
+    df = daily_df.iloc[-lookback:] if len(daily_df) > lookback else daily_df
+    lows = df["low"].astype(float).values
+    supports = []
+    for i in range(pivot_n, len(lows) - pivot_n):
+        window = lows[i - pivot_n: i + pivot_n + 1]
+        if lows[i] == window.min() and lows[i] < entry_price:
+            supports.append(lows[i])
+    return max(supports) if supports else None
+
+
+# ════════════════════════════════════════════════════════════
 #  STRATEGY 1 COMPONENTS
 # ════════════════════════════════════════════════════════════
 

@@ -23,6 +23,7 @@ from strategy import (
     check_htf, check_exit,
     calculate_rsi, detect_consolidation,
     check_daily_trend,
+    find_nearest_resistance, find_nearest_support,
 )
 PAPER_MODE = "--paper" in sys.argv
 if PAPER_MODE:
@@ -450,6 +451,16 @@ class MTFBot:
             if mark_now > s2_bh * (1 + config_s2.S2_MAX_ENTRY_BUFFER):
                 logger.info(f"[S2][{symbol}] ⏸️ LONG setup valid but entry missed — price {mark_now:.5f} already >{config_s2.S2_MAX_ENTRY_BUFFER*100:.0f}% above trigger {s2_bh:.5f}")
                 return False
+            nearest_res = find_nearest_resistance(daily_df, mark_now)
+            if nearest_res is not None:
+                clearance = (nearest_res - mark_now) / mark_now
+                if clearance < config_s2.S2_MIN_SR_CLEARANCE:
+                    logger.info(
+                        f"[S2][{symbol}] ⏸️ LONG skipped — resistance {nearest_res:.5f} "
+                        f"only {clearance*100:.1f}% away (min {config_s2.S2_MIN_SR_CLEARANCE*100:.0f}%)"
+                    )
+                    st.add_scan_log(f"[S2][{symbol}] ⛔ Resistance {nearest_res:.5f} too close ({clearance*100:.1f}%)", "WARN")
+                    return False
             st.add_scan_log(f"[S2][{symbol}] 🟢 LONG | {s2_reason}", "SIGNAL")
             trade = tr.open_long(symbol, box_low=s2_bl, leverage=config_s2.S2_LEVERAGE,
                                  trade_size_pct=config_s2.S2_TRADE_SIZE_PCT * 0.5,
@@ -478,6 +489,16 @@ class MTFBot:
             if mark_now > s3_trigger * (1 + config_s3.S3_MAX_ENTRY_BUFFER):
                 logger.info(f"[S3][{symbol}] ⏸️ LONG setup valid but entry missed — price {mark_now:.5f} already >{config_s3.S3_MAX_ENTRY_BUFFER*100:.0f}% above trigger {s3_trigger:.5f}")
                 return False
+            nearest_res = find_nearest_resistance(daily_df, mark_now)
+            if nearest_res is not None:
+                clearance = (nearest_res - mark_now) / mark_now
+                if clearance < config_s3.S3_MIN_SR_CLEARANCE:
+                    logger.info(
+                        f"[S3][{symbol}] ⏸️ LONG skipped — resistance {nearest_res:.5f} "
+                        f"only {clearance*100:.1f}% away (min {config_s3.S3_MIN_SR_CLEARANCE*100:.0f}%)"
+                    )
+                    st.add_scan_log(f"[S3][{symbol}] ⛔ Resistance {nearest_res:.5f} too close ({clearance*100:.1f}%)", "WARN")
+                    return False
             st.add_scan_log(f"[S3][{symbol}] 🟢 LONG | {s3_reason}", "SIGNAL")
             trade = tr.open_long(
                 symbol,
@@ -515,6 +536,16 @@ class MTFBot:
                     f"below prev_low {prev_low_approx:.5f} (window: {s4_trigger:.5f}–{prev_low_approx*(1-config_s4.S4_MAX_ENTRY_BUFFER):.5f})"
                 )
             if mark_now <= s4_trigger and not too_far:
+                nearest_sup = find_nearest_support(daily_df, mark_now)
+                if nearest_sup is not None:
+                    clearance = (mark_now - nearest_sup) / mark_now
+                    if clearance < config_s4.S4_MIN_SR_CLEARANCE:
+                        logger.info(
+                            f"[S4][{symbol}] ⏸️ SHORT skipped — support {nearest_sup:.5f} "
+                            f"only {clearance*100:.1f}% away (min {config_s4.S4_MIN_SR_CLEARANCE*100:.0f}%)"
+                        )
+                        st.add_scan_log(f"[S4][{symbol}] ⛔ Support {nearest_sup:.5f} too close ({clearance*100:.1f}%)", "WARN")
+                        return False
                 st.add_scan_log(
                     f"[S4][{symbol}] 🔴 SHORT | spike={s4_body_pct*100:.0f}% RSI={s4_rsi:.1f} | "
                     f"entry≤{s4_trigger:.5f} triggered @ {mark_now:.5f}",

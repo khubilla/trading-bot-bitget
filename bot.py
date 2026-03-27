@@ -31,7 +31,7 @@ from claude_filter import claude_approve
 PAPER_MODE = "--paper" in sys.argv
 if PAPER_MODE:
     import paper_trader as tr
-    st.set_file("state_paper.json")
+    st.set_file(str(config._DATA_DIR / "state_paper.json"))
     config.TRADE_LOG = config.TRADE_LOG.replace("trades.csv", "trades_paper.csv")
     print("📝 PAPER TRADING MODE — no real orders will be placed")
 else:

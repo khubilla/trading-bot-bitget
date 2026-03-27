@@ -9,7 +9,7 @@ Usage:
     python bot.py --paper
 """
 
-import json, logging
+import json, logging, os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,7 +18,8 @@ from trader import get_candles, get_mark_price  # noqa: F401  (re-exported)
 
 logger = logging.getLogger(__name__)
 
-PAPER_STATE_FILE    = "paper_state.json"
+_DATA_DIR        = Path(os.environ.get("DATA_DIR", "."))
+PAPER_STATE_FILE = str(_DATA_DIR / "paper_state.json")
 PAPER_START_BALANCE = 1000.0   # starting paper USDT balance
 
 

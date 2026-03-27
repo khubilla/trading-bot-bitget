@@ -1,0 +1,53 @@
+services:
+
+  # ── Live trading ──────────────────────────────────────────────── #
+  bot:
+    build: .
+    command: python bot.py
+    env_file: .env
+    environment:
+      - DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data        # persists state.json, trades.csv, bot.log
+    restart: unless-stopped
+
+  dashboard:
+    build: .
+    command: python dashboard.py
+    env_file: .env
+    environment:
+      - DATA_DIR=/app/data
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - bot
+    restart: unless-stopped
+
+  # ── Paper trading (run separately with: docker compose --profile paper up) ─ #
+  bot-paper:
+    build: .
+    command: python bot.py --paper
+    env_file: .env
+    profiles: [paper]
+    environment:
+      - DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  dashboard-paper:
+    build: .
+    command: python dashboard.py --paper
+    env_file: .env
+    profiles: [paper]
+    environment:
+      - DATA_DIR=/app/data
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - bot-paper
+    restart: unless-stopped

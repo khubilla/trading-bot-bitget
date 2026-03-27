@@ -623,9 +623,13 @@ class MTFBot:
                     f"entry≤{s4_trigger:.5f} triggered @ {mark_now:.5f}",
                     "SIGNAL"
                 )
+                # Recompute SL from actual entry (mark_now) to guarantee -50% P/L max.
+                # s4_sl from evaluate_s4 is based on entry_trigger, but mark_now can be
+                # lower (deeper into the window), making the trigger-based SL too wide.
+                s4_sl_actual = mark_now * (1 + 0.50 / config_s4.S4_LEVERAGE)
                 trade = tr.open_short(
                     symbol,
-                    sl_floor       = s4_sl,
+                    sl_floor       = s4_sl_actual,
                     leverage       = config_s4.S4_LEVERAGE,
                     trade_size_pct = config_s4.S4_TRADE_SIZE_PCT * 0.5,
                     use_s4_exits   = True,
@@ -636,7 +640,7 @@ class MTFBot:
                 trade["snap_spike_body_pct"] = round(s4_body_pct * 100, 1)
                 trade["snap_rsi_div"]        = s4_div
                 trade["snap_rsi_div_str"]    = s4_div_str
-                trade["snap_sl"]             = round(s4_sl, 8) if s4_sl else None
+                trade["snap_sl"]             = round(s4_sl_actual, 8)
                 trade["snap_sentiment"]      = self.sentiment.direction
                 trade["snap_sr_clearance_pct"] = round((mark_now - spike_base) / mark_now * 100, 1) if spike_base else None
                 _log_trade("S4_SHORT", trade)

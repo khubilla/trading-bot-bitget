@@ -25,6 +25,7 @@ from strategy import (
     check_daily_trend,
     find_nearest_resistance, find_nearest_support, find_spike_base,
 )
+from claude_filter import claude_approve
 PAPER_MODE = "--paper" in sys.argv
 if PAPER_MODE:
     import paper_trader as tr
@@ -59,6 +60,10 @@ _TRADE_FIELDS = [
     "snap_entry_trigger", "snap_sl", "snap_rr",
     # S4 snapshot
     "snap_rsi_peak", "snap_spike_body_pct", "snap_rsi_div", "snap_rsi_div_str",
+    # S/R clearance at entry (S2/S3/S4)
+    "snap_sr_clearance_pct",
+    # Close fields
+    "result", "pnl_pct", "exit_reason",
 ]
 
 def _log_trade(action: str, details: dict):
@@ -237,6 +242,14 @@ class MTFBot:
                         if t["symbol"] == sym:
                             last_pnl = float(t.get("unrealised_pnl") or 0)
                             break
+                    pnl_pct     = None
+                    exit_reason = ""
+                    if PAPER_MODE:
+                        _lc = tr.get_last_close(sym)
+                        if _lc:
+                            last_pnl    = _lc["pnl"]
+                            pnl_pct     = _lc["pnl_pct"]
+                            exit_reason = _lc["reason"]
                     result = "WIN" if last_pnl >= 0 else "LOSS"
                     logger.info(f"{'✅' if result == 'WIN' else '❌'} [{sym}] Closed ({result}) PnL={last_pnl:+.4f}")
                     st.close_trade(sym, result, last_pnl)
@@ -251,6 +264,7 @@ class MTFBot:
                     _log_trade(f"{ap['strategy']}_CLOSE", {
                         "symbol": sym, "side": ap["side"],
                         "pnl": round(last_pnl, 4), "result": result,
+                        "pnl_pct": pnl_pct, "exit_reason": exit_reason,
                     })
                     del self.active_positions[sym]
 
@@ -477,6 +491,19 @@ class MTFBot:
                     )
                     st.add_scan_log(f"[S2][{symbol}] ⛔ Resistance {nearest_res:.5f} too close ({clearance*100:.1f}%)", "WARN")
                     return False
+            if config.CLAUDE_FILTER_ENABLED:
+                _sr_str = f"{round((nearest_res - mark_now) / mark_now * 100, 1)}%" if nearest_res else "none found"
+                _cd = claude_approve("S2", symbol, {
+                    "RSI": round(s2_rsi, 1),
+                    "S/R clearance": _sr_str,
+                    "Sentiment": self.sentiment.direction,
+                    "Entry": round(mark_now, 5),
+                    "SL": round(s2_bl, 5),
+                })
+                if not _cd["approved"]:
+                    logger.info(f"[S2][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
+                    st.add_scan_log(f"[S2][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
+                    return False
             st.add_scan_log(f"[S2][{symbol}] 🟢 LONG | {s2_reason}", "SIGNAL")
             trade = tr.open_long(symbol, box_low=s2_bl, leverage=config_s2.S2_LEVERAGE,
                                  trade_size_pct=config_s2.S2_TRADE_SIZE_PCT * 0.5,
@@ -484,9 +511,10 @@ class MTFBot:
                                  stop_loss_pct=config_s2.S2_STOP_LOSS_PCT,
                                  use_s2_exits=True)
             trade["strategy"] = "S2"
-            trade["snap_daily_rsi"]   = round(s2_rsi, 1)
-            trade["snap_box_range_pct"] = round((s2_bh - s2_bl) / s2_bl * 100, 3) if s2_bh and s2_bl else None
-            trade["snap_sentiment"]   = self.sentiment.direction
+            trade["snap_daily_rsi"]      = round(s2_rsi, 1)
+            trade["snap_box_range_pct"]  = round((s2_bh - s2_bl) / s2_bl * 100, 3) if s2_bh and s2_bl else None
+            trade["snap_sentiment"]      = self.sentiment.direction
+            trade["snap_sr_clearance_pct"] = round((nearest_res - mark_now) / mark_now * 100, 1) if nearest_res else None
             _log_trade("S2_LONG", trade)
             st.add_open_trade(trade)
             if PAPER_MODE: tr.tag_strategy(symbol, "S2")
@@ -515,6 +543,19 @@ class MTFBot:
                     )
                     st.add_scan_log(f"[S3][{symbol}] ⛔ 15m resistance {nearest_res:.5f} too close ({clearance*100:.1f}%)", "WARN")
                     return False
+            if config.CLAUDE_FILTER_ENABLED:
+                _sr_str = f"{s3_sr_resistance_pct}%" if s3_sr_resistance_pct else "none found"
+                _cd = claude_approve("S3", symbol, {
+                    "ADX": round(s3_adx, 1) if s3_adx else "?",
+                    "S/R clearance (15m)": _sr_str,
+                    "Sentiment": self.sentiment.direction,
+                    "Entry": round(mark_now, 5),
+                    "SL": round(s3_sl, 5),
+                })
+                if not _cd["approved"]:
+                    logger.info(f"[S3][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
+                    st.add_scan_log(f"[S3][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
+                    return False
             st.add_scan_log(f"[S3][{symbol}] 🟢 LONG | {s3_reason}", "SIGNAL")
             trade = tr.open_long(
                 symbol,
@@ -531,6 +572,7 @@ class MTFBot:
                 config_s3.S3_TRAILING_TRIGGER_PCT * s3_trigger / (s3_trigger - s3_sl), 2
             ) if s3_trigger and s3_sl and s3_trigger > s3_sl else None
             trade["snap_sentiment"]     = self.sentiment.direction
+            trade["snap_sr_clearance_pct"] = s3_sr_resistance_pct
             _log_trade("S3_LONG", trade)
             st.add_open_trade(trade)
             if PAPER_MODE: tr.tag_strategy(symbol, "S3")
@@ -562,6 +604,20 @@ class MTFBot:
                         )
                         st.add_scan_log(f"[S4][{symbol}] ⛔ Pre-pump base {spike_base:.5f} too close ({clearance*100:.1f}%)", "WARN")
                         return False
+                if config.CLAUDE_FILTER_ENABLED:
+                    _sr_str = f"{round((mark_now - spike_base) / mark_now * 100, 1)}%" if spike_base else "none found"
+                    _cd = claude_approve("S4", symbol, {
+                        "RSI peak": round(s4_rsi_peak, 1),
+                        "RSI divergence": str(s4_div),
+                        "S/R clearance (spike base)": _sr_str,
+                        "Sentiment": self.sentiment.direction,
+                        "Entry": round(s4_trigger, 5),
+                        "SL": round(s4_sl, 5),
+                    })
+                    if not _cd["approved"]:
+                        logger.info(f"[S4][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
+                        st.add_scan_log(f"[S4][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
+                        return False
                 st.add_scan_log(
                     f"[S4][{symbol}] 🔴 SHORT | spike={s4_body_pct*100:.0f}% RSI={s4_rsi:.1f} | "
                     f"entry≤{s4_trigger:.5f} triggered @ {mark_now:.5f}",
@@ -582,6 +638,7 @@ class MTFBot:
                 trade["snap_rsi_div_str"]    = s4_div_str
                 trade["snap_sl"]             = round(s4_sl, 8) if s4_sl else None
                 trade["snap_sentiment"]      = self.sentiment.direction
+                trade["snap_sr_clearance_pct"] = round((mark_now - spike_base) / mark_now * 100, 1) if spike_base else None
                 _log_trade("S4_SHORT", trade)
                 st.add_open_trade(trade)
                 if PAPER_MODE: tr.tag_strategy(symbol, "S4")

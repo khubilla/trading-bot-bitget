@@ -71,6 +71,24 @@ def tag_strategy(symbol: str, strategy: str):
         _save(state)
 
 
+def get_last_close(symbol: str) -> dict | None:
+    """
+    Returns the most recent closed trade entry for a symbol from paper history.
+    Used by bot.py to get exact pnl, pnl_pct, and exit reason after a close is detected.
+    Returns None if no history found for the symbol.
+    """
+    state = _load()
+    history = state.get("history", [])
+    for entry in reversed(history):
+        if entry.get("symbol") == symbol:
+            return {
+                "pnl":     entry.get("pnl", 0),
+                "pnl_pct": entry.get("pnl_pct"),
+                "reason":  entry.get("reason", ""),
+            }
+    return None
+
+
 def get_all_open_positions() -> dict:
     """
     Returns open paper positions in the same format as trader.py.

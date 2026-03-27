@@ -45,6 +45,11 @@ POLL_INTERVAL_SEC     = 15  # Seconds between each evaluation cycle
 SENTIMENT_THRESHOLD = 0.55   # >55% green volume → BULLISH; <45% → BEARISH
 SENTIMENT_SCAN_SEC  = 60     # Re-calculate alongside pair scan
 
+# --- Claude Trade Filter ---
+CLAUDE_FILTER_ENABLED   = False                        # set True to enable approval gate
+CLAUDE_FILTER_MODEL     = "claude-3-haiku-20240307"  # cheapest Claude model
+CLAUDE_FILTER_HISTORY_N = 30                           # last N trades to send as context
+
 # --- Logging ---
 # DATA_DIR is set to the shared Render disk mount path (/data) in production,
 # and defaults to the current directory locally.

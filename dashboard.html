@@ -1865,6 +1865,20 @@ async function loadChart(symbol, interval, fitOnLoad = false) {
       $('chartAge').textContent = 'Updated ' + new Date().toLocaleTimeString();
     }
 
+    // ── Common: S/R levels (thin dashed, all chart modes) ──
+    if (data.sr_resistance) {
+      candlePriceLines.push(candleSeries.createPriceLine({
+        price: data.sr_resistance, color: '#f0a500', lineWidth: 1, lineStyle: 2,
+        axisLabelVisible: true, title: 'R',
+      }));
+    }
+    if (data.sr_support) {
+      candlePriceLines.push(candleSeries.createPriceLine({
+        price: data.sr_support, color: '#4a9eff', lineWidth: 1, lineStyle: 2,
+        axisLabelVisible: true, title: 'S',
+      }));
+    }
+
     // ── Common ──
     $('chartPrice').textContent = '$' + Number(data.mark_price).toFixed(pDec);
     $('chartPrice').style.color = 'var(--text)';

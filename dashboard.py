@@ -48,7 +48,7 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
         import trader as tr
         import config
         import config_s1
-        from strategy import detect_consolidation, calculate_rsi, evaluate_s2, evaluate_s4
+        from strategy import detect_consolidation, calculate_rsi, evaluate_s2, evaluate_s4, find_nearest_resistance, find_nearest_support
 
         # Fetch extra candles for indicator warmup (EMA/ADX need history to converge)
         # Then trim to display_limit for the chart
@@ -293,6 +293,14 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
         except Exception:
             mark = float(df["close"].iloc[-1])
 
+        # Nearest S/R from the chart's own timeframe data
+        try:
+            sr_resistance = find_nearest_resistance(df_full, mark)
+            sr_support    = find_nearest_support(df_full, mark)
+        except Exception:
+            sr_resistance = None
+            sr_support    = None
+
         # For 1H: return previous candle high for HTF break visualisation
         prev_high = None
         if interval == "1H" and len(df) >= 2:
@@ -332,6 +340,9 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
             "s4_entry_trigger": s4_entry_trigger,
             "s4_sl_price":      s4_sl_price,
             "s4_rsi_peak":      s4_rsi_peak_val,
+            # S/R levels from chart timeframe
+            "sr_resistance":    round(sr_resistance, max(2, price_decimals)) if sr_resistance else None,
+            "sr_support":       round(sr_support,    max(2, price_decimals)) if sr_support    else None,
         })
 
     except Exception as e:

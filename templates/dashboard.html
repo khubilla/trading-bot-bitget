@@ -653,6 +653,8 @@
 <div class="conn-banner" id="connBanner">
   ⚠ DASHBOARD CONNECTION LOST — Retrying...
 </div>
+<div class="conn-banner" id="errBanner" style="display:none; background:#5c2a00;">
+</div>
 
 <div class="shell">
 
@@ -667,6 +669,14 @@
       <div class="header-stat">
         <span class="val" id="h-balance">$0.00</span>
         <span class="lbl">Balance</span>
+      </div>
+      <div class="header-stat">
+        <span class="val" id="h-upnl">$0.00</span>
+        <span class="lbl">Open P/L</span>
+      </div>
+      <div class="header-stat">
+        <span class="val" id="h-total">$0.00</span>
+        <span class="lbl">Total Value</span>
       </div>
       <div class="header-stat">
         <span class="val" id="h-pairs">0</span>
@@ -920,6 +930,15 @@ function flashDot() {
 function render(s) {
   flashDot();
 
+  // ── Error banner
+  const errBanner = $('errBanner');
+  if (s.error) {
+    errBanner.textContent = '⚠ ' + s.error;
+    errBanner.style.display = 'block';
+  } else {
+    errBanner.style.display = 'none';
+  }
+
   // ── Status badge
   const badge = $('statusBadge');
   const statuses = { RUNNING: 'running', STOPPED: 'stopped', ERROR: 'error' };
@@ -927,7 +946,16 @@ function render(s) {
   $('statusText').textContent = s.status || 'UNKNOWN';
 
   // ── Header stats
+  const openTrades  = s.open_trades || [];
+  const upnl        = openTrades.reduce((sum, t) => sum + (t.unrealised_pnl || 0), 0);
+  const marginLocked = openTrades.reduce((sum, t) => sum + (t.margin || 0), 0);
+  const totalVal    = (s.balance || 0) + marginLocked + upnl;
+  const upnlClass   = upnl >= 0 ? 'pos' : 'neg';
+
   $('h-balance').textContent = '$' + fmt(s.balance);
+  $('h-upnl').textContent    = (upnl >= 0 ? '+' : '') + '$' + fmt(upnl);
+  $('h-upnl').className      = 'val ' + upnlClass;
+  $('h-total').textContent   = '$' + fmt(totalVal);
   $('h-pairs').textContent   = (s.qualified_pairs || []).length;
   $('h-uptime').textContent  = uptime(s.started_at);
   $('h-last').textContent    = relTime(s.last_tick);

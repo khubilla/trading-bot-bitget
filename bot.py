@@ -26,6 +26,7 @@ PAPER_MODE = "--paper" in sys.argv
 if PAPER_MODE:
     import paper_trader as tr
     st.set_file("state_paper.json")
+    config.TRADE_LOG = config.TRADE_LOG.replace("trades.csv", "trades_paper.csv")
     print("📝 PAPER TRADING MODE — no real orders will be placed")
 else:
     import trader as tr
@@ -44,12 +45,23 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+_TRADE_FIELDS = [
+    "timestamp", "action", "symbol", "side", "qty", "entry", "sl", "tp",
+    "box_low", "box_high", "leverage", "margin", "tpsl_set", "strategy",
+    # S1 snapshot
+    "snap_rsi", "snap_adx", "snap_htf", "snap_coil", "snap_box_range_pct", "snap_sentiment",
+    # S2 snapshot
+    "snap_daily_rsi",
+    # S3 snapshot
+    "snap_entry_trigger", "snap_sl", "snap_rr",
+]
+
 def _log_trade(action: str, details: dict):
     row = {"timestamp": datetime.now(timezone.utc).isoformat(), "action": action, **details}
     write_header = not os.path.exists(config.TRADE_LOG)
     with open(config.TRADE_LOG, "a", newline="") as f:
         import csv as _csv
-        w = _csv.DictWriter(f, fieldnames=row.keys())
+        w = _csv.DictWriter(f, fieldnames=_TRADE_FIELDS, extrasaction="ignore", restval="")
         if write_header:
             w.writeheader()
         w.writerow(row)
@@ -86,15 +98,22 @@ class MTFBot:
         try:
             existing = tr.get_all_open_positions()
             for sym, pos in existing.items():
+                strategy = pos.get("strategy", "UNKNOWN")
                 self.active_positions[sym] = {
-                    "side": pos["side"], "strategy": "UNKNOWN",
+                    "side": pos["side"], "strategy": strategy,
                     "box_high": 0.0, "box_low": 0.0,
                 }
-                logger.warning(f"⚠️  Resumed: {sym} {pos['side']} qty={pos['qty']}")
+                logger.warning(f"⚠️  Resumed: {sym} {pos['side']} qty={pos['qty']} [{strategy}]")
                 st.add_open_trade({
-                    "symbol": sym, "side": pos["side"],
-                    "qty": pos["qty"], "entry": pos["entry_price"],
-                    "sl": "?", "tp": "?", "margin": 0, "strategy": "UNKNOWN",
+                    "symbol":   sym,
+                    "side":     pos["side"],
+                    "qty":      pos["qty"],
+                    "entry":    pos["entry_price"],
+                    "sl":       pos.get("sl", "?"),
+                    "tp":       pos.get("tp", "?"),
+                    "margin":   pos.get("margin", 0),
+                    "leverage": pos.get("leverage", 0),
+                    "strategy": strategy,
                 })
             if existing:
                 st.add_scan_log(f"Resumed {len(existing)} position(s)", "WARN")
@@ -181,10 +200,23 @@ class MTFBot:
                     except Exception as e:
                         logger.error(f"Exit check error [{sym}]: {e}")
                 else:
-                    # Position closed by SL/TP
-                    logger.info(f"✅ [{sym}] Closed (SL/TP)")
-                    st.close_trade(sym, "CLOSED", 0)
-                    st.add_scan_log(f"[{sym}] Trade closed", "INFO")
+                    # Position closed by SL/TP — grab last known PnL from state
+                    ap       = self.active_positions[sym]
+                    last_pnl = 0.0
+                    for t in st._read()["open_trades"]:
+                        if t["symbol"] == sym:
+                            last_pnl = float(t.get("unrealised_pnl") or 0)
+                            break
+                    result = "WIN" if last_pnl >= 0 else "LOSS"
+                    logger.info(f"{'✅' if result == 'WIN' else '❌'} [{sym}] Closed ({result}) PnL={last_pnl:+.4f}")
+                    st.close_trade(sym, result, last_pnl)
+                    st.add_scan_log(
+                        f"[{ap['strategy']}][{sym}] Closed {result} | PnL={last_pnl:+.4f} USDT", "INFO"
+                    )
+                    _log_trade(f"{ap['strategy']}_CLOSE", {
+                        "symbol": sym, "side": ap["side"],
+                        "pnl": round(last_pnl, 4), "result": result,
+                    })
                     del self.active_positions[sym]
 
         # ── 4. Check if we can open more trades ───────────────────── #
@@ -356,6 +388,7 @@ class MTFBot:
             trade["snap_sentiment"]   = self.sentiment.direction
             _log_trade(f"S1_{s1_sig}", trade)
             st.add_open_trade(trade)
+            if PAPER_MODE: tr.tag_strategy(symbol, "S1")
             self.active_positions[symbol] = {
                 "side": s1_sig, "strategy": "S1",
                 "box_high": s1_bh, "box_low": s1_bl,
@@ -377,6 +410,7 @@ class MTFBot:
             trade["snap_sentiment"]   = self.sentiment.direction
             _log_trade("S2_LONG", trade)
             st.add_open_trade(trade)
+            if PAPER_MODE: tr.tag_strategy(symbol, "S2")
             self.active_positions[symbol] = {
                 "side": "LONG", "strategy": "S2",
                 "box_high": s2_bh if s2_bh else 0.0, "box_low": s2_bl,
@@ -403,6 +437,7 @@ class MTFBot:
             trade["snap_sentiment"]     = self.sentiment.direction
             _log_trade("S3_LONG", trade)
             st.add_open_trade(trade)
+            if PAPER_MODE: tr.tag_strategy(symbol, "S3")
             self.active_positions[symbol] = {
                 "side": "LONG", "strategy": "S3",
                 "box_high": s3_trigger, "box_low": s3_sl,

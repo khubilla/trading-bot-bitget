@@ -6,6 +6,7 @@ state.json
 state_paper.json
 paper_state.json
 trades.csv
+trades_paper.csv
 .DS_Store
 backtest_report.html
 /data/daily

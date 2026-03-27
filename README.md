@@ -1,6 +1,6 @@
 # Bitget USDT-Futures MTF Bot
 
-Automated crypto futures trading bot for Bitget USDT-margined perpetual futures. Runs two independent strategies simultaneously with a shared live dashboard.
+Automated crypto futures trading bot for Bitget USDT-margined perpetual futures. Runs three independent strategies simultaneously with a shared live dashboard. Supports both **live trading** and **paper trading** mode.
 
 ---
 
@@ -55,29 +55,30 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-**2. Create your config file**
+**2. Set your API credentials**
+
+Create a `.env` file in the project root (it is gitignored):
 ```bash
-cp config_template.py config.py
+BITGET_API_KEY=your_api_key
+BITGET_API_SECRET=your_api_secret
+BITGET_API_PASSPHRASE=your_passphrase
 ```
-Edit `config.py` and fill in your Bitget API credentials:
-```python
-API_KEY        = "your_api_key"
-API_SECRET     = "your_api_secret"
-API_PASSPHRASE = "your_passphrase"
-DEMO_MODE      = True   # set False for live trading
-```
+
+`config.py` auto-loads `.env` on startup so no extra tooling is needed. Environment variables take precedence if already set (e.g. on a server).
 
 **3. Tune strategy parameters (optional)**
 
 | File | Purpose |
 |------|---------|
 | `config_s1.py` | Strategy 1 — timeframes, RSI, ADX, risk params |
-| `config_s2.py` | Strategy 2 — big candle detection, coil, risk params |
+| `config_s2.py` | Strategy 2 — big candle detection, coil, trailing stop params |
 | `config_s3.py` | Strategy 3 — EMA alignment, Stochastics, MACD, risk params |
 
 ---
 
 ## Running
+
+### Live trading
 
 **Start the bot**
 ```bash
@@ -90,30 +91,81 @@ python dashboard.py
 ```
 Then open [http://localhost:8080](http://localhost:8080).
 
+### Paper trading (simulated, no real orders)
+
+**Start the paper bot**
+```bash
+python bot.py --paper
+```
+
+**Start the paper dashboard** (separate terminal)
+```bash
+python dashboard.py --paper
+```
+Then open [http://localhost:8081](http://localhost:8081).
+
+Paper trading uses real market data from Bitget but simulates all order execution locally. State is persisted in `paper_state.json` and `state_paper.json`. Paper trades are logged to `trades_paper.csv`.
+
+---
+
+## Dashboard
+
+The live dashboard shows:
+
+- **Header stats**: Balance, Open P/L, Total Value (balance + margin + unrealised P/L), Win Rate, Total P/L, Scanned Pairs
+- **Active trades**: entry price, SL, TP, current unrealised P/L per position
+- **Trade history**: closed trades with PnL, result, and strategy tag
+- **Candlestick chart** with RSI and MACD subcharts for any scanned symbol
+
 ---
 
 ## File Structure
 
 ```
-├── bot.py              # Main entry point
-├── strategy.py         # S1 + S2 signal logic
-├── trader.py           # Bitget order execution
+├── bot.py              # Main entry point (--paper flag for paper mode)
+├── strategy.py         # S1 + S2 + S3 signal logic
+├── trader.py           # Bitget order execution (live)
+├── paper_trader.py     # Simulated order execution (paper)
 ├── scanner.py          # Pair scanner + market sentiment
-├── dashboard.py        # Live web dashboard (FastAPI)
+├── dashboard.py        # Live web dashboard (FastAPI, --paper flag)
+├── dashboard.html      # Dashboard frontend (served by dashboard.py)
 ├── backtest.py         # Backtesting engine
 ├── bitget_client.py    # Bitget REST API client
-├── state.py            # Shared in-memory state
+├── state.py            # Shared in-memory + on-disk state
 │
-├── config_template.py  # Copy to config.py and add your keys
+├── config.py           # Credentials + paths (reads from .env / env vars)
 ├── config_s1.py        # Strategy 1 parameters
 ├── config_s2.py        # Strategy 2 parameters
 ├── config_s3.py        # Strategy 3 parameters
 │
-├── trades.csv          # Trade log
+├── .env                # Local credentials (gitignored, never commit)
+├── trades.csv          # Live trade log
+├── trades_paper.csv    # Paper trade log
+├── state.json          # Live bot runtime state
+├── state_paper.json    # Paper bot runtime state
+├── paper_state.json    # Paper trader simulation state (balance, positions)
 └── bot.log             # Runtime log
 ```
 
-> `config.py` is gitignored — never commit your API credentials.
+---
+
+## Trade Log (`trades.csv` / `trades_paper.csv`)
+
+Each trade open and close is appended as a row. Columns:
+
+| Column | Description |
+|--------|-------------|
+| `timestamp` | UTC ISO timestamp |
+| `action` | `S1_LONG`, `S2_LONG`, `S3_LONG`, `S1_CLOSE`, etc. |
+| `symbol` | e.g. `BTCUSDT` |
+| `side` | `LONG` or `SHORT` |
+| `qty` | Position size |
+| `entry` | Entry price |
+| `sl` / `tp` | Stop-loss / take-profit price |
+| `leverage` / `margin` | Risk sizing |
+| `strategy` | Strategy tag |
+| `snap_rsi`, `snap_adx`, … | Indicator snapshot at entry |
+| `pnl` / `result` | On close rows: realised PnL and WIN/LOSS |
 
 ---
 
@@ -121,4 +173,4 @@ Then open [http://localhost:8080](http://localhost:8080).
 
 - Python 3.10+
 - Bitget account with Futures enabled and API key created
-- Set `DEMO_MODE = True` to paper trade before going live
+- `.env` file with valid API credentials

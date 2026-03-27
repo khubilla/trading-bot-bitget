@@ -57,6 +57,14 @@ def set_leverage(symbol: str, leverage: int):
     pass  # no-op for paper trading
 
 
+def tag_strategy(symbol: str, strategy: str):
+    """Store the strategy name in paper_state so it survives restarts."""
+    state = _load()
+    if symbol in state["positions"]:
+        state["positions"][symbol]["strategy"] = strategy
+        _save(state)
+
+
 def get_all_open_positions() -> dict:
     """
     Returns open paper positions in the same format as trader.py.
@@ -83,6 +91,12 @@ def get_all_open_positions() -> dict:
             "qty":            qty,
             "entry_price":    entry,
             "unrealised_pnl": round(upnl, 6),
+            # Extra fields for dashboard resume (paper only)
+            "sl":       pos.get("sl"),
+            "tp":       pos.get("tp"),
+            "margin":   pos.get("margin"),
+            "leverage": pos.get("leverage"),
+            "strategy": pos.get("strategy", "UNKNOWN"),
         }
     return result
 

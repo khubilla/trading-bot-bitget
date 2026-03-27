@@ -209,8 +209,131 @@ Each trade open and close is appended as a row. Columns:
 
 ---
 
+## Claude AI Integration
+
+### Trade Approval Filter (`claude_filter.py`)
+
+An optional Claude Haiku gate that runs before S2, S3, and S4 execute a trade. When enabled, it sends the current signal indicators + recent trade history to Claude and asks for an APPROVE or REJECT decision with a one-line reason.
+
+**How it works:**
+- Reads the last N closed trades from `trades.csv` / `trades_paper.csv`
+- Sends signal indicators (RSI, sentiment, S/R clearance, entry/SL) + trade history table to Claude
+- Claude looks for patterns: does this setup's indicator profile match past wins or losses?
+- Returns APPROVE or REJECT with a brief reason logged to the dashboard and bot.log
+- On any API error, defaults to APPROVE — trades are never blocked by infrastructure failures
+
+**S1 is excluded** — it's a scalper with a 3.3% TP where LLM latency would matter.
+
+**Enable in `config.py`:**
+```python
+CLAUDE_FILTER_ENABLED   = True
+CLAUDE_FILTER_MODEL     = "claude-3-haiku-20240307"  # cheapest model
+CLAUDE_FILTER_HISTORY_N = 30                          # last N trades as context
+```
+
+Add your API key to `.env`:
+```
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+> The filter is most useful after 20–30+ closed trades per strategy. With fewer trades Claude has no pattern to learn from and will approve everything.
+
+**Cost:** ~$0.001 per signal at Haiku pricing (~$0.10–0.15/month).
+
+---
+
+### Strategy Optimizer (`optimize.py`)
+
+A one-off analysis script that reads all closed trades, groups them by strategy, and asks Claude Sonnet to identify win/loss patterns and suggest specific config parameter changes.
+
+**Run it:**
+```bash
+python optimize.py           # analyze trades.csv (live)
+python optimize.py --paper   # analyze trades_paper.csv
+python optimize.py --min 5   # lower minimum trades threshold (default 10)
+```
+
+**Sample output:**
+```
+🔍 Analyzing S2 — 34 trades | 21W / 13L
+============================================================
+1. KEY PATTERNS
+• Winning trades had RSI ≥ 75 in 18/21 cases; losses averaged RSI 71.2
+• All 7 losses with NEUTRAL sentiment vs 18/21 wins during BULLISH
+• S/R clearance < 18% appeared in 9/13 losses
+
+2. SUGGESTED CHANGES
+• S2_RSI_LONG_THRESH: 70 → 75  (filters 8 losing trades, keeps 19 winners)
+• S2_MIN_SR_CLEARANCE: 0.15 → 0.18  (removes 9 losses, loses 2 winners)
+
+3. TRADES TO FILTER
+Skip S2 when RSI < 75 AND sentiment is NEUTRAL — 6 consecutive losses, 0 wins.
+```
+
+Claude suggests changes; you review and apply them manually to the config files.
+
+**Cost:** ~$0.015 per run with Claude Sonnet 4.6.
+
+---
+
+## File Structure
+
+```
+├── bot.py              # Main entry point (--paper flag for paper mode)
+├── strategy.py         # S1 + S2 + S3 + S4 signal logic
+├── trader.py           # Bitget order execution (live)
+├── paper_trader.py     # Simulated order execution (paper)
+├── scanner.py          # Pair scanner + market sentiment
+├── dashboard.py        # Live web dashboard (FastAPI, --paper flag)
+├── dashboard.html      # Dashboard frontend (served by dashboard.py)
+├── backtest.py         # Backtesting engine
+├── bitget_client.py    # Bitget REST API client
+├── state.py            # Shared in-memory + on-disk state
+├── claude_filter.py    # Claude Haiku trade approval gate (S2/S3/S4)
+├── optimize.py         # Claude Sonnet strategy parameter optimizer
+│
+├── config.py           # Credentials + paths + Claude filter settings
+├── config_s1.py        # Strategy 1 parameters
+├── config_s2.py        # Strategy 2 parameters
+├── config_s3.py        # Strategy 3 parameters
+├── config_s4.py        # Strategy 4 parameters
+│
+├── .env                # Local credentials (gitignored, never commit)
+├── trades.csv          # Live trade log
+├── trades_paper.csv    # Paper trade log
+├── state.json          # Live bot runtime state
+├── state_paper.json    # Paper bot runtime state
+├── paper_state.json    # Paper trader simulation state (balance, positions)
+└── bot.log             # Runtime log
+```
+
+---
+
+## Trade Log (`trades.csv` / `trades_paper.csv`)
+
+Each trade open and close is appended as a row. Columns:
+
+| Column | Description |
+|--------|-------------|
+| `timestamp` | UTC ISO timestamp |
+| `action` | `S1_LONG`, `S2_LONG`, `S3_LONG`, `S4_SHORT`, `S*_CLOSE`, etc. |
+| `symbol` | e.g. `BTCUSDT` |
+| `side` | `LONG` or `SHORT` |
+| `qty` | Position size |
+| `entry` | Entry price |
+| `sl` / `tp` | Stop-loss / take-profit price |
+| `leverage` / `margin` | Risk sizing |
+| `strategy` | Strategy tag |
+| `snap_rsi`, `snap_adx`, … | Indicator snapshot at entry |
+| `snap_rsi_peak`, `snap_spike_body_pct`, `snap_rsi_div` | S4-specific snapshot fields |
+| `snap_sr_clearance_pct` | S/R clearance % at entry (S2/S3/S4) |
+| `result` / `pnl_pct` / `exit_reason` | On close rows: WIN/LOSS, P/L %, and exit type (SL/TP/TRAIL_STOP) |
+
+---
+
 ## Requirements
 
 - Python 3.10+
 - Bitget account with Futures enabled and API key created
 - `.env` file with valid API credentials
+- (Optional) Anthropic API key for Claude filter and optimizer

@@ -551,6 +551,31 @@
   .strat-tab:hover { color: var(--text); }
   .strat-tab.active { color: var(--amber); border-bottom-color: var(--amber); }
 
+  /* ── Scanner toolbar (search + sort) ── */
+  .scanner-toolbar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg2); flex-shrink: 0;
+  }
+  #pair-search {
+    flex: 1; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 5px;
+    color: var(--text); padding: 4px 8px;
+    font-size: 12px; outline: none;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  #pair-search:focus { border-color: var(--accent); }
+  #pair-search::placeholder { color: var(--muted); }
+  .sort-btn {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 5px; color: var(--muted);
+    padding: 4px 10px; font-size: 11px; cursor: pointer;
+    white-space: nowrap; font-family: 'IBM Plex Mono', monospace;
+    transition: color .15s, border-color .15s;
+  }
+  .sort-btn.active { border-color: var(--accent); color: var(--accent); }
+
   /* ── Grid layout assignments ── */
   .col-left   { grid-column: 1; grid-row: 1 / 3; display: flex; flex-direction: column; gap: 8px; }
   .col-center { grid-column: 2; grid-row: 1;     }
@@ -774,6 +799,10 @@
         <button class="strat-tab"        id="tab-s2" onclick="switchTab('s2')">S2 — Coil</button>
         <button class="strat-tab"        id="tab-s3" onclick="switchTab('s3')">S3 — Pullback</button>
         <button class="strat-tab"        id="tab-s4" onclick="switchTab('s4')">S4 — Short</button>
+      </div>
+      <div class="scanner-toolbar">
+        <input id="pair-search" type="text" placeholder="Search pair…" oninput="onSearchInput(this.value)" autocomplete="off">
+        <button id="sort-btn" class="sort-btn active" onclick="toggleSort()">⇅ Signals first</button>
       </div>
       <div class="panel-body" id="pair-grid">
         <div class="pair-grid" id="pair-grid-inner"></div>
@@ -1118,7 +1147,56 @@ let rsiLineSeries = null;
 let currentSymbol   = null;
 let currentInterval = '3m';
 let chartRefreshTimer = null;
-let activeTab = 's1';
+let activeTab   = 's1';
+let sortMode    = 'signals';   // 'signals' | 'alpha'
+let searchQuery = '';
+
+function toggleSort() {
+  sortMode = sortMode === 'signals' ? 'alpha' : 'signals';
+  const btn = $('sort-btn');
+  btn.textContent = sortMode === 'signals' ? '⇅ Signals first' : '⇅ A–Z';
+  btn.classList.toggle('active', sortMode === 'signals');
+  if (window._lastState) renderPairGrid(window._lastState);
+}
+
+function onSearchInput(val) {
+  searchQuery = val.trim().toUpperCase().replace('USDT', '');
+  if (window._lastState) renderPairGrid(window._lastState);
+}
+
+function signalScore(sym, ps, tab) {
+  if (tab === 's1') {
+    const htfPass = ps.htf_bull || ps.htf_bear;
+    const rsiOk   = ps.rsi_ok;
+    const coil    = ps.consolidating;
+    const active  = (ps.signal || 'HOLD') !== 'HOLD';
+    return (htfPass ? 1 : 0) + (htfPass && rsiOk ? 1 : 0) + (htfPass && rsiOk && coil ? 1 : 0) + (active ? 10 : 0);
+  }
+  if (tab === 's2') {
+    const bc      = ps.s2_big_candle;
+    const rsiOk   = (ps.s2_daily_rsi || 0) > 70;
+    const coiling = ps.s2_coiling;
+    const active  = ps.strategy === 'S2' && (ps.signal || 'HOLD') !== 'HOLD';
+    return (bc ? 1 : 0) + (bc && rsiOk ? 1 : 0) + (bc && rsiOk && coiling ? 1 : 0) + (active ? 10 : 0);
+  }
+  if (tab === 's3') {
+    const reason  = ps.s3_reason || '';
+    const sig     = ps.s3_signal || 'HOLD';
+    const emaOk   = reason.includes('EMA aligned') || reason.includes('EMA10>20>50>200') || sig === 'LONG';
+    const stochOs = reason.includes('Stoch oversold') || sig === 'LONG';
+    const uptick  = reason.includes('Uptick breakout') || reason.includes('uptick') || sig === 'LONG';
+    return (emaOk ? 1 : 0) + (stochOs ? 1 : 0) + (uptick ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
+  }
+  if (tab === 's4') {
+    const reason  = ps.s4_reason || '';
+    const sig     = ps.s4_signal || 'HOLD';
+    const spike   = reason.includes('spike') && !reason.includes('No spike');
+    const rsiHot  = reason.includes('RSI peaked') || sig === 'SHORT';
+    const div     = reason.includes('RSI div') || sig === 'SHORT';
+    return (spike ? 1 : 0) + (spike && rsiHot ? 1 : 0) + (spike && rsiHot && div ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
+  }
+  return 0;
+}
 
 // Track extra series manually (LightweightCharts v4 removed getSeries())
 let extraCandleSeries = [];
@@ -1287,7 +1365,23 @@ function s4CardHTML(sym, ps) {
 
 function renderPairGrid(s) {
   const pairStates = s.pair_states || {};
-  const pairs = s.qualified_pairs || [];
+  let pairs = s.qualified_pairs || [];
+
+  // Filter by search query
+  if (searchQuery) {
+    pairs = pairs.filter(sym => sym.replace('USDT', '').includes(searchQuery));
+  }
+
+  // Sort by signal strength (default) or alphabetically
+  if (sortMode === 'signals') {
+    pairs = [...pairs].sort((a, b) =>
+      signalScore(b, pairStates[b] || {}, activeTab) -
+      signalScore(a, pairStates[a] || {}, activeTab)
+    );
+  } else {
+    pairs = [...pairs].sort();
+  }
+
   $('pair-count').textContent = pairs.length + ' pairs';
   const grid = $('pair-grid-inner');
   let html = '';

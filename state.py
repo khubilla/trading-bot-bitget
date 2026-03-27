@@ -65,7 +65,13 @@ def _write(s: dict):
 
 # ── Public API ────────────────────────────────────────────────────── #
 
-def reset():                    _write(dict(_default))
+def reset():
+    """Reset runtime state but preserve trade_history and stats across restarts."""
+    s = _read()
+    fresh = dict(_default)
+    fresh["trade_history"] = s.get("trade_history", [])
+    fresh["stats"]         = s.get("stats", dict(_default["stats"]))
+    _write(fresh)
 
 def set_status(status: str):
     s = _read()
@@ -124,6 +130,15 @@ def update_open_trade_pnl(symbol: str, pnl: float):
             break
     _write(s)
 
+def set_stats(wins: int, losses: int, total_pnl: float):
+    """Overwrite stats (used on startup to restore from CSV)."""
+    s = _read()
+    s["stats"]["wins"]        = wins
+    s["stats"]["losses"]      = losses
+    s["stats"]["total_trades"] = wins + losses
+    s["stats"]["total_pnl"]   = total_pnl
+    _write(s)
+
 def close_trade(symbol: str, result: str, pnl: float):
     s = _read()
     closed = [t for t in s["open_trades"] if t["symbol"] == symbol]
@@ -135,6 +150,7 @@ def close_trade(symbol: str, result: str, pnl: float):
     if result in ("WIN", "LOSS"):
         key = "wins" if result == "WIN" else "losses"
         s["stats"][key] += 1
+        s["stats"]["total_trades"] += 1
         s["stats"]["total_pnl"] += pnl
     _write(s)
 

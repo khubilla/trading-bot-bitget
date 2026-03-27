@@ -6,7 +6,7 @@ Run in a separate terminal alongside bot.py:
     python dashboard.py
 """
 
-import json, os, sys
+import csv, json, os, sys
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -25,13 +25,48 @@ app = FastAPI(title="Bitget MTF Bot Dashboard" + (" [PAPER]" if PAPER_MODE else 
 sys.path.insert(0, str(Path(__file__).parent))
 
 
+def _load_csv_history(csv_path: str, limit: int = 50) -> list:
+    """Load closed trades from trades CSV for dashboard trade history."""
+    if not os.path.exists(csv_path):
+        return []
+    rows = []
+    try:
+        with open(csv_path, newline="") as f:
+            for r in csv.DictReader(f):
+                if "_CLOSE" in (r.get("action") or "") or "_PARTIAL" in (r.get("action") or ""):
+                    try:
+                        pnl = float(r["pnl"]) if r.get("pnl") else 0.0
+                    except (ValueError, TypeError):
+                        pnl = 0.0
+                    rows.append({
+                        "symbol":    r.get("symbol", ""),
+                        "side":      r.get("side", ""),
+                        "pnl":       round(pnl, 4),
+                        "pnl_pct":   r.get("pnl_pct", ""),
+                        "result":    r.get("result", ""),
+                        "exit_reason": r.get("exit_reason", ""),
+                        "strategy":  (r.get("action") or "").split("_")[0],
+                        "closed_at": r.get("timestamp", ""),
+                    })
+    except Exception:
+        pass
+    # newest first, capped at limit
+    return list(reversed(rows))[:limit]
+
+
 @app.get("/api/state")
 def get_state():
     if not os.path.exists(STATE_FILE):
         return JSONResponse({"status": "STOPPED", "error": "state.json not found — is bot.py running?"})
     try:
         with open(STATE_FILE, "r") as f:
-            return JSONResponse(json.load(f))
+            state = json.load(f)
+        # Always use CSV as authoritative trade history (survives restarts)
+        csv_path = STATE_FILE.replace("state_paper.json", "trades_paper.csv").replace("state.json", "trades.csv")
+        csv_history = _load_csv_history(csv_path)
+        if csv_history:
+            state["trade_history"] = csv_history
+        return JSONResponse(state)
     except Exception as e:
         return JSONResponse({"status": "ERROR", "error": str(e)})
 
@@ -246,9 +281,16 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
         s3_stoch_last     = None
         s3_macd_last      = None
 
+        # ── S5 indicators (15m only) ──────────────────────────── #
+        s5_ob_low_val    = None
+        s5_ob_high_val   = None
+        s5_entry_trigger = None
+        s5_sl_price      = None
+        s5_tp_price      = None
+
         if is_15m:
             import numpy as _np
-            from strategy import calculate_stoch, calculate_macd, evaluate_s3
+            from strategy import calculate_stoch, calculate_macd, evaluate_s3, evaluate_s5
             from config_s3 import (
                 S3_STOCH_K_PERIOD, S3_STOCH_D_SMOOTH,
                 S3_MACD_FAST, S3_MACD_SLOW, S3_MACD_SIGNAL,
@@ -300,6 +342,26 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
                     s3_entry_trigger = round(entry_t, max(2, price_decimals + 1))
                 if sl_p > 0:
                     s3_sl_price = round(sl_p, max(2, price_decimals + 1))
+            except Exception:
+                pass
+
+            # ── S5 indicators (15m OB zone) ───────────────────────── #
+            try:
+                import config_s5 as _cs5
+                import trader as _tr5
+                _htf_df = _tr5.get_candles(symbol, "1H", limit=15)
+                _daily_df = _tr5.get_candles(symbol, "1D", limit=200)
+                if not _htf_df.empty and not _daily_df.empty:
+                    _, et, sl, tp, obl, obh, _ = evaluate_s5(symbol, _daily_df, _htf_df, df_full, "BULLISH")
+                    if obh > 0:
+                        s5_ob_low_val  = round(obl, max(2, price_decimals + 1))
+                        s5_ob_high_val = round(obh, max(2, price_decimals + 1))
+                    if et > 0:
+                        s5_entry_trigger = round(et, max(2, price_decimals + 1))
+                    if sl > 0:
+                        s5_sl_price = round(sl, max(2, price_decimals + 1))
+                    if tp > 0:
+                        s5_tp_price = round(tp, max(2, price_decimals + 1))
             except Exception:
                 pass
 
@@ -357,6 +419,12 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
             "s4_sl_price":      s4_sl_price,
             "s4_rsi_peak":      s4_rsi_peak_val,
             "s4_base_support":  s4_base_support,
+            # S5 — SMC Order Block
+            "s5_ob_low":        s5_ob_low_val,
+            "s5_ob_high":       s5_ob_high_val,
+            "s5_entry_trigger": s5_entry_trigger,
+            "s5_sl_price":      s5_sl_price,
+            "s5_tp_price":      s5_tp_price,
             # S/R levels from chart timeframe
             "sr_resistance":    round(sr_resistance, max(2, price_decimals)) if sr_resistance else None,
             "sr_support":       round(sr_support,    max(2, price_decimals)) if sr_support    else None,

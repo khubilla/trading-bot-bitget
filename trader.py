@@ -254,6 +254,82 @@ def _place_s2_exits(symbol: str, hold_side: str, qty_str: str,
                 _t.sleep(1.5)
     return False
 
+def _place_s5_exits(symbol: str, hold_side: str, qty_str: str,
+                    sl_trig: float, sl_exec: float,
+                    partial_trig: float, tp_target: float,
+                    trail_range_pct: float) -> bool:
+    """
+    S5 SMC exits:
+    1. SL (loss_plan) — full position at OB outer edge
+    2. Partial TP (profit_plan, 50%) — at 1:1 R:R level
+    3. Hard TP (profit_plan, 50%) — at structural swing target
+       Falls back to trailing stop if tp_target is 0
+    """
+    import time as _t
+    half_qty = str(round(float(qty_str) / 2, 4))
+
+    for attempt in range(3):
+        try:
+            # 1. SL on full position
+            bc.post("/api/v2/mix/order/place-pos-tpsl", {
+                "symbol":               symbol,
+                "productType":          PRODUCT_TYPE,
+                "marginCoin":           MARGIN_COIN,
+                "holdSide":             hold_side,
+                "stopLossTriggerPrice": str(sl_trig),
+                "stopLossTriggerType":  "mark_price",
+                "stopLossExecutePrice": str(sl_exec),
+            })
+            _t.sleep(0.5)
+
+            # 2. Partial TP at 1:1 R:R
+            bc.post("/api/v2/mix/order/place-tpsl-order", {
+                "symbol":       symbol,
+                "productType":  PRODUCT_TYPE,
+                "marginCoin":   MARGIN_COIN,
+                "planType":     "profit_plan",
+                "triggerPrice": str(partial_trig),
+                "triggerType":  "mark_price",
+                "executePrice": "0",
+                "holdSide":     hold_side,
+                "size":         half_qty,
+            })
+            _t.sleep(0.5)
+
+            if tp_target > 0:
+                # 3. Hard TP at structural swing target
+                bc.post("/api/v2/mix/order/place-tpsl-order", {
+                    "symbol":       symbol,
+                    "productType":  PRODUCT_TYPE,
+                    "marginCoin":   MARGIN_COIN,
+                    "planType":     "profit_plan",
+                    "triggerPrice": str(tp_target),
+                    "triggerType":  "mark_price",
+                    "executePrice": "0",
+                    "holdSide":     hold_side,
+                    "size":         half_qty,
+                })
+            else:
+                # Fallback: trailing stop on remaining 50%
+                bc.post("/api/v2/mix/order/place-tpsl-order", {
+                    "symbol":       symbol,
+                    "productType":  PRODUCT_TYPE,
+                    "marginCoin":   MARGIN_COIN,
+                    "planType":     "moving_plan",
+                    "triggerPrice": str(partial_trig),
+                    "triggerType":  "mark_price",
+                    "holdSide":     hold_side,
+                    "size":         half_qty,
+                    "rangeRate":    str(round(trail_range_pct / 100, 4)),
+                })
+            return True
+        except Exception as e:
+            logger.warning(f"[{symbol}] S5 exits attempt {attempt+1}/3: {e}")
+            if attempt < 2:
+                _t.sleep(1.5)
+    return False
+
+
 def open_long(
     symbol: str,
     box_low: float         = 0,
@@ -263,6 +339,8 @@ def open_long(
     take_profit_pct: float = TAKE_PROFIT_PCT,
     stop_loss_pct: float   = STOP_LOSS_PCT,
     use_s2_exits: bool     = False,
+    use_s5_exits: bool     = False,
+    tp_price_abs: float    = 0,
 ) -> dict:
     """
     Opens a LONG position.
@@ -293,7 +371,18 @@ def open_long(
 
     _t.sleep(2.0)
 
-    if use_s2_exits:
+    if use_s5_exits:
+        from config_s5 import S5_TRAIL_RANGE_PCT
+        sl_trig     = float(_round_price(sl_floor, symbol))
+        sl_exec     = float(_round_price(sl_trig * 0.995, symbol))
+        one_r       = mark - sl_trig
+        part_trig   = float(_round_price(mark + one_r, symbol))   # 1:1 R:R
+        tp_targ     = float(_round_price(tp_price_abs, symbol)) if tp_price_abs > mark else 0.0
+        ok = _place_s5_exits(symbol, "long", qty,
+                             sl_trig, sl_exec,
+                             part_trig, tp_targ, S5_TRAIL_RANGE_PCT)
+        tp_trig = tp_targ if tp_targ > 0 else part_trig
+    elif use_s2_exits:
         from config_s2 import S2_TRAILING_TRIGGER_PCT, S2_TRAILING_RANGE_PCT
         trail_trig = float(_round_price(mark * (1 + S2_TRAILING_TRIGGER_PCT), symbol))
         if sl_floor > 0:
@@ -335,6 +424,8 @@ def open_short(
     trade_size_pct: float  = TRADE_SIZE_PCT,
     take_profit_pct: float = TAKE_PROFIT_PCT,
     use_s4_exits: bool     = False,
+    use_s5_exits: bool     = False,
+    tp_price_abs: float    = 0,
 ) -> dict:
     """
     Opens a SHORT position.
@@ -366,7 +457,16 @@ def open_short(
 
     _t.sleep(2.0)
 
-    if use_s4_exits:
+    if use_s5_exits:
+        from config_s5 import S5_TRAIL_RANGE_PCT
+        one_r     = sl_trig - mark
+        part_trig = float(_round_price(mark - one_r, symbol))    # 1:1 R:R below entry
+        tp_targ   = float(_round_price(tp_price_abs, symbol)) if 0 < tp_price_abs < mark else 0.0
+        ok = _place_s5_exits(symbol, "short", qty,
+                             sl_trig, sl_exec,
+                             part_trig, tp_targ, S5_TRAIL_RANGE_PCT)
+        tp_trig = tp_targ if tp_targ > 0 else part_trig
+    elif use_s4_exits:
         from config_s4 import S4_TRAILING_TRIGGER_PCT, S4_TRAILING_RANGE_PCT
         trail_trig = float(_round_price(mark * (1 - S4_TRAILING_TRIGGER_PCT), symbol))
         ok = _place_s2_exits(symbol, "short", qty,
@@ -389,7 +489,7 @@ def open_short(
     }
     logger.info(
         f"[{symbol}] 🔴 SHORT {leverage}x | qty={qty} entry≈{mark:.5f} "
-        f"SL={sl_trig} | {'✅ S4 exits' if use_s4_exits else 'TP='+str(tp_trig)} | {'✅' if ok else '❌ SET MANUALLY'}"
+        f"SL={sl_trig} | {'✅ S5 exits' if use_s5_exits else '✅ S4 exits' if use_s4_exits else 'TP='+str(tp_trig)} | {'✅' if ok else '❌ SET MANUALLY'}"
     )
     return result
 
@@ -420,6 +520,23 @@ def scale_in_short(symbol: str, additional_trade_size_pct: float, leverage: int)
         "orderType": "market", "force": "ioc",
     })
     logger.info(f"[{symbol}] ➕ Scale-in SHORT qty={qty} @ mark≈{mark:.5f}")
+
+
+def get_realized_pnl(symbol: str) -> float | None:
+    """
+    Query the most recent closed position's realized PnL from Bitget.
+    Used after a trailing stop fires to get accurate combined P/L.
+    Returns None on error.
+    """
+    try:
+        data = bc.get("/api/v2/mix/position/history-position",
+                      params={"productType": PRODUCT_TYPE, "symbol": symbol, "limit": "1"})
+        records = data.get("data", {}).get("list") or data.get("data", [])
+        if records:
+            return float(records[0].get("achievedProfits", 0) or 0)
+    except Exception as e:
+        logger.warning(f"[{symbol}] get_realized_pnl error: {e}")
+    return None
 
 
 def cancel_all_orders(symbol: str):

@@ -32,10 +32,11 @@ def _load() -> dict:
         except Exception:
             pass
     return {
-        "balance":    PAPER_START_BALANCE,
-        "positions":  {},
-        "history":    [],
-        "total_pnl":  0.0,
+        "balance":       PAPER_START_BALANCE,
+        "positions":     {},
+        "history":       [],
+        "total_pnl":     0.0,
+        "partial_closes": [],
     }
 
 
@@ -134,6 +135,8 @@ def open_long(
     take_profit_pct: float = 0.05,
     stop_loss_pct: float   = 0.015,
     use_s2_exits: bool     = False,
+    use_s5_exits: bool     = False,
+    tp_price_abs: float    = 0,
 ) -> dict:
     state  = _load()
     mark   = get_mark_price(symbol)
@@ -154,6 +157,16 @@ def open_long(
         tp_price      = trail_trigger
         use_trailing  = True
 
+    breakeven_after_partial = False
+    if use_s5_exits:
+        from config_s5 import S5_TRAIL_RANGE_PCT
+        one_r         = mark - sl_price          # risk distance
+        trail_trigger = mark + one_r             # 1:1 R:R level
+        trail_range   = S5_TRAIL_RANGE_PCT       # tight trailing after partial
+        tp_price      = tp_price_abs if tp_price_abs > mark else trail_trigger
+        use_trailing  = True
+        breakeven_after_partial = True
+
     state["balance"] -= margin
     state["positions"][symbol] = {
         "symbol":          symbol,
@@ -172,6 +185,7 @@ def open_long(
         "trail_peak":      mark,
         "trail_active":    False,
         "partial_closed":  False,
+        "breakeven_after_partial": breakeven_after_partial,
         "last_mark":       mark,
         "opened_at":       _now(),
     }
@@ -197,6 +211,8 @@ def open_short(
     trade_size_pct: float  = 0.25,
     take_profit_pct: float = 0.05,
     use_s4_exits: bool     = False,
+    use_s5_exits: bool     = False,
+    tp_price_abs: float    = 0,
 ) -> dict:
     state  = _load()
     mark   = get_mark_price(symbol)
@@ -222,6 +238,16 @@ def open_short(
         tp_price      = trail_trigger
         use_trailing  = True
 
+    breakeven_after_partial = False
+    if use_s5_exits:
+        from config_s5 import S5_TRAIL_RANGE_PCT
+        one_r         = sl_price - mark             # risk distance
+        trail_trigger = mark - one_r                # 1:1 R:R level (below entry)
+        trail_range   = S5_TRAIL_RANGE_PCT
+        tp_price      = tp_price_abs if 0 < tp_price_abs < mark else trail_trigger
+        use_trailing  = True
+        breakeven_after_partial = True
+
     state["balance"] -= margin
     state["positions"][symbol] = {
         "symbol":          symbol,
@@ -240,6 +266,7 @@ def open_short(
         "trail_peak":      mark,   # for SHORT: tracks lowest mark seen
         "trail_active":    False,
         "partial_closed":  False,
+        "breakeven_after_partial": breakeven_after_partial,
         "last_mark":       mark,
         "opened_at":       _now(),
     }
@@ -285,8 +312,12 @@ def _check_exit(state: dict, sym: str, mark: float):
                 _close_half(state, sym, mark)
                 return   # position still open with 50% remaining
 
-            # 3. Trailing stop on remaining 50%
             if pos["partial_closed"] and pos["trail_active"]:
+                # 3a. Hard TP at structural swing target (S5 only)
+                if pos.get("breakeven_after_partial") and mark >= pos["tp"]:
+                    _close_full(state, sym, mark, "TP")
+                    return
+                # 3b. Trailing stop on remaining 50%
                 trail_stop = pos["trail_peak"] * (1 - pos["trail_range"] / 100)
                 if mark <= trail_stop:
                     _close_full(state, sym, mark, "TRAIL_STOP")
@@ -313,8 +344,12 @@ def _check_exit(state: dict, sym: str, mark: float):
                 _close_half_short(state, sym, mark)
                 return   # position still open with 50% remaining
 
-            # 3. Trailing stop on remaining 50%
             if pos["partial_closed"] and pos["trail_active"]:
+                # 3a. Hard TP at structural swing target (S5 only)
+                if pos.get("breakeven_after_partial") and mark <= pos["tp"]:
+                    _close_full(state, sym, mark, "TP")
+                    return
+                # 3b. Trailing stop on remaining 50%
                 trail_stop = pos["trail_peak"] * (1 + pos["trail_range"] / 100)
                 if mark >= trail_stop:
                     _close_full(state, sym, mark, "TRAIL_STOP")
@@ -335,9 +370,12 @@ def _close_half_short(state: dict, sym: str, exit_price: float):
     pos["partial_closed"] = True
     pos["trail_active"]   = True
     pos["trail_peak"]     = exit_price  # lowest price seen so far
+    if pos.get("breakeven_after_partial"):
+        pos["sl"] = pos["entry"]   # move SL to breakeven
 
     logger.info(
         f"[PAPER][{sym}] 📉 Partial TP 50% @{exit_price:.5f} | "
+        f"{'SL → breakeven ' + str(round(pos['entry'], 5)) + ' | ' if pos.get('breakeven_after_partial') else ''}"
         f"trailing stop activated (callback {pos['trail_range']}%)"
     )
 
@@ -348,13 +386,16 @@ def _close_half(state: dict, sym: str, exit_price: float):
     half = pos["original_qty"] / 2
     _record_partial(state, sym, exit_price, half)
 
-    pos["qty"]           = pos["original_qty"] / 2
+    pos["qty"]            = pos["original_qty"] / 2
     pos["partial_closed"] = True
-    pos["trail_active"]  = True
-    pos["trail_peak"]    = exit_price
+    pos["trail_active"]   = True
+    pos["trail_peak"]     = exit_price
+    if pos.get("breakeven_after_partial"):
+        pos["sl"] = pos["entry"]   # move SL to breakeven
 
     logger.info(
         f"[PAPER][{sym}] 📈 Partial TP 50% @{exit_price:.5f} | "
+        f"{'SL → breakeven ' + str(round(pos['entry'], 5)) + ' | ' if pos.get('breakeven_after_partial') else ''}"
         f"trailing stop activated (callback {pos['trail_range']}%)"
     )
 
@@ -374,27 +415,42 @@ def _close_full(state: dict, sym: str, exit_price: float, reason: str):
     state["balance"]   += margin_used + pnl
     state["total_pnl"] += pnl
 
+    # Combined P/L including any partial close that happened earlier
+    partial_pnl  = pos.get("partial_pnl", 0.0)
+    total_pnl_trade = pnl + partial_pnl
+    orig_margin  = pos["original_margin"]
+    combined_pct = round(total_pnl_trade / orig_margin * 100, 2) if orig_margin else round(price_chg * pos["leverage"] * 100, 2)
+
     state["history"].append({
         "symbol":    sym,
         "side":      side,
         "entry":     entry,
         "exit":      exit_price,
         "qty":       round(qty, 6),
-        "margin":    round(margin_used, 4),
-        "pnl":       round(pnl, 4),
-        "pnl_pct":   round(price_chg * pos["leverage"] * 100, 2),
+        "margin":    round(orig_margin, 4),
+        "pnl":       round(total_pnl_trade, 4),
+        "pnl_pct":   combined_pct,
         "reason":    reason,
         "opened_at": pos["opened_at"],
         "closed_at": _now(),
     })
     del state["positions"][sym]
 
-    emoji = "✅" if pnl >= 0 else "❌"
+    emoji = "✅" if total_pnl_trade >= 0 else "❌"
     logger.info(
         f"[PAPER][{sym}] {emoji} {side} CLOSED @{exit_price:.5f} | "
-        f"reason={reason} | PnL={pnl:+.4f} USDT ({price_chg*pos['leverage']*100:+.1f}%) | "
+        f"reason={reason} | PnL={total_pnl_trade:+.4f} USDT ({combined_pct:+.1f}%) | "
         f"balance=${state['balance']:.2f}"
     )
+
+
+def drain_partial_closes() -> list:
+    """Return and clear any partial-close events since the last call."""
+    state = _load()
+    closes = state.pop("partial_closes", [])
+    if closes:
+        _save(state)
+    return closes
 
 
 def scale_in_long(symbol: str, additional_trade_size_pct: float, leverage: int) -> None:
@@ -456,6 +512,23 @@ def _record_partial(state: dict, sym: str, exit_price: float, qty: float):
     state["balance"]   += margin_used + pnl
     state["total_pnl"] += pnl
 
+    # Store partial pnl on the position so _close_full can compute combined P/L
+    pos["partial_pnl"] = pos.get("partial_pnl", 0.0) + pnl
+
+    state.setdefault("partial_closes", []).append({
+        "symbol":   sym,
+        "side":     side,
+        "entry":    pos["entry"],
+        "exit":     exit_price,
+        "qty":      round(qty, 6),
+        "margin":   round(margin_used, 4),
+        "pnl":      round(pnl, 4),
+        "pnl_pct":  round(price_chg * pos["leverage"] * 100, 2),
+        "strategy": pos.get("strategy", ""),
+        "reason":   "PARTIAL_TP",
+        "opened_at": pos["opened_at"],
+        "closed_at": _now(),
+    })
     logger.info(
         f"[PAPER][{sym}] 50% closed @{exit_price:.5f} | "
         f"PnL={pnl:+.4f} USDT | balance=${state['balance']:.2f}"

@@ -74,6 +74,26 @@ Short-only strategy targeting reversals after momentum spikes.
 
 ---
 
+### Strategy 5 — SMC Order Block Pullback
+Multi-timeframe Smart Money Concepts strategy. Long or short depending on market direction.
+
+**Structure (top-down):**
+| Timeframe | Check |
+|-----------|-------|
+| 1D | EMA10 > EMA20 > EMA50 (bullish bias) or reverse (bearish bias) |
+| 1H | Break of Structure — close above prior swing high (LONG) or below prior swing low (SHORT) |
+| 15m | Order Block — last opposing candle before a ≥1% impulse of 2+ candles |
+| 15m | Pullback touches OB zone |
+| 15m | Change of Character (ChoCH) — close back through OB boundary confirms entry |
+
+**Entry:** 0.5% beyond the OB boundary, skipped if price already >4% past the trigger.
+
+**Risk:** 10x leverage · 5% of total portfolio · SL 0.3% beyond OB outer edge · minimum 2:1 R:R required · 50% partial close at ±10% · 10% trailing stop on remainder
+
+**Sentiment gate:** LONG only when BULLISH or NEUTRAL · SHORT only when BEARISH.
+
+---
+
 All strategies share a **market sentiment gate** — volume-weighted bull/bear ratio across all scanned pairs filters the allowed trade direction.
 
 Trade sizes are always calculated as a percentage of **total portfolio equity** (available balance + locked margin + unrealized P/L), not just the free balance.
@@ -108,6 +128,7 @@ BITGET_API_PASSPHRASE=your_passphrase
 | `config_s2.py` | Strategy 2 — big candle detection, coil, trailing stop params |
 | `config_s3.py` | Strategy 3 — EMA alignment, Stochastics, MACD, risk params |
 | `config_s4.py` | Strategy 4 — spike detection, RSI divergence, entry/exit params |
+| `config_s5.py` | Strategy 5 — SMC OB lookback, ChoCH window, R:R minimum, risk params |
 
 Each config has an `S*_ENABLED = True/False` switch to disable a strategy without touching any other code.
 
@@ -161,7 +182,7 @@ The live dashboard shows:
 
 ```
 ├── bot.py              # Main entry point (--paper flag for paper mode)
-├── strategy.py         # S1 + S2 + S3 + S4 signal logic
+├── strategy.py         # S1 + S2 + S3 + S4 + S5 signal logic
 ├── trader.py           # Bitget order execution (live)
 ├── paper_trader.py     # Simulated order execution (paper)
 ├── scanner.py          # Pair scanner + market sentiment
@@ -176,6 +197,7 @@ The live dashboard shows:
 ├── config_s2.py        # Strategy 2 parameters
 ├── config_s3.py        # Strategy 3 parameters
 ├── config_s4.py        # Strategy 4 parameters
+├── config_s5.py        # Strategy 5 parameters
 │
 ├── .env                # Local credentials (gitignored, never commit)
 ├── trades.csv          # Live trade log
@@ -205,6 +227,7 @@ Each trade open and close is appended as a row. Columns:
 | `strategy` | Strategy tag |
 | `snap_rsi`, `snap_adx`, … | Indicator snapshot at entry |
 | `snap_rsi_peak`, `snap_spike_body_pct`, `snap_rsi_div` | S4-specific snapshot fields |
+| `snap_s5_ob_low`, `snap_s5_ob_high` | S5-specific: 15m Order Block zone at entry |
 | `pnl` / `result` | On close rows: realised PnL and WIN/LOSS |
 
 ---
@@ -280,7 +303,7 @@ Claude suggests changes; you review and apply them manually to the config files.
 
 ```
 ├── bot.py              # Main entry point (--paper flag for paper mode)
-├── strategy.py         # S1 + S2 + S3 + S4 signal logic
+├── strategy.py         # S1 + S2 + S3 + S4 + S5 signal logic
 ├── trader.py           # Bitget order execution (live)
 ├── paper_trader.py     # Simulated order execution (paper)
 ├── scanner.py          # Pair scanner + market sentiment
@@ -297,6 +320,7 @@ Claude suggests changes; you review and apply them manually to the config files.
 ├── config_s2.py        # Strategy 2 parameters
 ├── config_s3.py        # Strategy 3 parameters
 ├── config_s4.py        # Strategy 4 parameters
+├── config_s5.py        # Strategy 5 parameters
 │
 ├── .env                # Local credentials (gitignored, never commit)
 ├── trades.csv          # Live trade log

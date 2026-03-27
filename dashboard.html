@@ -799,6 +799,7 @@
         <button class="strat-tab"        id="tab-s2" onclick="switchTab('s2')">S2 — Coil</button>
         <button class="strat-tab"        id="tab-s3" onclick="switchTab('s3')">S3 — Pullback</button>
         <button class="strat-tab"        id="tab-s4" onclick="switchTab('s4')">S4 — Short</button>
+        <button class="strat-tab"        id="tab-s5" onclick="switchTab('s5')">S5 — SMC OB</button>
       </div>
       <div class="scanner-toolbar">
         <input id="pair-search" type="text" placeholder="Search pair…" oninput="onSearchInput(this.value)" autocomplete="off">
@@ -1045,6 +1046,16 @@ function render(s) {
   // ── Active trades
   const trades = s.open_trades || [];
   $('open-count').textContent = trades.length;
+
+  // If chart is showing an active-trade overlay and that trade just closed, clear the overlay
+  if (window._tradeOverlay && currentSymbol) {
+    const stillActive = trades.some(t => t.symbol === currentSymbol);
+    if (!stillActive) {
+      window._tradeOverlay = null;
+      if (currentSymbol) loadChart(currentSymbol, currentInterval);
+    }
+  }
+
   if (trades.length === 0) {
     $('active-trades').innerHTML = `<div class="empty-state"><div>◎</div>No open positions</div>`;
   } else {
@@ -1160,7 +1171,8 @@ let currentSymbol   = null;
 let currentInterval = '3m';
 let chartRefreshTimer = null;
 window._tradeOverlay = null;   // set when opening chart from an active trade card
-let activeTab   = 's1';
+let activeTab      = 's1';
+let chartActiveTab = 's1';  // strategy context for open chart (independent of pair grid tab)
 let sortMode    = 'signals';   // 'signals' | 'alpha'
 let searchQuery = '';
 
@@ -1210,6 +1222,15 @@ function signalScore(sym, ps, tab) {
     const div     = reason.includes('RSI div') || sig === 'SHORT';
     const srClear = ps.s4_sr_support_pct != null && ps.s4_sr_support_pct >= 15;
     return (spike ? 1 : 0) + (spike && rsiHot ? 1 : 0) + (spike && rsiHot && div ? 1 : 0) + (srClear ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
+  }
+  if (tab === 's5') {
+    const reason  = ps.s5_reason || '';
+    const sig     = ps.s5_signal || 'HOLD';
+    const emaOk   = reason.includes('EMA bias') || reason.includes('Daily EMA') || sig !== 'HOLD';
+    const bosOk   = reason.includes('1H BOS') || sig !== 'HOLD';
+    const obOk    = reason.includes('OB found') || ps.s5_ob_high > 0 || sig !== 'HOLD';
+    const chochOk = sig !== 'HOLD';
+    return (emaOk ? 1 : 0) + (bosOk ? 1 : 0) + (obOk ? 1 : 0) + (chochOk ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
   }
   return 0;
 }
@@ -1400,6 +1421,57 @@ function s4CardHTML(sym, ps) {
     </div>`;
 }
 
+function s5CardHTML(sym, ps) {
+  const sig      = ps.s5_signal || 'HOLD';
+  const reason   = ps.s5_reason || '—';
+  const symShort = sym.replace('USDT', '');
+  const cardClass = sig === 'LONG' ? 'signal-long' : sig === 'SHORT' ? 'signal-short' : '';
+  const emaOk   = reason.includes('EMA bias') || reason.includes('Daily EMA') || sig !== 'HOLD';
+  const bosOk   = reason.includes('1H BOS') || sig !== 'HOLD';
+  const obOk    = (ps.s5_ob_high != null && ps.s5_ob_high > 0) || sig !== 'HOLD';
+  const chochOk = sig !== 'HOLD';
+  const emaClass   = emaOk ? 'pass' : 'fail';
+  const bosClass   = !emaOk ? 'muted' : bosOk ? 'pass' : 'fail';
+  const obClass    = !bosOk ? 'muted' : obOk ? 'pass' : 'fail';
+  const chochClass = !obOk  ? 'muted' : chochOk ? 'pass' : 'warn';
+  const obLabel  = ps.s5_ob_high != null && ps.s5_ob_high > 0
+    ? `${ps.s5_ob_low?.toFixed(4)} – ${ps.s5_ob_high?.toFixed(4)}`
+    : 'Not found';
+  const reasonClass = sig !== 'HOLD' ? 'signal' : obOk ? 'active' : bosOk ? 'active' : '';
+  const age = ps.updated_at ? (() => {
+    const sec = Math.floor((Date.now() - new Date(ps.updated_at).getTime()) / 1000);
+    if (sec < 60) return sec + 's ago';
+    if (sec < 3600) return Math.floor(sec/60) + 'm ago';
+    return Math.floor(sec/3600) + 'h ago';
+  })() : 'not scanned';
+  return `
+    <div class="pair-card ${cardClass}" data-symbol="${sym}">
+      <div class="pair-top">
+        <div class="pair-name" title="${sym}">${symShort}</div>
+        <span class="pair-sig-badge ${sig}">${sig}</span>
+      </div>
+      <div class="pair-checks">
+        <div class="pair-check">
+          <span class="check-label">Daily EMA</span>
+          <span class="check-val ${emaClass}">${emaOk ? 'Bias ✓' : 'No bias'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">1H BOS</span>
+          <span class="check-val ${bosClass}">${!emaOk ? '—' : bosOk ? 'Confirmed ✓' : 'Not broken'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">15m OB</span>
+          <span class="check-val ${obClass}">${!bosOk ? '—' : obLabel}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">ChoCH</span>
+          <span class="check-val ${chochClass}">${!obOk ? '—' : chochOk ? 'Confirmed ✓' : 'Waiting…'}</span>
+        </div>
+      </div>
+      <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').slice(0,60)} · ${age}</div>
+    </div>`;
+}
+
 function renderPairGrid(s) {
   const pairStates = s.pair_states || {};
   let pairs = s.qualified_pairs || [];
@@ -1422,7 +1494,9 @@ function renderPairGrid(s) {
   $('pair-count').textContent = pairs.length + ' pairs';
   const grid = $('pair-grid-inner');
   let html = '';
-  if (activeTab === 's4') {
+  if (activeTab === 's5') {
+    html = pairs.map(sym => s5CardHTML(sym, pairStates[sym] || {})).join('');
+  } else if (activeTab === 's4') {
     html = pairs.map(sym => s4CardHTML(sym, pairStates[sym] || {})).join('');
   } else if (activeTab === 's3') {
     html = pairs.map(sym => s3CardHTML(sym, pairStates[sym] || {})).join('');
@@ -1490,16 +1564,20 @@ function renderPairGrid(s) {
   }
   if (grid.innerHTML !== html) {
     grid.innerHTML = html;
-    attachCardClicks();
   }
+  attachCardClicks();
 }
 
 function openChart(symbol) {
   currentSymbol = symbol;
-  // Default interval per tab
-  if (activeTab === 's3') currentInterval = '15m';
-  if (activeTab === 's2') currentInterval = '1D';
-  if (activeTab === 's4') currentInterval = '1D';
+  // For pair card opens (no overlay), capture the current pair grid tab as chart context
+  if (!window._tradeOverlay) chartActiveTab = activeTab;
+  // Default interval per chart strategy context
+  if (chartActiveTab === 's3') currentInterval = '15m';
+  else if (chartActiveTab === 's5') currentInterval = '15m';
+  else if (chartActiveTab === 's2') currentInterval = '1D';
+  else if (chartActiveTab === 's4') currentInterval = '1D';
+  else currentInterval = '3m';
   $('chartOverlay').classList.add('open');
   $('chartSymbol').textContent = symbol.replace('USDT','');
 
@@ -1523,6 +1601,7 @@ function closeChart(e) {
   $('chartOverlay').classList.remove('open');
   clearInterval(chartRefreshTimer);
   currentSymbol = null;
+  window._tradeOverlay = null;
 }
 
 function switchInterval(interval) {
@@ -1699,6 +1778,43 @@ async function loadChart(symbol, interval, fitOnLoad = false) {
         }));
       }
 
+      // ── S5 OB zone overlay (15m) ──
+      if (chartActiveTab === 's5') {
+        if (data.s5_ob_high) {
+          candlePriceLines.push(candleSeries.createPriceLine({
+            price: data.s5_ob_high, color: '#a78bfa', lineWidth: 1, lineStyle: 2,
+            axisLabelVisible: true, title: 'OB High',
+          }));
+        }
+        if (data.s5_ob_low) {
+          candlePriceLines.push(candleSeries.createPriceLine({
+            price: data.s5_ob_low, color: '#a78bfa', lineWidth: 1, lineStyle: 2,
+            axisLabelVisible: true, title: 'OB Low',
+          }));
+        }
+        if (data.s5_entry_trigger) {
+          candlePriceLines.push(candleSeries.createPriceLine({
+            price: data.s5_entry_trigger,
+            color: '#00d68f', lineWidth: 2, lineStyle: 0,
+            axisLabelVisible: true, title: '▲ S5 Entry',
+          }));
+        }
+        if (data.s5_sl_price) {
+          candlePriceLines.push(candleSeries.createPriceLine({
+            price: data.s5_sl_price,
+            color: '#ff4d6a', lineWidth: 1, lineStyle: 2,
+            axisLabelVisible: true, title: '✕ S5 SL',
+          }));
+        }
+        if (data.s5_tp_price) {
+          candlePriceLines.push(candleSeries.createPriceLine({
+            price: data.s5_tp_price,
+            color: '#00d68f', lineWidth: 1, lineStyle: 2,
+            axisLabelVisible: true, title: '★ S5 TP',
+          }));
+        }
+      }
+
       // Stochastics in RSI pane
       rsiLineSeries.setData(data.stoch_k || []);
       if (data.stoch_d && data.stoch_d.length > 0) {
@@ -1765,7 +1881,18 @@ async function loadChart(symbol, interval, fitOnLoad = false) {
       }
 
       // Status
-      if (data.s3_entry_trigger) {
+      if (chartActiveTab === 's5') {
+        if (data.s5_entry_trigger) {
+          $('chartStatus').textContent = '🟢 S5 OB Entry set';
+          $('chartStatus').style.color = 'var(--emerald)';
+        } else if (data.s5_ob_high) {
+          $('chartStatus').textContent = '🟡 S5 OB found — awaiting ChoCH';
+          $('chartStatus').style.color = 'var(--amber)';
+        } else {
+          $('chartStatus').textContent = '⏸ No S5 OB';
+          $('chartStatus').style.color = 'var(--muted)';
+        }
+      } else if (data.s3_entry_trigger) {
         $('chartStatus').textContent = '🟢 Entry set';
         $('chartStatus').style.color = 'var(--emerald)';
       } else if (data.s3_stoch_last != null && data.s3_stoch_last < 30) {
@@ -1811,7 +1938,7 @@ async function loadChart(symbol, interval, fitOnLoad = false) {
         extraCandleSeries.push(fillSeries);
       }
 
-      if (activeTab === 's4') {
+      if (chartActiveTab === 's4') {
         // ── S4 signal lines on 1D ──
         if (data.s4_entry_trigger) {
           candlePriceLines.push(candleSeries.createPriceLine({
@@ -1892,7 +2019,7 @@ async function loadChart(symbol, interval, fitOnLoad = false) {
       }));
     }
     // S4 uses its own pre-pump base support line (drawn above); skip generic for S4
-    if (data.sr_support && activeTab !== 's4') {
+    if (data.sr_support && chartActiveTab !== 's4') {
       candlePriceLines.push(candleSeries.createPriceLine({
         price: data.sr_support, color: '#4a9eff', lineWidth: 1, lineStyle: 2,
         axisLabelVisible: true, title: 'S',
@@ -1954,19 +2081,12 @@ function attachCardClicks() {
         side:     card.dataset.side,
         strategy: strat,
       };
-      // Set activeTab to match the trade strategy so chart draws correct lines
-      if      (strat === 'S1') activeTab = 's1';
-      else if (strat === 'S2') activeTab = 's2';
-      else if (strat === 'S3') activeTab = 's3';
-      else if (strat === 'S4') activeTab = 's4';
-      // Pick interval by strategy
-      if      (strat === 'S3') currentInterval = '15m';
-      else if (strat === 'S2') currentInterval = '1D';
-      else if (strat === 'S4') currentInterval = '1D';
-      else                     currentInterval = '3m';
-      document.querySelectorAll('.chart-interval-btn').forEach(b => {
-        b.classList.toggle('active', b.textContent === currentInterval);
-      });
+      // Set chart strategy context without touching activeTab (pair grid tab stays unchanged)
+      if      (strat === 'S1') chartActiveTab = 's1';
+      else if (strat === 'S2') chartActiveTab = 's2';
+      else if (strat === 'S3') chartActiveTab = 's3';
+      else if (strat === 'S4') chartActiveTab = 's4';
+      else if (strat === 'S5') chartActiveTab = 's5';
       openChart(card.dataset.symbol);
     };
   });

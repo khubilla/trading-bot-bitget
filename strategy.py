@@ -861,3 +861,365 @@ def evaluate_s4(
         f"S4 ✅ spike={best_body_pct*100:.0f}% | RSI peak={rsi_peak:.1f}{div_note} | "
         f"entry≤{entry_trigger:.5f}"
     )
+
+
+# ════════════════════════════════════════════════════════════
+#  STRATEGY 5 — SMC Order Block Pullback with ChoCH Entry
+#
+#  Multi-timeframe Smart Money Concept strategy.
+#  ─────────────────────────────────────────────────────────
+#  1D:  EMA10 > EMA20 > EMA50 (bullish) / reverse (bearish)
+#  1H:  Break of Structure — close above prior swing high (LONG)
+#       or below prior swing low (SHORT)
+#  15m: Find Order Block (last opposing candle before impulse)
+#  15m: Pullback touches OB zone
+#  15m: Change of Character (ChoCH) — candle closes back through
+#       OB boundary → entry trigger confirmed
+#
+#  LONG:  OB = last red candle before bullish impulse
+#         Entry  = ob_high (red candle open) + buffer
+#         SL     = ob_low  (red candle low)  − buffer
+#
+#  SHORT: OB = last green candle before bearish impulse
+#         Entry  = ob_low  (green candle open) − buffer
+#         SL     = ob_high (green candle high) + buffer
+#
+#  Exit mirrors S3 (LONG) / S4 (SHORT):
+#    50% close at ±10% move, 10% trailing stop on remainder
+# ════════════════════════════════════════════════════════════
+
+def find_swing_high_target(
+    df: pd.DataFrame,
+    above_price: float,
+    lookback: int = 50,
+) -> float | None:
+    """
+    Finds the nearest prior swing high above `above_price` on the chart.
+    A swing high = candle whose high is greater than both its neighbours.
+    Returns the lowest qualifying swing high (nearest resistance / liquidity pool),
+    or None if not found.
+    """
+    candles = df.iloc[-lookback:].reset_index(drop=True)
+    n = len(candles)
+    candidates = []
+    for i in range(1, n - 1):
+        h = float(candles.iloc[i]["high"])
+        if h > float(candles.iloc[i - 1]["high"]) and h > float(candles.iloc[i + 1]["high"]):
+            if h > above_price:
+                candidates.append(h)
+    return min(candidates) if candidates else None
+
+
+def find_swing_low_target(
+    df: pd.DataFrame,
+    below_price: float,
+    lookback: int = 50,
+) -> float | None:
+    """
+    Finds the nearest prior swing low below `below_price` on the chart.
+    A swing low = candle whose low is less than both its neighbours.
+    Returns the highest qualifying swing low (nearest support / liquidity pool),
+    or None if not found.
+    """
+    candles = df.iloc[-lookback:].reset_index(drop=True)
+    n = len(candles)
+    candidates = []
+    for i in range(1, n - 1):
+        lo = float(candles.iloc[i]["low"])
+        if lo < float(candles.iloc[i - 1]["low"]) and lo < float(candles.iloc[i + 1]["low"]):
+            if lo < below_price:
+                candidates.append(lo)
+    return max(candidates) if candidates else None
+
+
+def find_bullish_ob(
+    df: pd.DataFrame,
+    lookback: int = 50,
+    min_impulse_pct: float = 0.01,
+) -> tuple[float, float] | None:
+    """
+    Find the most recent 15m Bullish Order Block.
+    OB = last bearish (red) candle before a bullish impulse of
+    ≥2 consecutive green candles moving price up ≥ min_impulse_pct.
+
+    Returns (ob_low, ob_high) where:
+        ob_low  = red candle's low   (outer SL boundary)
+        ob_high = red candle's open  (top of body = ChoCH trigger level)
+    Returns None if no valid impulse found.
+    """
+    candles = df.iloc[-lookback:].reset_index(drop=True)
+    n = len(candles)
+
+    i = n - 1
+    while i >= 1:
+        c = candles.iloc[i]
+        if float(c["close"]) <= float(c["open"]):   # not green
+            i -= 1
+            continue
+        # Find start of this green run
+        run_end = i
+        run_start = i
+        while (run_start > 0 and
+               float(candles.iloc[run_start - 1]["close"]) > float(candles.iloc[run_start - 1]["open"])):
+            run_start -= 1
+        if run_end - run_start < 1:   # need at least 2 green candles
+            i = run_start - 1
+            continue
+        # Check impulse size
+        first_open  = float(candles.iloc[run_start]["open"])
+        last_close  = float(candles.iloc[run_end]["close"])
+        if first_open <= 0 or (last_close - first_open) / first_open < min_impulse_pct:
+            i = run_start - 1
+            continue
+        # Valid impulse — find last red candle immediately before run_start
+        ob_idx = run_start - 1
+        while ob_idx >= 0:
+            ob_c = candles.iloc[ob_idx]
+            if float(ob_c["close"]) < float(ob_c["open"]):   # red
+                return float(ob_c["low"]), float(ob_c["open"])
+            ob_idx -= 1
+        i = run_start - 1
+    return None
+
+
+def find_bearish_ob(
+    df: pd.DataFrame,
+    lookback: int = 50,
+    min_impulse_pct: float = 0.01,
+) -> tuple[float, float] | None:
+    """
+    Find the most recent 15m Bearish Order Block.
+    OB = last bullish (green) candle before a bearish impulse of
+    ≥2 consecutive red candles moving price down ≥ min_impulse_pct.
+
+    Returns (ob_low, ob_high) where:
+        ob_low  = green candle's open  (bottom of body = ChoCH trigger level)
+        ob_high = green candle's high  (outer SL boundary)
+    Returns None if no valid impulse found.
+    """
+    candles = df.iloc[-lookback:].reset_index(drop=True)
+    n = len(candles)
+
+    i = n - 1
+    while i >= 1:
+        c = candles.iloc[i]
+        if float(c["close"]) >= float(c["open"]):   # not red
+            i -= 1
+            continue
+        # Find start of this red run
+        run_end = i
+        run_start = i
+        while (run_start > 0 and
+               float(candles.iloc[run_start - 1]["close"]) < float(candles.iloc[run_start - 1]["open"])):
+            run_start -= 1
+        if run_end - run_start < 1:   # need at least 2 red candles
+            i = run_start - 1
+            continue
+        # Check impulse size
+        first_open  = float(candles.iloc[run_start]["open"])
+        last_close  = float(candles.iloc[run_end]["close"])
+        if first_open <= 0 or (first_open - last_close) / first_open < min_impulse_pct:
+            i = run_start - 1
+            continue
+        # Valid impulse — find last green candle immediately before run_start
+        ob_idx = run_start - 1
+        while ob_idx >= 0:
+            ob_c = candles.iloc[ob_idx]
+            if float(ob_c["close"]) > float(ob_c["open"]):   # green
+                return float(ob_c["open"]), float(ob_c["high"])
+            ob_idx -= 1
+        i = run_start - 1
+    return None
+
+
+def evaluate_s5(
+    symbol: str,
+    daily_df: pd.DataFrame,
+    htf_df: pd.DataFrame,
+    m15_df: pd.DataFrame,
+    allowed_direction: str,
+) -> tuple[Signal, float, float, float, float, float, str]:
+    """
+    Strategy 5 — SMC Order Block Pullback.
+    Returns (signal, entry_trigger, sl_price, tp_price, ob_low, ob_high, reason).
+      signal        : "LONG" | "SHORT" | "HOLD"
+      entry_trigger : price level that must be crossed to fire the trade
+      sl_price      : stop-loss (OB outer edge + buffer)
+      tp_price      : structural swing target (next swing high/low)
+      ob_low        : Order Block lower bound (for chart display)
+      ob_high       : Order Block upper bound (for chart display)
+      reason        : debug string
+    """
+    from config_s5 import (
+        S5_ENABLED,
+        S5_DAILY_EMA_FAST, S5_DAILY_EMA_MED, S5_DAILY_EMA_SLOW,
+        S5_HTF_BOS_LOOKBACK,
+        S5_OB_LOOKBACK, S5_OB_MIN_IMPULSE, S5_CHOCH_LOOKBACK,
+        S5_ENTRY_BUFFER_PCT, S5_SL_BUFFER_PCT,
+        S5_MIN_RR, S5_SWING_LOOKBACK,
+    )
+
+    if not S5_ENABLED:
+        return "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, "S5 disabled"
+
+    go_long  = allowed_direction != "BEARISH"   # BULLISH or NEUTRAL → look for LONG
+    go_short = allowed_direction == "BEARISH"
+
+    if len(daily_df) < RSI_PERIOD + 50 or len(htf_df) < S5_HTF_BOS_LOOKBACK + 2:
+        return "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, "Not enough candles"
+    if m15_df is None or len(m15_df) < S5_OB_LOOKBACK + S5_CHOCH_LOOKBACK + 10:
+        return "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, "Not enough 15m candles"
+
+    # ── 1. Daily EMA bias ─────────────────────────────────── #
+    daily_closes = daily_df["close"].astype(float)
+    ema_fast = float(calculate_ema(daily_closes, S5_DAILY_EMA_FAST).iloc[-1])
+    ema_med  = float(calculate_ema(daily_closes, S5_DAILY_EMA_MED).iloc[-1])
+    ema_slow = float(calculate_ema(daily_closes, S5_DAILY_EMA_SLOW).iloc[-1])
+
+    ema_bull = ema_fast > ema_med > ema_slow
+    ema_bear = ema_slow > ema_med > ema_fast
+
+    if go_long and not ema_bull:
+        return "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, (
+            f"Daily EMA not bullish (EMA{S5_DAILY_EMA_FAST}<EMA{S5_DAILY_EMA_SLOW})"
+        )
+    if go_short and not ema_bear:
+        return "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, (
+            f"Daily EMA not bearish (EMA{S5_DAILY_EMA_FAST}>EMA{S5_DAILY_EMA_SLOW})"
+        )
+
+    # ── 2. 1H Break of Structure ───────────────────────────── #
+    htf_closes = htf_df["close"].astype(float)
+    htf_highs  = htf_df["high"].astype(float)
+    htf_lows   = htf_df["low"].astype(float)
+    current_htf = float(htf_closes.iloc[-1])
+    prior_swing_high = float(htf_highs.iloc[-(S5_HTF_BOS_LOOKBACK + 1):-1].max())
+    prior_swing_low  = float(htf_lows.iloc[-(S5_HTF_BOS_LOOKBACK + 1):-1].min())
+
+    if go_long and current_htf <= prior_swing_high:
+        return "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, (
+            f"Daily EMA bullish ✅ | 1H BOS not confirmed "
+            f"(need close {current_htf:.5f} > swing high {prior_swing_high:.5f})"
+        )
+    if go_short and current_htf >= prior_swing_low:
+        return "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, (
+            f"Daily EMA bearish ✅ | 1H BOS not confirmed "
+            f"(need close {current_htf:.5f} < swing low {prior_swing_low:.5f})"
+        )
+
+    # ── 3 + 4 + 5. OB → Pullback touch → ChoCH ───────────── #
+    if go_long:
+        ob = find_bullish_ob(m15_df, lookback=S5_OB_LOOKBACK, min_impulse_pct=S5_OB_MIN_IMPULSE)
+        if ob is None:
+            return "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, (
+                f"Daily EMA ✅ | 1H BOS ✅ | No 15m Bullish OB found (lookback={S5_OB_LOOKBACK})"
+            )
+        ob_low, ob_high = ob
+
+        # OB touch: any recent candle's low dipped into or through the OB
+        recent = m15_df.iloc[-S5_CHOCH_LOOKBACK:]
+        ob_touched = any(float(r["low"]) <= ob_high * 1.002 for _, r in recent.iterrows())
+        if not ob_touched:
+            return "HOLD", 0.0, 0.0, 0.0, ob_low, ob_high, (
+                f"Daily EMA ✅ | 1H BOS ✅ | Bullish OB {ob_low:.5f}–{ob_high:.5f} | "
+                f"Waiting pullback touch"
+            )
+
+        # ChoCH: last completed 15m candle closed above OB high
+        last_closed = float(m15_df["close"].iloc[-2])
+        if last_closed <= ob_high:
+            return "HOLD", 0.0, 0.0, 0.0, ob_low, ob_high, (
+                f"Daily EMA ✅ | 1H BOS ✅ | Bullish OB {ob_low:.5f}–{ob_high:.5f} | "
+                f"OB touched ✅ | Waiting ChoCH close above {ob_high:.5f} (last={last_closed:.5f})"
+            )
+
+        entry_trigger = ob_high * (1 + S5_ENTRY_BUFFER_PCT)
+        sl_price      = ob_low  * (1 - S5_SL_BUFFER_PCT)
+        current_close = float(m15_df["close"].iloc[-1])
+
+        if current_close <= entry_trigger:
+            return "HOLD", entry_trigger, sl_price, 0.0, ob_low, ob_high, (
+                f"Daily EMA ✅ | 1H BOS ✅ | Bullish OB ✅ | ChoCH ✅ | "
+                f"Waiting entry > {entry_trigger:.5f} (now {current_close:.5f})"
+            )
+
+        # Structural TP — nearest swing high above entry on the 15m chart
+        tp_price = find_swing_high_target(m15_df, entry_trigger, lookback=S5_SWING_LOOKBACK)
+        if tp_price is None:
+            return "HOLD", entry_trigger, sl_price, 0.0, ob_low, ob_high, (
+                f"S5 ChoCH ✅ but no swing high found above {entry_trigger:.5f} — skip"
+            )
+
+        risk   = entry_trigger - sl_price
+        reward = tp_price - entry_trigger
+        rr     = reward / risk if risk > 0 else 0
+        if rr < S5_MIN_RR:
+            return "HOLD", entry_trigger, sl_price, tp_price, ob_low, ob_high, (
+                f"S5 ChoCH ✅ but R:R={rr:.1f} < {S5_MIN_RR} (TP={tp_price:.5f}) — skip"
+            )
+
+        logger.info(
+            f"[S5][{symbol}] ✅ LONG | Daily EMA bullish | 1H BOS ✅ | "
+            f"Bullish OB {ob_low:.5f}–{ob_high:.5f} | ChoCH | TP={tp_price:.5f} | R:R={rr:.1f}"
+        )
+        return "LONG", entry_trigger, sl_price, tp_price, ob_low, ob_high, (
+            f"S5 ✅ OB {ob_low:.5f}–{ob_high:.5f} | ChoCH LONG | TP={tp_price:.5f} R:R={rr:.1f}"
+        )
+
+    else:  # go_short
+        ob = find_bearish_ob(m15_df, lookback=S5_OB_LOOKBACK, min_impulse_pct=S5_OB_MIN_IMPULSE)
+        if ob is None:
+            return "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, (
+                f"Daily EMA ✅ | 1H BOS ✅ | No 15m Bearish OB found (lookback={S5_OB_LOOKBACK})"
+            )
+        ob_low, ob_high = ob
+
+        # OB touch: any recent candle's high rallied into the OB zone
+        recent = m15_df.iloc[-S5_CHOCH_LOOKBACK:]
+        ob_touched = any(float(r["high"]) >= ob_low * 0.998 for _, r in recent.iterrows())
+        if not ob_touched:
+            return "HOLD", 0.0, 0.0, 0.0, ob_low, ob_high, (
+                f"Daily EMA ✅ | 1H BOS ✅ | Bearish OB {ob_low:.5f}–{ob_high:.5f} | "
+                f"Waiting pullback touch"
+            )
+
+        # ChoCH: last completed 15m candle closed below OB low
+        last_closed = float(m15_df["close"].iloc[-2])
+        if last_closed >= ob_low:
+            return "HOLD", 0.0, 0.0, 0.0, ob_low, ob_high, (
+                f"Daily EMA ✅ | 1H BOS ✅ | Bearish OB {ob_low:.5f}–{ob_high:.5f} | "
+                f"OB touched ✅ | Waiting ChoCH close below {ob_low:.5f} (last={last_closed:.5f})"
+            )
+
+        entry_trigger = ob_low  * (1 - S5_ENTRY_BUFFER_PCT)
+        sl_price      = ob_high * (1 + S5_SL_BUFFER_PCT)
+        current_close = float(m15_df["close"].iloc[-1])
+
+        if current_close >= entry_trigger:
+            return "HOLD", entry_trigger, sl_price, 0.0, ob_low, ob_high, (
+                f"Daily EMA ✅ | 1H BOS ✅ | Bearish OB ✅ | ChoCH ✅ | "
+                f"Waiting entry < {entry_trigger:.5f} (now {current_close:.5f})"
+            )
+
+        # Structural TP — nearest swing low below entry on the 15m chart
+        tp_price = find_swing_low_target(m15_df, entry_trigger, lookback=S5_SWING_LOOKBACK)
+        if tp_price is None:
+            return "HOLD", entry_trigger, sl_price, 0.0, ob_low, ob_high, (
+                f"S5 ChoCH ✅ but no swing low found below {entry_trigger:.5f} — skip"
+            )
+
+        risk   = sl_price - entry_trigger
+        reward = entry_trigger - tp_price
+        rr     = reward / risk if risk > 0 else 0
+        if rr < S5_MIN_RR:
+            return "HOLD", entry_trigger, sl_price, tp_price, ob_low, ob_high, (
+                f"S5 ChoCH ✅ but R:R={rr:.1f} < {S5_MIN_RR} (TP={tp_price:.5f}) — skip"
+            )
+
+        logger.info(
+            f"[S5][{symbol}] ✅ SHORT | Daily EMA bearish | 1H BOS ✅ | "
+            f"Bearish OB {ob_low:.5f}–{ob_high:.5f} | ChoCH | TP={tp_price:.5f} | R:R={rr:.1f}"
+        )
+        return "SHORT", entry_trigger, sl_price, tp_price, ob_low, ob_high, (
+            f"S5 ✅ OB {ob_low:.5f}–{ob_high:.5f} | ChoCH SHORT | TP={tp_price:.5f} R:R={rr:.1f}"
+        )

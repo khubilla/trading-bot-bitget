@@ -546,3 +546,38 @@ def cancel_all_orders(symbol: str):
         })
     except Exception as e:
         logger.warning(f"[{symbol}] cancel orders warn: {e}")
+
+
+def is_partial_closed(symbol: str) -> bool:
+    """Live mode: bot.py tracks partial via ap['partial_logged']; always returns False here."""
+    return False
+
+
+def update_position_sl(symbol: str, new_sl: float, hold_side: str = "long") -> bool:
+    """
+    Replace the position's SL via place-pos-tpsl (SL-only, no TP).
+    Returns True on success.
+    """
+    import time as _t
+    sl_trig = float(_round_price(new_sl, symbol))
+    if hold_side == "long":
+        sl_exec = float(_round_price(sl_trig * 0.995, symbol))
+    else:
+        sl_exec = float(_round_price(sl_trig * 1.005, symbol))
+    for attempt in range(3):
+        try:
+            bc.post("/api/v2/mix/order/place-pos-tpsl", {
+                "symbol":               symbol,
+                "productType":          PRODUCT_TYPE,
+                "marginCoin":           MARGIN_COIN,
+                "holdSide":             hold_side,
+                "stopLossTriggerPrice": str(sl_trig),
+                "stopLossTriggerType":  "mark_price",
+                "stopLossExecutePrice": str(sl_exec),
+            })
+            return True
+        except Exception as e:
+            logger.warning(f"[{symbol}] update_position_sl attempt {attempt+1}/3: {e}")
+            if attempt < 2:
+                _t.sleep(1.0)
+    return False

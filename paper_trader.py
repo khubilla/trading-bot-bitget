@@ -501,6 +501,35 @@ def scale_in_short(symbol: str, additional_trade_size_pct: float, leverage: int)
     )
 
 
+def is_partial_closed(symbol: str) -> bool:
+    """Returns True if the paper position has had its first partial TP closed."""
+    state = _load()
+    pos   = state["positions"].get(symbol)
+    return bool(pos and pos.get("partial_closed"))
+
+
+def update_position_sl(symbol: str, new_sl: float, hold_side: str = "long") -> bool:
+    """
+    Move SL to new_sl only if it improves the position (LONG: higher, SHORT: lower).
+    Returns True if the SL was actually updated.
+    """
+    state = _load()
+    pos   = state["positions"].get(symbol)
+    if not pos:
+        return False
+    current_sl = pos.get("sl", 0)
+    if hold_side == "long":
+        if new_sl <= current_sl:
+            return False     # not an improvement
+        pos["sl"] = new_sl
+    else:  # short
+        if new_sl >= current_sl or current_sl == 0:
+            return False
+        pos["sl"] = new_sl
+    _save(state)
+    return True
+
+
 def _record_partial(state: dict, sym: str, exit_price: float, qty: float):
     pos        = state["positions"][sym]
     side       = pos["side"]

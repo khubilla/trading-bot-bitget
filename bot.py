@@ -303,6 +303,32 @@ class MTFBot:
                             logger.error(f"Scale-in error [{sym}]: {e}")
                             ap["scale_in_pending"] = False
 
+                    # S5 Candle Stop — trail SL to prev 15m candle after partial TP
+                    if config_s5.S5_USE_CANDLE_STOPS and ap.get("strategy") == "S5":
+                        partial_done = (
+                            tr.is_partial_closed(sym) if PAPER_MODE
+                            else ap.get("partial_logged", False)
+                        )
+                        if partial_done:
+                            try:
+                                cs_df = tr.get_candles(sym, config_s5.S5_LTF_INTERVAL, limit=5)
+                                if not cs_df.empty and len(cs_df) >= 3:
+                                    prev = cs_df.iloc[-2]   # last completed 15m candle
+                                    if ap["side"] == "LONG":
+                                        candle_sl = float(prev["low"])
+                                        hold_s = "long"
+                                    else:
+                                        candle_sl = float(prev["high"])
+                                        hold_s = "short"
+                                    if tr.update_position_sl(sym, candle_sl, hold_side=hold_s):
+                                        ap["sl"] = candle_sl
+                                        logger.info(
+                                            f"[S5][{sym}] 📍 Candle stop: SL → {candle_sl:.5f} "
+                                            f"(prev 15m {'low' if ap['side'] == 'LONG' else 'high'})"
+                                        )
+                            except Exception as e:
+                                logger.error(f"Candle stop error [{sym}]: {e}")
+
                     # Advisory box-break warning
                     try:
                         ltf_df = tr.get_candles(sym, config_s1.LTF_INTERVAL, limit=10)

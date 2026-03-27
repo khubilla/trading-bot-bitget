@@ -170,6 +170,40 @@ Paper trading uses real market data from Bitget but simulates all order executio
 
 ---
 
+### Docker (VPS deployment)
+
+Runs the bot + dashboard as persistent containers. State files are written to `./data/` on the host so they survive container restarts and rebuilds.
+
+**1. Clone and configure**
+```bash
+git clone https://github.com/khubilla/trading-bot-bitget.git
+cd trading-bot-bitget
+mkdir data
+cp .env.example .env   # fill in API keys
+```
+
+**2. Live trading**
+```bash
+docker compose up -d
+```
+Dashboard at [http://your-server-ip:8080](http://your-server-ip:8080).
+
+**3. Paper trading**
+```bash
+docker compose --profile paper up -d
+```
+Dashboard at [http://your-server-ip:8081](http://your-server-ip:8081).
+
+**4. Useful commands**
+```bash
+docker compose logs -f bot          # live bot logs
+docker compose logs -f dashboard    # dashboard logs
+docker compose pull && docker compose up -d --build   # update to latest
+docker compose down                 # stop everything
+```
+
+---
+
 ## Dashboard
 
 The live dashboard shows:

@@ -334,6 +334,6 @@ Each trade open and close is appended as a row. Columns:
 ## Requirements
 
 - Python 3.10+
-- Bitget account with Futures enabled and API key created
+- Bitget account with Futures enabled and API key created (Register here -> https://www.bitgetapps.com/referral/register?clacCode=PTQGU9EF&from=%2Fevents%2Freferral-all-program&source=events&utmSource=PremierInviter)
 - `.env` file with valid API credentials
 - (Optional) Anthropic API key for Claude filter and optimizer

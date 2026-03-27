@@ -7,6 +7,8 @@
 #   3m:  RSI > 70 (long) or < 30 (short) + tight consolidation
 #   3m:  Candle closes above/below box + buffer
 
+S1_ENABLED = True
+
 # ── Timeframes (Bitget granularity format) ───────────────── #
 HTF_INTERVAL   = "1H"     # 1-hour chart
 LTF_INTERVAL   = "3m"     # 3-minute chart
@@ -27,10 +29,10 @@ CONSOLIDATION_CANDLES   = 2      # Look back N completed candles
 CONSOLIDATION_RANGE_PCT = 0.003  # Max range = 0.3% to qualify as tight consolidation
 
 # ── Breakout Confirmation (3m chart) ─────────────────────── #
-BREAKOUT_BUFFER_PCT = 0.001   # 0.1% buffer above/below box edge
+BREAKOUT_BUFFER_PCT = 0.005   # 0.5% buffer above/below box edge
 
 # ── Risk Management ──────────────────────────────────────── #
 LEVERAGE         = 30
-TRADE_SIZE_PCT   = 0.25    # 25% of total USDT balance per trade
+TRADE_SIZE_PCT   = 0.25    # 25% of total portfolio as margin
 STOP_LOSS_PCT    = 0.015   # 1.5% price SL
 TAKE_PROFIT_PCT  = 0.033   # 3.3% price TP

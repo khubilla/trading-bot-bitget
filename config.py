@@ -37,7 +37,7 @@ MIN_VOLUME_USDT   = 5_000_000   # 24h quote volume filter (5 million USDT)
 SCAN_INTERVAL_SEC = 60           # Re-scan all pairs every 60 seconds
 
 # --- Bot Behaviour ---
-MAX_CONCURRENT_TRADES = 2   # STRICT: only 1 active trade at a time
+MAX_CONCURRENT_TRADES = 10   # STRICT: only 1 active trade at a time
 POLL_INTERVAL_SEC     = 15  # Seconds between each evaluation cycle
 
 # --- Market Sentiment Filter ---

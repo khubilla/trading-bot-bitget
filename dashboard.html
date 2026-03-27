@@ -773,6 +773,7 @@
         <button class="strat-tab active" id="tab-s1" onclick="switchTab('s1')">S1 — MTF RSI</button>
         <button class="strat-tab"        id="tab-s2" onclick="switchTab('s2')">S2 — Coil</button>
         <button class="strat-tab"        id="tab-s3" onclick="switchTab('s3')">S3 — Pullback</button>
+        <button class="strat-tab"        id="tab-s4" onclick="switchTab('s4')">S4 — Short</button>
       </div>
       <div class="panel-body" id="pair-grid">
         <div class="pair-grid" id="pair-grid-inner"></div>
@@ -1009,21 +1010,28 @@ function render(s) {
     $('active-trades').innerHTML = `<div class="empty-state"><div>◎</div>No open positions</div>`;
   } else {
     $('active-trades').innerHTML = trades.map(t => {
-      const side = (t.side || '').toLowerCase();
-      const pnl  = t.unrealised_pnl || 0;
+      const side    = (t.side || '').toLowerCase();
+      const pnl     = t.unrealised_pnl || 0;
+      const margin  = t.margin || 0;
+      const lev     = t.leverage || 1;
+      const pnlPct  = margin > 0 ? (pnl / margin * 100) : 0;
       const pnlClass = pnl >= 0 ? 'pos' : 'neg';
+      const strat   = t.strategy || '';
       return `
         <div class="trade-row ${side}">
           <div class="trade-top">
             <div class="trade-sym">${t.symbol}</div>
-            <div class="side-tag ${side}">${t.side}</div>
+            <div style="display:flex;gap:4px;align-items:center">
+              ${strat ? `<span style="font-size:9px;color:var(--muted);border:1px solid var(--border2);padding:1px 4px;border-radius:3px">${strat}</span>` : ''}
+              <div class="side-tag ${side}">${t.side}</div>
+            </div>
           </div>
           <div class="trade-grid">
             <div class="tg-row"><span class="tg-key">Entry</span><span class="tg-val">$${fmt(t.entry,2)}</span></div>
-            <div class="tg-row"><span class="tg-key">uPnL</span><span class="tg-val ${pnlClass}">${fmtUSD(pnl)}</span></div>
+            <div class="tg-row"><span class="tg-key">uPnL</span><span class="tg-val ${pnlClass}">${fmtUSD(pnl)} <span style="font-size:9px;opacity:0.8">(${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)</span></span></div>
             <div class="tg-row"><span class="tg-key">SL</span><span class="tg-val neg">$${fmt(t.sl,2)}</span></div>
             <div class="tg-row"><span class="tg-key">TP</span><span class="tg-val pos">$${fmt(t.tp,2)}</span></div>
-            <div class="tg-row" style="grid-column:1/-1"><span class="tg-key">Qty</span><span class="tg-val">${t.qty}</span></div>
+            <div class="tg-row" style="grid-column:1/-1"><span class="tg-key">Margin</span><span class="tg-val">$${fmt(margin,2)} @ ${lev}x</span></div>
           </div>
         </div>`;
     }).join('');
@@ -1235,13 +1243,57 @@ function s3CardHTML(sym, ps) {
     </div>`;
 }
 
+function s4CardHTML(sym, ps) {
+  const sig      = ps.s4_signal || 'HOLD';
+  const reason   = ps.s4_reason || '—';
+  const symShort = sym.replace('USDT', '');
+  const cardClass = sig === 'SHORT' ? 'signal-short' : '';
+  const spikeOk  = reason.includes('spike') && !reason.includes('No spike');
+  const rsiHot   = reason.includes('RSI peaked') || sig === 'SHORT';
+  const div_ok   = reason.includes('RSI div ✅') || sig === 'SHORT';
+  const spikeClass= spikeOk ? 'pass' : 'fail';
+  const rsiClass  = !spikeOk ? 'muted' : rsiHot ? 'pass' : 'fail';
+  const divClass  = !spikeOk || !rsiHot ? 'muted' : div_ok ? 'pass' : 'warn';
+  const reasonClass = sig !== 'HOLD' ? 'signal' : rsiHot ? 'active' : spikeOk ? 'active' : '';
+  const age = ps.updated_at ? (() => {
+    const sec = Math.floor((Date.now() - new Date(ps.updated_at).getTime()) / 1000);
+    if (sec < 60) return sec + 's ago';
+    if (sec < 3600) return Math.floor(sec/60) + 'm ago';
+    return Math.floor(sec/3600) + 'h ago';
+  })() : 'not scanned';
+  return `
+    <div class="pair-card ${cardClass}" data-symbol="${sym}">
+      <div class="pair-top">
+        <div class="pair-name" title="${sym}">${symShort}</div>
+        <span class="pair-sig-badge ${sig}">${sig}</span>
+      </div>
+      <div class="pair-checks">
+        <div class="pair-check">
+          <span class="check-label">Spike ≥20%</span>
+          <span class="check-val ${spikeClass}">${spikeOk ? 'Found ✓' : 'Not found'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">RSI > 75</span>
+          <span class="check-val ${rsiClass}">${!spikeOk ? '—' : rsiHot ? 'Peaked ✓' : 'Not overbought'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">RSI Div</span>
+          <span class="check-val ${divClass}">${!spikeOk || !rsiHot ? '—' : div_ok ? 'Detected ✓' : 'Not detected'}</span>
+        </div>
+      </div>
+      <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').slice(0,60)} · ${age}</div>
+    </div>`;
+}
+
 function renderPairGrid(s) {
   const pairStates = s.pair_states || {};
   const pairs = s.qualified_pairs || [];
   $('pair-count').textContent = pairs.length + ' pairs';
   const grid = $('pair-grid-inner');
   let html = '';
-  if (activeTab === 's3') {
+  if (activeTab === 's4') {
+    html = pairs.map(sym => s4CardHTML(sym, pairStates[sym] || {})).join('');
+  } else if (activeTab === 's3') {
     html = pairs.map(sym => s3CardHTML(sym, pairStates[sym] || {})).join('');
   } else if (activeTab === 's2') {
     html = pairs.map(sym => s2CardHTML(sym, pairStates[sym] || {})).join('');
@@ -1316,6 +1368,7 @@ function openChart(symbol) {
   // Default interval per tab
   if (activeTab === 's3') currentInterval = '15m';
   if (activeTab === 's2') currentInterval = '1D';
+  if (activeTab === 's4') currentInterval = '1D';
   $('chartOverlay').classList.add('open');
   $('chartSymbol').textContent = symbol.replace('USDT','');
 
@@ -1325,7 +1378,7 @@ function openChart(symbol) {
   });
 
   initCharts();
-  loadChart(symbol, currentInterval);
+  loadChart(symbol, currentInterval, true);  // fitOnLoad = true for initial open
 
   // Auto-refresh chart every 15s
   clearInterval(chartRefreshTimer);
@@ -1359,7 +1412,7 @@ function initCharts() {
     layout:     { background: { color: bg }, textColor: text },
     grid:       { vertLines: { color: grid }, horzLines: { color: grid } },
     crosshair:  { mode: 1 },
-    timeScale:  { borderColor: border, timeVisible: true, secondsVisible: false },
+    timeScale:  { borderColor: border, timeVisible: true, secondsVisible: false, rightOffset: 35 },
     rightPriceScale: { borderColor: border },
     handleScroll: true,
     handleScale:  true,
@@ -1391,12 +1444,33 @@ function initCharts() {
   candleChart.subscribeCrosshairMove(p => {
     if (p.time) try { rsiChart.setCrosshairPosition(p.point?.y ?? 0, p.time, rsiLineSeries); } catch(_) {}
   });
+
+  // Sync time scale (scroll / zoom) between all charts
+  let _syncing = false;
+  candleChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+    if (_syncing || !range) return;
+    _syncing = true;
+    try {
+      rsiChart.timeScale().setVisibleLogicalRange(range);
+      if (macdChart) macdChart.timeScale().setVisibleLogicalRange(range);
+    } finally { _syncing = false; }
+  });
+  rsiChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+    if (_syncing || !range) return;
+    _syncing = true;
+    try {
+      candleChart.timeScale().setVisibleLogicalRange(range);
+      if (macdChart) macdChart.timeScale().setVisibleLogicalRange(range);
+    } finally { _syncing = false; }
+  });
 }
 
-async function loadChart(symbol, interval) {
+async function loadChart(symbol, interval, fitOnLoad = false) {
   if (!candleChart) return;
   const ageEl = $('legend-s3').style.display !== 'none' ? $('chartAgeS3') : $('chartAge');
   ageEl.textContent = 'Loading...';
+  // Preserve user's scroll position across auto-refreshes
+  const savedRange = !fitOnLoad ? candleChart.timeScale().getVisibleLogicalRange() : null;
 
   try {
     const res  = await fetch(`/api/candles/${symbol}?interval=${interval}&limit=80`);
@@ -1451,6 +1525,11 @@ async function loadChart(symbol, interval) {
         // Sync crosshair
         candleChart.subscribeCrosshairMove(p => {
           if (p.time && macdChart && macdFirstSeries) try { macdChart.setCrosshairPosition(p.point?.y ?? 0, p.time, macdFirstSeries); } catch(_) {}
+        });
+        // Sync time scale for MACD (candle→macd direction; candle↔rsi already handled in initCharts)
+        macdChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+          if (!range) return;
+          try { candleChart.timeScale().setVisibleLogicalRange(range); } catch(_) {}
         });
       } else {
         // Clear old macd series
@@ -1601,35 +1680,68 @@ async function loadChart(symbol, interval) {
         extraCandleSeries.push(fillSeries);
       }
 
-      if (data.breakout_long) {
-        candlePriceLines.push(candleSeries.createPriceLine({
-          price: data.breakout_long, color: '#00d68f', lineWidth: 2, lineStyle: 0,
-          axisLabelVisible: true, title: '▲ Long trigger',
-        }));
-      }
-      if (data.breakout_short) {
-        candlePriceLines.push(candleSeries.createPriceLine({
-          price: data.breakout_short, color: '#ff4d6a', lineWidth: 2, lineStyle: 0,
-          axisLabelVisible: true, title: '▼ Short trigger',
-        }));
-      }
+      if (activeTab === 's4') {
+        // ── S4 signal lines on 1D ──
+        if (data.s4_entry_trigger) {
+          candlePriceLines.push(candleSeries.createPriceLine({
+            price: data.s4_entry_trigger, color: '#ff4d6a', lineWidth: 2, lineStyle: 0,
+            axisLabelVisible: true, title: '▼ Short entry',
+          }));
+        }
+        if (data.s4_sl_price) {
+          candlePriceLines.push(candleSeries.createPriceLine({
+            price: data.s4_sl_price, color: '#f0a500', lineWidth: 1, lineStyle: 2,
+            axisLabelVisible: true, title: '✕ SL',
+          }));
+        }
+        // RSI thresholds for S4
+        rsiPriceLines.push(rsiLineSeries.createPriceLine({ price: 75, color: '#ff4d6a', lineWidth: 1, lineStyle: 1, title: 'S4 OB', axisLabelVisible: true }));
+        rsiPriceLines.push(rsiLineSeries.createPriceLine({ price: 70, color: '#f0a500', lineWidth: 1, lineStyle: 2, title: '70',    axisLabelVisible: true }));
+        rsiPriceLines.push(rsiLineSeries.createPriceLine({ price: 50, color: '#243547', lineWidth: 1, lineStyle: 2, axisLabelVisible: false }));
 
-      rsiPriceLines.push(rsiLineSeries.createPriceLine({ price: data.rsi_long_thresh,  color: '#00d68f', lineWidth: 1, lineStyle: 1, title: 'OB', axisLabelVisible: true }));
-      rsiPriceLines.push(rsiLineSeries.createPriceLine({ price: data.rsi_short_thresh, color: '#ff4d6a', lineWidth: 1, lineStyle: 1, title: 'OS', axisLabelVisible: true }));
-      rsiPriceLines.push(rsiLineSeries.createPriceLine({ price: 50, color: '#243547',  lineWidth: 1, lineStyle: 2, axisLabelVisible: false }));
-
-      const lastRsi = data.rsi[data.rsi.length - 1]?.value;
-      if (lastRsi != null) {
-        $('chartRsi').textContent = lastRsi.toFixed(1);
-        $('chartRsi').style.color = lastRsi >= 70 ? 'var(--emerald)' : lastRsi <= 30 ? 'var(--rose)' : 'var(--text)';
-      }
-
-      if (data.consolidating) {
-        $('chartStatus').textContent = '🟡 Coiling — watch breakout';
-        $('chartStatus').style.color = 'var(--amber)';
+        const lastRsi = data.rsi[data.rsi.length - 1]?.value;
+        if (lastRsi != null) {
+          $('chartRsi').textContent = lastRsi.toFixed(1);
+          $('chartRsi').style.color = lastRsi >= 75 ? 'var(--rose)' : lastRsi >= 70 ? 'var(--amber)' : 'var(--text)';
+        }
+        if (data.s4_entry_trigger) {
+          $('chartStatus').textContent = '🔴 S4 Short setup — entry at prev low';
+          $('chartStatus').style.color = 'var(--rose)';
+        } else {
+          $('chartStatus').textContent = '⏸ No S4 setup';
+          $('chartStatus').style.color = 'var(--muted)';
+        }
       } else {
-        $('chartStatus').textContent = '⏸ Watching';
-        $('chartStatus').style.color = 'var(--muted)';
+        if (data.breakout_long) {
+          candlePriceLines.push(candleSeries.createPriceLine({
+            price: data.breakout_long, color: '#00d68f', lineWidth: 2, lineStyle: 0,
+            axisLabelVisible: true, title: '▲ Long trigger',
+          }));
+        }
+        if (data.breakout_short) {
+          candlePriceLines.push(candleSeries.createPriceLine({
+            price: data.breakout_short, color: '#ff4d6a', lineWidth: 2, lineStyle: 0,
+            axisLabelVisible: true, title: '▼ Short trigger',
+          }));
+        }
+
+        rsiPriceLines.push(rsiLineSeries.createPriceLine({ price: data.rsi_long_thresh,  color: '#00d68f', lineWidth: 1, lineStyle: 1, title: 'OB', axisLabelVisible: true }));
+        rsiPriceLines.push(rsiLineSeries.createPriceLine({ price: data.rsi_short_thresh, color: '#ff4d6a', lineWidth: 1, lineStyle: 1, title: 'OS', axisLabelVisible: true }));
+        rsiPriceLines.push(rsiLineSeries.createPriceLine({ price: 50, color: '#243547',  lineWidth: 1, lineStyle: 2, axisLabelVisible: false }));
+
+        const lastRsi = data.rsi[data.rsi.length - 1]?.value;
+        if (lastRsi != null) {
+          $('chartRsi').textContent = lastRsi.toFixed(1);
+          $('chartRsi').style.color = lastRsi >= 70 ? 'var(--emerald)' : lastRsi <= 30 ? 'var(--rose)' : 'var(--text)';
+        }
+
+        if (data.consolidating) {
+          $('chartStatus').textContent = '🟡 Coiling — watch breakout';
+          $('chartStatus').style.color = 'var(--amber)';
+        } else {
+          $('chartStatus').textContent = '⏸ Watching';
+          $('chartStatus').style.color = 'var(--muted)';
+        }
       }
 
       $('chartAge').textContent = 'Updated ' + new Date().toLocaleTimeString();
@@ -1639,7 +1751,13 @@ async function loadChart(symbol, interval) {
     $('chartPrice').textContent = '$' + Number(data.mark_price).toFixed(pDec);
     $('chartPrice').style.color = 'var(--text)';
 
-    candleChart.timeScale().fitContent();
+    if (savedRange) {
+      candleChart.timeScale().setVisibleLogicalRange(savedRange);
+      rsiChart.timeScale().setVisibleLogicalRange(savedRange);
+      if (macdChart) macdChart.timeScale().setVisibleLogicalRange(savedRange);
+    } else {
+      candleChart.timeScale().fitContent();
+    }
 
   } catch (err) {
     ageEl.textContent = 'Fetch error: ' + err.message;

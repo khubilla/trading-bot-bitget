@@ -123,6 +123,15 @@ def get_usdt_balance() -> float:
     return 0.0
 
 
+def _get_total_equity() -> float:
+    """Total account equity (available + locked margin + unrealized PnL) in USDT."""
+    data = bc.get("/api/v2/mix/account/accounts", params={"productType": PRODUCT_TYPE})
+    for a in data.get("data", []):
+        if a.get("marginCoin") == MARGIN_COIN:
+            return float(a.get("usdtEquity", 0) or a.get("equity", 0))
+    return 0.0
+
+
 def get_all_open_positions() -> dict[str, dict]:
     data = bc.get("/api/v2/mix/position/all-position",
                   params={"productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN})
@@ -263,8 +272,9 @@ def open_long(
     """
     import time as _t
     balance  = get_usdt_balance()
+    equity   = _get_total_equity() or balance
     mark     = get_mark_price(symbol)
-    notional = balance * trade_size_pct * leverage
+    notional = equity * trade_size_pct * leverage
     qty      = _round_qty(notional / mark, symbol)
 
     tp_trig  = float(_round_price(mark * (1 + take_profit_pct), symbol))
@@ -308,7 +318,7 @@ def open_long(
         "symbol": symbol, "side": "LONG", "qty": qty,
         "entry": mark, "sl": sl_trig, "tp": tp_trig,
         "box_low": box_low, "leverage": leverage,
-        "margin": round(balance * trade_size_pct, 4), "tpsl_set": ok,
+        "margin": round(equity * trade_size_pct, 4), "tpsl_set": ok,
     }
     logger.info(
         f"[{symbol}] 🟢 LONG {leverage}x | qty={qty} entry≈{mark:.5f} "
@@ -324,25 +334,26 @@ def open_short(
     leverage: int          = LEVERAGE,
     trade_size_pct: float  = TRADE_SIZE_PCT,
     take_profit_pct: float = TAKE_PROFIT_PCT,
+    use_s4_exits: bool     = False,
 ) -> dict:
     """
     Opens a SHORT position.
     SL = sl_floor if provided, else box_high * 1.001 (just above the consolidation box)
     TP = entry * (1 - take_profit_pct)
+    use_s4_exits: trailing stop — 50% close at -10%, trailing stop on remainder.
     """
     import time as _t
     balance  = get_usdt_balance()
+    equity   = _get_total_equity() or balance
     mark     = get_mark_price(symbol)
-    notional = balance * trade_size_pct * leverage
+    notional = equity * trade_size_pct * leverage
     qty      = _round_qty(notional / mark, symbol)
 
-    tp_trig  = float(_round_price(mark * (1 - take_profit_pct), symbol))
-    tp_exec  = float(_round_price(tp_trig * 0.995, symbol))
     if sl_floor > 0:
         sl_trig = float(_round_price(sl_floor, symbol))
     else:
         sl_trig = float(_round_price(box_high * 1.001, symbol))
-    sl_exec  = float(_round_price(sl_trig * 1.005, symbol))
+    sl_exec = float(_round_price(sl_trig * 1.005, symbol))
 
     set_leverage(symbol, leverage)
 
@@ -355,7 +366,18 @@ def open_short(
 
     _t.sleep(2.0)
 
-    ok = _place_tpsl(symbol, "short", tp_trig, tp_exec, sl_trig, sl_exec)
+    if use_s4_exits:
+        from config_s4 import S4_TRAILING_TRIGGER_PCT, S4_TRAILING_RANGE_PCT
+        trail_trig = float(_round_price(mark * (1 - S4_TRAILING_TRIGGER_PCT), symbol))
+        ok = _place_s2_exits(symbol, "short", qty,
+                             sl_trig, sl_exec,
+                             trail_trig, S4_TRAILING_RANGE_PCT)
+        tp_trig = trail_trig  # For dashboard display
+    else:
+        tp_trig = float(_round_price(mark * (1 - take_profit_pct), symbol))
+        tp_exec = float(_round_price(tp_trig * 0.995, symbol))
+        ok = _place_tpsl(symbol, "short", tp_trig, tp_exec, sl_trig, sl_exec)
+
     if not ok:
         logger.error(f"[{symbol}] ⚠️  TP/SL failed! Set manually: SL={sl_trig} TP={tp_trig}")
 
@@ -363,13 +385,41 @@ def open_short(
         "symbol": symbol, "side": "SHORT", "qty": qty,
         "entry": mark, "sl": sl_trig, "tp": tp_trig,
         "box_high": box_high, "leverage": leverage,
-        "margin": round(balance * trade_size_pct, 4), "tpsl_set": ok,
+        "margin": round(equity * trade_size_pct, 4), "tpsl_set": ok,
     }
     logger.info(
         f"[{symbol}] 🔴 SHORT {leverage}x | qty={qty} entry≈{mark:.5f} "
-        f"SL={sl_trig} TP={tp_trig} | {'✅' if ok else '❌ SET MANUALLY'}"
+        f"SL={sl_trig} | {'✅ S4 exits' if use_s4_exits else 'TP='+str(tp_trig)} | {'✅' if ok else '❌ SET MANUALLY'}"
     )
     return result
+
+
+def scale_in_long(symbol: str, additional_trade_size_pct: float, leverage: int) -> None:
+    """Add to an existing LONG position via a new market buy order."""
+    equity   = _get_total_equity() or get_usdt_balance()
+    mark     = get_mark_price(symbol)
+    qty      = _round_qty((equity * additional_trade_size_pct * leverage) / mark, symbol)
+    bc.post("/api/v2/mix/order/place-order", {
+        "symbol": symbol, "productType": PRODUCT_TYPE,
+        "marginMode": "isolated", "marginCoin": MARGIN_COIN,
+        "size": qty, "side": "buy", "tradeSide": "open",
+        "orderType": "market", "force": "ioc",
+    })
+    logger.info(f"[{symbol}] ➕ Scale-in LONG qty={qty} @ mark≈{mark:.5f}")
+
+
+def scale_in_short(symbol: str, additional_trade_size_pct: float, leverage: int) -> None:
+    """Add to an existing SHORT position via a new market sell order."""
+    equity   = _get_total_equity() or get_usdt_balance()
+    mark     = get_mark_price(symbol)
+    qty      = _round_qty((equity * additional_trade_size_pct * leverage) / mark, symbol)
+    bc.post("/api/v2/mix/order/place-order", {
+        "symbol": symbol, "productType": PRODUCT_TYPE,
+        "marginMode": "isolated", "marginCoin": MARGIN_COIN,
+        "size": qty, "side": "sell", "tradeSide": "open",
+        "orderType": "market", "force": "ioc",
+    })
+    logger.info(f"[{symbol}] ➕ Scale-in SHORT qty={qty} @ mark≈{mark:.5f}")
 
 
 def cancel_all_orders(symbol: str):

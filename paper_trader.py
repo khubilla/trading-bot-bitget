@@ -53,6 +53,12 @@ def get_usdt_balance() -> float:
     return _load()["balance"]
 
 
+def _total_equity(state: dict) -> float:
+    """Free balance + all locked margins = total portfolio value."""
+    locked = sum(p.get("margin", 0) for p in state["positions"].values())
+    return state["balance"] + locked
+
+
 def set_leverage(symbol: str, leverage: int):
     pass  # no-op for paper trading
 
@@ -113,7 +119,7 @@ def open_long(
 ) -> dict:
     state  = _load()
     mark   = get_mark_price(symbol)
-    margin = state["balance"] * trade_size_pct
+    margin = _total_equity(state) * trade_size_pct
     qty    = (margin * leverage) / mark
 
     sl_price = sl_floor if sl_floor > 0 else mark * (1 - stop_loss_pct)
@@ -172,10 +178,11 @@ def open_short(
     leverage: int          = 10,
     trade_size_pct: float  = 0.25,
     take_profit_pct: float = 0.05,
+    use_s4_exits: bool     = False,
 ) -> dict:
     state  = _load()
     mark   = get_mark_price(symbol)
-    margin = state["balance"] * trade_size_pct
+    margin = _total_equity(state) * trade_size_pct
     qty    = (margin * leverage) / mark
 
     if sl_floor > 0:
@@ -185,7 +192,17 @@ def open_short(
     else:
         sl_price = mark * 1.015
 
-    tp_price = mark * (1 - take_profit_pct)
+    use_trailing  = False
+    trail_trigger = None
+    trail_range   = None
+    tp_price      = mark * (1 - take_profit_pct)
+
+    if use_s4_exits:
+        from config_s4 import S4_TRAILING_TRIGGER_PCT, S4_TRAILING_RANGE_PCT
+        trail_trigger = mark * (1 - S4_TRAILING_TRIGGER_PCT)  # price target for partial TP
+        trail_range   = S4_TRAILING_RANGE_PCT                  # callback % for trailing stop
+        tp_price      = trail_trigger
+        use_trailing  = True
 
     state["balance"] -= margin
     state["positions"][symbol] = {
@@ -199,10 +216,10 @@ def open_short(
         "leverage":        leverage,
         "sl":              sl_price,
         "tp":              tp_price,
-        "use_trailing":    False,
-        "trail_trigger":   None,
-        "trail_range":     None,
-        "trail_peak":      mark,
+        "use_trailing":    use_trailing,
+        "trail_trigger":   trail_trigger,
+        "trail_range":     trail_range,
+        "trail_peak":      mark,   # for SHORT: tracks lowest mark seen
         "trail_active":    False,
         "partial_closed":  False,
         "last_mark":       mark,
@@ -211,7 +228,9 @@ def open_short(
     _save(state)
     logger.info(
         f"[PAPER][{symbol}] 🔴 SHORT {leverage}x | entry={mark:.5f} | "
-        f"SL={sl_price:.5f} | TP={tp_price:.5f} | margin=${margin:.2f}"
+        f"SL={sl_price:.5f} | "
+        f"{'trailing @-{:.0f}%'.format((1 - trail_trigger/mark)*100) if use_trailing else 'TP={:.5f}'.format(tp_price)} | "
+        f"margin=${margin:.2f}"
     )
     return {
         "symbol": symbol, "side": "SHORT", "qty": round(qty, 4),
@@ -260,11 +279,49 @@ def _check_exit(state: dict, sym: str, mark: float):
                 _close_full(state, sym, mark, "TP")
 
     else:  # SHORT
+        # Track the lowest mark (trail_peak used as trough for shorts)
+        if pos["use_trailing"]:
+            if mark < pos.get("trail_peak", mark):
+                pos["trail_peak"] = mark
+
+        # 1. SL check (full position)
         if mark >= pos["sl"]:
             _close_full(state, sym, mark, "SL")
             return
-        if mark <= pos["tp"]:
-            _close_full(state, sym, mark, "TP")
+
+        if pos["use_trailing"]:
+            # 2. Partial TP — close 50% and activate trailing when trail_trigger hit
+            if not pos["partial_closed"] and mark <= pos["trail_trigger"]:
+                _close_half_short(state, sym, mark)
+                return   # position still open with 50% remaining
+
+            # 3. Trailing stop on remaining 50%
+            if pos["partial_closed"] and pos["trail_active"]:
+                trail_stop = pos["trail_peak"] * (1 + pos["trail_range"] / 100)
+                if mark >= trail_stop:
+                    _close_full(state, sym, mark, "TRAIL_STOP")
+                    return
+        else:
+            # Standard TP
+            if mark <= pos["tp"]:
+                _close_full(state, sym, mark, "TP")
+
+
+def _close_half_short(state: dict, sym: str, exit_price: float):
+    """Close 50% of SHORT at partial TP, activate trailing on remaining 50%."""
+    pos  = state["positions"][sym]
+    half = pos["original_qty"] / 2
+    _record_partial(state, sym, exit_price, half)
+
+    pos["qty"]            = pos["original_qty"] / 2
+    pos["partial_closed"] = True
+    pos["trail_active"]   = True
+    pos["trail_peak"]     = exit_price  # lowest price seen so far
+
+    logger.info(
+        f"[PAPER][{sym}] 📉 Partial TP 50% @{exit_price:.5f} | "
+        f"trailing stop activated (callback {pos['trail_range']}%)"
+    )
 
 
 def _close_half(state: dict, sym: str, exit_price: float):
@@ -322,11 +379,60 @@ def _close_full(state: dict, sym: str, exit_price: float, reason: str):
     )
 
 
+def scale_in_long(symbol: str, additional_trade_size_pct: float, leverage: int) -> None:
+    """Add to an existing LONG paper position, updating average entry."""
+    state = _load()
+    pos   = state["positions"].get(symbol)
+    if not pos:
+        logger.warning(f"[PAPER][{symbol}] scale_in_long: no open position found")
+        return
+    mark              = get_mark_price(symbol)
+    additional_margin = _total_equity(state) * additional_trade_size_pct
+    additional_qty    = (additional_margin * leverage) / mark
+    total_qty         = pos["qty"] + additional_qty
+    pos["entry"]           = (pos["qty"] * pos["entry"] + additional_qty * mark) / total_qty
+    pos["qty"]             = total_qty
+    pos["original_qty"]    += additional_qty
+    pos["margin"]          += additional_margin
+    pos["original_margin"] += additional_margin
+    state["balance"] -= additional_margin
+    _save(state)
+    logger.info(
+        f"[PAPER][{symbol}] ➕ Scale-in LONG +{additional_margin:.2f} margin | "
+        f"avg_entry={pos['entry']:.5f} | total_qty={total_qty:.4f}"
+    )
+
+
+def scale_in_short(symbol: str, additional_trade_size_pct: float, leverage: int) -> None:
+    """Add to an existing SHORT paper position, updating average entry."""
+    state = _load()
+    pos   = state["positions"].get(symbol)
+    if not pos:
+        logger.warning(f"[PAPER][{symbol}] scale_in_short: no open position found")
+        return
+    mark              = get_mark_price(symbol)
+    additional_margin = _total_equity(state) * additional_trade_size_pct
+    additional_qty    = (additional_margin * leverage) / mark
+    total_qty         = pos["qty"] + additional_qty
+    pos["entry"]           = (pos["qty"] * pos["entry"] + additional_qty * mark) / total_qty
+    pos["qty"]             = total_qty
+    pos["original_qty"]    += additional_qty
+    pos["margin"]          += additional_margin
+    pos["original_margin"] += additional_margin
+    state["balance"] -= additional_margin
+    _save(state)
+    logger.info(
+        f"[PAPER][{symbol}] ➕ Scale-in SHORT +{additional_margin:.2f} margin | "
+        f"avg_entry={pos['entry']:.5f} | total_qty={total_qty:.4f}"
+    )
+
+
 def _record_partial(state: dict, sym: str, exit_price: float, qty: float):
     pos        = state["positions"][sym]
+    side       = pos["side"]
     qty_ratio  = qty / pos["original_qty"]
     margin_used= pos["original_margin"] * qty_ratio
-    price_chg  = (exit_price - pos["entry"]) / pos["entry"]
+    price_chg  = (exit_price - pos["entry"]) / pos["entry"] if side == "LONG" else (pos["entry"] - exit_price) / pos["entry"]
     pnl        = price_chg * margin_used * pos["leverage"]
 
     state["balance"]   += margin_used + pnl

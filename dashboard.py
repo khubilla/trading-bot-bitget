@@ -48,7 +48,7 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
         import trader as tr
         import config
         import config_s1
-        from strategy import detect_consolidation, calculate_rsi, evaluate_s2
+        from strategy import detect_consolidation, calculate_rsi, evaluate_s2, evaluate_s4
 
         # Fetch extra candles for indicator warmup (EMA/ADX need history to converge)
         # Then trim to display_limit for the chart
@@ -203,6 +203,22 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
                 breakout_long  = round(bh * (1 + config_s1.BREAKOUT_BUFFER_PCT), 8)
                 breakout_short = round(bl * (1 - config_s1.BREAKOUT_BUFFER_PCT), 8)
 
+        # ── S4 indicators (daily only) ───────────────────────────── #
+        s4_entry_trigger = None
+        s4_sl_price      = None
+        s4_rsi_peak_val  = None
+        if is_daily:
+            try:
+                _, _, entry_t, sl_p, _, rsi_pk, _, _, _ = evaluate_s4(symbol, df_full)
+                if entry_t > 0:
+                    s4_entry_trigger = round(entry_t, max(2, price_decimals + 1))
+                if sl_p > 0:
+                    s4_sl_price = round(sl_p, max(2, price_decimals + 1))
+                if rsi_pk > 0:
+                    s4_rsi_peak_val = round(rsi_pk, 1)
+            except Exception:
+                pass
+
         # ── S3 indicators (15m only) ──────────────────────────── #
         stoch_k_series    = []
         stoch_d_series    = []
@@ -312,6 +328,10 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
             "s3_sl_price":      s3_sl_price,
             "s3_stoch_last":    s3_stoch_last,
             "s3_macd_last":     s3_macd_last,
+            # S4 — daily short signals
+            "s4_entry_trigger": s4_entry_trigger,
+            "s4_sl_price":      s4_sl_price,
+            "s4_rsi_peak":      s4_rsi_peak_val,
         })
 
     except Exception as e:

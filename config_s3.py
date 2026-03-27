@@ -40,11 +40,12 @@ S3_MACD_SIGNAL      = 9
 
 # ── Entry ─────────────────────────────────────────────────── #
 S3_LTF_INTERVAL     = "15m"
-S3_ENTRY_BUFFER_PCT = 0.001     # 0.1% above uptick candle's high
+S3_ENTRY_BUFFER_PCT = 0.01      # 1% above uptick candle's high
+S3_MAX_ENTRY_BUFFER = 0.04      # Skip entry if price already >4% above entry trigger
 
 # ── Risk Management ──────────────────────────────────────── #
 S3_LEVERAGE         = 10
-S3_TRADE_SIZE_PCT   = 0.05      # 5% of balance as margin
+S3_TRADE_SIZE_PCT   = 0.05      # 5% of total portfolio as margin
 S3_SL_BUFFER_PCT    = 0.002     # 0.2% below pivot low for SL
 S3_MIN_RR               = 2.0   # Minimum reward:risk ratio (vs partial TP level)
 S3_TRAILING_TRIGGER_PCT = 0.10  # 10% price move → close 50% (+100% margin at 10x)

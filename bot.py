@@ -13,11 +13,13 @@ from datetime import datetime, timezone
 
 import config
 import config_s1
+import config_s2
 import config_s3
+import config_s4
 import state as st
 from scanner import get_qualified_pairs_and_sentiment
 from strategy import (
-    evaluate_s1, evaluate_s2, evaluate_s3,
+    evaluate_s1, evaluate_s2, evaluate_s3, evaluate_s4,
     check_htf, check_exit,
     calculate_rsi, detect_consolidation,
     check_daily_trend,
@@ -54,6 +56,8 @@ _TRADE_FIELDS = [
     "snap_daily_rsi",
     # S3 snapshot
     "snap_entry_trigger", "snap_sl", "snap_rr",
+    # S4 snapshot
+    "snap_rsi_peak", "snap_spike_body_pct", "snap_rsi_div", "snap_rsi_div_str",
 ]
 
 def _log_trade(action: str, details: dict):
@@ -187,6 +191,31 @@ class MTFBot:
                         f"uPnL={pos['unrealised_pnl']:+.4f} USDT | "
                         f"Box={ap['box_low']:.5f}–{ap['box_high']:.5f}"
                     )
+                    # Scale-in check (S2/S4 only)
+                    if ap.get("scale_in_pending") and time.time() >= ap["scale_in_after"]:
+                        try:
+                            mark_now  = tr.get_mark_price(sym)
+                            in_window = False
+                            if ap["strategy"] == "S2":
+                                in_window = ap["box_high"] <= mark_now <= ap["box_high"] * (1 + config_s2.S2_MAX_ENTRY_BUFFER)
+                            elif ap["strategy"] == "S4":
+                                pl = ap["s4_prev_low"]
+                                in_window = pl * (1 - config_s4.S4_MAX_ENTRY_BUFFER) <= mark_now <= pl * (1 - config_s4.S4_ENTRY_BUFFER)
+                            remaining = ap["scale_in_trade_size_pct"] * 0.5
+                            if in_window:
+                                if ap["strategy"] == "S2":
+                                    tr.scale_in_long(sym, remaining, config_s2.S2_LEVERAGE)
+                                else:
+                                    tr.scale_in_short(sym, remaining, config_s4.S4_LEVERAGE)
+                                logger.info(f"[{ap['strategy']}][{sym}] ✅ Scale-in +{remaining*100:.0f}% @ {mark_now:.5f}")
+                                st.add_scan_log(f"[{ap['strategy']}][{sym}] Scale-in executed @ {mark_now:.5f}", "INFO")
+                            else:
+                                logger.info(f"[{ap['strategy']}][{sym}] ⏸️ Scale-in skipped — price {mark_now:.5f} outside entry window")
+                            ap["scale_in_pending"] = False
+                        except Exception as e:
+                            logger.error(f"Scale-in error [{sym}]: {e}")
+                            ap["scale_in_pending"] = False
+
                     # Advisory box-break warning
                     try:
                         ltf_df = tr.get_candles(sym, config_s1.LTF_INTERVAL, limit=10)
@@ -275,9 +304,11 @@ class MTFBot:
             return False
 
         # ── Strategy 1 ───────────────────────────────────────────── #
-        s1_sig, s1_rsi, s1_bh, s1_bl, s1_adx = evaluate_s1(
-            symbol, htf_df, ltf_df, daily_df, allowed_direction
-        )
+        s1_sig, s1_rsi, s1_bh, s1_bl, s1_adx = "HOLD", 50.0, 0.0, 0.0, 0.0
+        if config_s1.S1_ENABLED:
+            s1_sig, s1_rsi, s1_bh, s1_bl, s1_adx = evaluate_s1(
+                symbol, htf_df, ltf_df, daily_df, allowed_direction
+            )
         htf_bull, htf_bear = check_htf(htf_df)
 
         from strategy import check_daily_trend as _trend
@@ -323,9 +354,15 @@ class MTFBot:
                 )
                 logger.info(f"[S3][{symbol}] {s3_reason}")
 
+        # ── Strategy 4 ───────────────────────────────────────────── #
+        s4_sig, s4_rsi, s4_trigger, s4_sl, s4_body_pct, s4_rsi_peak, s4_div, s4_div_str, s4_reason = "HOLD", 50.0, 0.0, 0.0, 0.0, 0.0, False, "", ""
+        if config_s4.S4_ENABLED and self.sentiment.direction != "BULLISH":
+            s4_sig, s4_rsi, s4_trigger, s4_sl, s4_body_pct, s4_rsi_peak, s4_div, s4_div_str, s4_reason = evaluate_s4(symbol, daily_df)
+            logger.info(f"[S4][{symbol}] {s4_reason}")
+
         st.update_pair_state(symbol, {
             "rsi": rsi_val, "htf_bull": htf_bull, "htf_bear": htf_bear,
-            "signal": s1_sig if s1_sig != "HOLD" else (s2_sig if s2_sig != "HOLD" else s3_sig),
+            "signal": s1_sig if s1_sig != "HOLD" else (s2_sig if s2_sig != "HOLD" else (s3_sig if s3_sig != "HOLD" else s4_sig)),
             "price": close,
             "consolidating": is_coil, "box_high": round(bh,6) if bh else None,
             "box_low": round(bl,6) if bl else None,
@@ -334,9 +371,11 @@ class MTFBot:
             "s3_reason": s3_reason,
             "s3_signal": s3_sig,
             "s3_adx": round(s3_adx, 1) if s3_adx else None,
+            "s4_reason": s4_reason,
+            "s4_signal": s4_sig,
             "rsi_ok": rsi_ok,
             "adx": round(adx_val, 1), "trend_ok": trend_ok,
-            "strategy": "S1" if s1_sig != "HOLD" else ("S2" if s2_sig != "HOLD" else ("S3" if s3_sig != "HOLD" else "S1")),
+            "strategy": "S1" if s1_sig != "HOLD" else ("S2" if s2_sig != "HOLD" else ("S3" if s3_sig != "HOLD" else ("S4" if s4_sig != "HOLD" else "S1"))),
             "s2_daily_rsi": s2_rsi,
             "s2_big_candle": s2_rsi > 0 and ("big_candle" in s2_reason or "Big candle" in s2_reason or s2_bh > 0),
             "s2_coiling":    s2_bl > 0 and s2_bh > 0,
@@ -397,12 +436,15 @@ class MTFBot:
 
         # ── Execute S2 ────────────────────────────────────────────── #
         if s2_sig == "LONG":
-            from config_s2 import S2_LEVERAGE, S2_TRADE_SIZE_PCT, S2_TAKE_PROFIT_PCT, S2_STOP_LOSS_PCT
+            mark_now = tr.get_mark_price(symbol)
+            if mark_now > s2_bh * (1 + config_s2.S2_MAX_ENTRY_BUFFER):
+                logger.info(f"[S2][{symbol}] ⏸️ LONG setup valid but entry missed — price {mark_now:.5f} already >{config_s2.S2_MAX_ENTRY_BUFFER*100:.0f}% above trigger {s2_bh:.5f}")
+                return False
             st.add_scan_log(f"[S2][{symbol}] 🟢 LONG | {s2_reason}", "SIGNAL")
-            trade = tr.open_long(symbol, box_low=s2_bl, leverage=S2_LEVERAGE,
-                                 trade_size_pct=S2_TRADE_SIZE_PCT,
-                                 take_profit_pct=S2_TAKE_PROFIT_PCT,
-                                 stop_loss_pct=S2_STOP_LOSS_PCT,
+            trade = tr.open_long(symbol, box_low=s2_bl, leverage=config_s2.S2_LEVERAGE,
+                                 trade_size_pct=config_s2.S2_TRADE_SIZE_PCT * 0.5,
+                                 take_profit_pct=config_s2.S2_TAKE_PROFIT_PCT,
+                                 stop_loss_pct=config_s2.S2_STOP_LOSS_PCT,
                                  use_s2_exits=True)
             trade["strategy"] = "S2"
             trade["snap_daily_rsi"]   = round(s2_rsi, 1)
@@ -414,11 +456,18 @@ class MTFBot:
             self.active_positions[symbol] = {
                 "side": "LONG", "strategy": "S2",
                 "box_high": s2_bh if s2_bh else 0.0, "box_low": s2_bl,
+                "scale_in_pending": True,
+                "scale_in_after": time.time() + 3600,
+                "scale_in_trade_size_pct": config_s2.S2_TRADE_SIZE_PCT,
             }
             return True
 
         # ── Execute S3 ────────────────────────────────────────────── #
         if s3_sig == "LONG":
+            mark_now = tr.get_mark_price(symbol)
+            if mark_now > s3_trigger * (1 + config_s3.S3_MAX_ENTRY_BUFFER):
+                logger.info(f"[S3][{symbol}] ⏸️ LONG setup valid but entry missed — price {mark_now:.5f} already >{config_s3.S3_MAX_ENTRY_BUFFER*100:.0f}% above trigger {s3_trigger:.5f}")
+                return False
             st.add_scan_log(f"[S3][{symbol}] 🟢 LONG | {s3_reason}", "SIGNAL")
             trade = tr.open_long(
                 symbol,
@@ -443,6 +492,51 @@ class MTFBot:
                 "box_high": s3_trigger, "box_low": s3_sl,
             }
             return True
+
+        # ── Execute S4 ────────────────────────────────────────────── #
+        if s4_sig == "SHORT" and s4_trigger > 0:
+            mark_now        = tr.get_mark_price(symbol)
+            prev_low_approx = s4_trigger / (1 - config_s4.S4_ENTRY_BUFFER)
+            too_far         = mark_now < prev_low_approx * (1 - config_s4.S4_MAX_ENTRY_BUFFER)
+            if too_far:
+                logger.info(
+                    f"[S4][{symbol}] ⏸️ SHORT setup valid but entry missed — "
+                    f"price {mark_now:.5f} already >{config_s4.S4_MAX_ENTRY_BUFFER*100:.0f}% "
+                    f"below prev_low {prev_low_approx:.5f} (window: {s4_trigger:.5f}–{prev_low_approx*(1-config_s4.S4_MAX_ENTRY_BUFFER):.5f})"
+                )
+            if mark_now <= s4_trigger and not too_far:
+                st.add_scan_log(
+                    f"[S4][{symbol}] 🔴 SHORT | spike={s4_body_pct*100:.0f}% RSI={s4_rsi:.1f} | "
+                    f"entry≤{s4_trigger:.5f} triggered @ {mark_now:.5f}",
+                    "SIGNAL"
+                )
+                trade = tr.open_short(
+                    symbol,
+                    sl_floor       = s4_sl,
+                    leverage       = config_s4.S4_LEVERAGE,
+                    trade_size_pct = config_s4.S4_TRADE_SIZE_PCT * 0.5,
+                    use_s4_exits   = True,
+                )
+                trade["strategy"]            = "S4"
+                trade["snap_rsi"]            = round(s4_rsi, 1)
+                trade["snap_rsi_peak"]       = round(s4_rsi_peak, 1)
+                trade["snap_spike_body_pct"] = round(s4_body_pct * 100, 1)
+                trade["snap_rsi_div"]        = s4_div
+                trade["snap_rsi_div_str"]    = s4_div_str
+                trade["snap_sl"]             = round(s4_sl, 8) if s4_sl else None
+                trade["snap_sentiment"]      = self.sentiment.direction
+                _log_trade("S4_SHORT", trade)
+                st.add_open_trade(trade)
+                if PAPER_MODE: tr.tag_strategy(symbol, "S4")
+                self.active_positions[symbol] = {
+                    "side": "SHORT", "strategy": "S4",
+                    "box_high": s4_sl, "box_low": s4_trigger,
+                    "scale_in_pending": True,
+                    "scale_in_after": time.time() + 3600,
+                    "scale_in_trade_size_pct": config_s4.S4_TRADE_SIZE_PCT,
+                    "s4_prev_low": prev_low_approx,
+                }
+                return True
 
         return False
 

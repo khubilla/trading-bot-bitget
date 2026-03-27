@@ -355,6 +355,8 @@ class MTFBot:
 
         # ── Strategy 3 ───────────────────────────────────────────── #
         s3_sig, s3_adx, s3_trigger, s3_sl, s3_reason = "HOLD", 0.0, 0.0, 0.0, ""
+        m15_df = None
+        s3_sr_resistance_pct = None
         if config_s3.S3_ENABLED and self.sentiment.direction != "BEARISH":
             m15_df = tr.get_candles(symbol, config_s3.S3_LTF_INTERVAL, limit=300)
             if not m15_df.empty:
@@ -362,6 +364,8 @@ class MTFBot:
                     symbol, m15_df
                 )
                 logger.info(f"[S3][{symbol}] {s3_reason}")
+                _s3_res = find_nearest_resistance(m15_df, close, lookback=300)
+                s3_sr_resistance_pct = round((_s3_res - close) / close * 100, 1) if _s3_res else None
 
         # ── Strategy 4 ───────────────────────────────────────────── #
         s4_sig, s4_rsi, s4_trigger, s4_sl, s4_body_pct, s4_rsi_peak, s4_div, s4_div_str, s4_reason = "HOLD", 50.0, 0.0, 0.0, 0.0, 0.0, False, "", ""
@@ -396,8 +400,9 @@ class MTFBot:
             "s2_daily_rsi": s2_rsi,
             "s2_big_candle": s2_rsi > 0 and ("big_candle" in s2_reason or "Big candle" in s2_reason or s2_bh > 0),
             "s2_coiling":    s2_bl > 0 and s2_bh > 0,
-            "sr_resistance_pct": sr_res_pct,
-            "sr_support_pct":    sr_sup_pct,
+            "sr_resistance_pct":    sr_res_pct,
+            "s3_sr_resistance_pct": s3_sr_resistance_pct,
+            "sr_support_pct":       sr_sup_pct,
         })
 
         # ── Min balance check ─────────────────────────────────────── #
@@ -497,15 +502,15 @@ class MTFBot:
             if mark_now > s3_trigger * (1 + config_s3.S3_MAX_ENTRY_BUFFER):
                 logger.info(f"[S3][{symbol}] ⏸️ LONG setup valid but entry missed — price {mark_now:.5f} already >{config_s3.S3_MAX_ENTRY_BUFFER*100:.0f}% above trigger {s3_trigger:.5f}")
                 return False
-            nearest_res = find_nearest_resistance(daily_df, mark_now)
+            nearest_res = find_nearest_resistance(m15_df, mark_now, lookback=300) if m15_df is not None else None
             if nearest_res is not None:
                 clearance = (nearest_res - mark_now) / mark_now
                 if clearance < config_s3.S3_MIN_SR_CLEARANCE:
                     logger.info(
-                        f"[S3][{symbol}] ⏸️ LONG skipped — resistance {nearest_res:.5f} "
+                        f"[S3][{symbol}] ⏸️ LONG skipped — 15m resistance {nearest_res:.5f} "
                         f"only {clearance*100:.1f}% away (min {config_s3.S3_MIN_SR_CLEARANCE*100:.0f}%)"
                     )
-                    st.add_scan_log(f"[S3][{symbol}] ⛔ Resistance {nearest_res:.5f} too close ({clearance*100:.1f}%)", "WARN")
+                    st.add_scan_log(f"[S3][{symbol}] ⛔ 15m resistance {nearest_res:.5f} too close ({clearance*100:.1f}%)", "WARN")
                     return False
             st.add_scan_log(f"[S3][{symbol}] 🟢 LONG | {s3_reason}", "SIGNAL")
             trade = tr.open_long(

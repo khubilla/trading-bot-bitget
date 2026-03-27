@@ -1186,7 +1186,7 @@ function signalScore(sym, ps, tab) {
     const emaOk   = reason.includes('EMA aligned') || reason.includes('EMA10>20>50>200') || sig === 'LONG';
     const stochOs = reason.includes('Stoch oversold') || sig === 'LONG';
     const uptick  = reason.includes('Uptick breakout') || reason.includes('uptick') || sig === 'LONG';
-    const srClear = ps.sr_resistance_pct != null && ps.sr_resistance_pct >= 15;
+    const srClear = ps.s3_sr_resistance_pct != null && ps.s3_sr_resistance_pct >= 15;
     return (emaOk ? 1 : 0) + (stochOs ? 1 : 0) + (uptick ? 1 : 0) + (srClear ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
   }
   if (tab === 's4') {
@@ -1293,7 +1293,7 @@ function s3CardHTML(sym, ps) {
   const adxClass   = !emaOk ? 'muted' : adxOk ? 'pass' : 'fail';
   const stochClass = !emaOk || !adxOk ? 'muted' : stochOs ? 'pass' : 'fail';
   const uptickClass= !stochOs ? 'muted' : uptickOk ? 'pass' : 'warn';
-  const srPct      = ps.sr_resistance_pct;
+  const srPct      = ps.s3_sr_resistance_pct;
   const srClass    = srPct == null ? 'muted' : srPct >= 15 ? 'pass' : srPct >= 10 ? 'warn' : 'fail';
   const srLabel    = srPct == null ? '—' : `${srPct.toFixed(1)}% away`;
   const reasonClass = sig !== 'HOLD' ? 'signal' : stochOs ? 'active' : emaOk ? 'active' : '';

@@ -33,6 +33,7 @@ S5_HTF_BOS_LOOKBACK = 10    # look at last N completed 1H candles for prior swin
 S5_LTF_INTERVAL    = "15m"
 S5_OB_LOOKBACK     = 50     # candles to scan for the most recent OB
 S5_OB_MIN_IMPULSE  = 0.01   # impulse must move price ≥1% to qualify
+S5_OB_MIN_RANGE_PCT = 0.005  # OB candle range (high-low)/low must be ≥0.5%; filters narrow SL sweeps
 S5_CHOCH_LOOKBACK  = 20     # candles to check for OB touch + ChoCH confirmation
 
 # ── Entry / SL ────────────────────────────────────────────── #
@@ -42,6 +43,10 @@ S5_SL_BUFFER_PCT    = 0.003  # 0.3% beyond OB outer edge for SL
 
 # ── Take Profit (structural) ───────────────────────────────── #
 S5_SWING_LOOKBACK   = 50     # 15m candles to scan for the structural TP swing target
+
+# ── SMC confluence (opt-in) ───────────────────────────────── #
+S5_SMC_FVG_FILTER   = False  # require an unfilled FVG in the OB impulse window
+S5_SMC_FVG_LOOKBACK = 20     # 15m candles to search for the FVG
 
 # ── Risk Management ───────────────────────────────────────── #
 S5_LEVERAGE         = 10

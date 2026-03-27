@@ -81,14 +81,18 @@ Multi-timeframe Smart Money Concepts strategy. Long or short depending on market
 | Timeframe | Check |
 |-----------|-------|
 | 1D | EMA10 > EMA20 > EMA50 (bullish bias) or reverse (bearish bias) |
-| 1H | Break of Structure — close above prior swing high (LONG) or below prior swing low (SHORT) |
-| 15m | Order Block — last opposing candle before a ≥1% impulse of 2+ candles |
+| 1H | Break of Structure — close above most recent 1H swing high pivot (LONG) or below swing low pivot (SHORT) |
+| 15m | Order Block — last opposing candle before a ≥1% impulse of 2+ candles; OB range must be ≥0.5% |
 | 15m | Pullback touches OB zone |
 | 15m | Change of Character (ChoCH) — close back through OB boundary confirms entry |
 
-**Entry:** 0.5% beyond the OB boundary, skipped if price already >4% past the trigger.
+**Entry:** 0.5% beyond the OB boundary. When ChoCH fires but price hasn't yet crossed the trigger, the setup is queued as **PENDING** — the entry watcher thread catches the breakout within 3–7 seconds instead of waiting for the next 60s scan cycle.
 
-**Risk:** 10x leverage · 5% of total portfolio · SL 0.3% beyond OB outer edge · minimum 2:1 R:R required · 50% partial close at ±10% · 10% trailing stop on remainder
+**Exits (standard SMC):** 50% partial close at 1:1 R:R → SL moves to breakeven → remaining 50% targets the nearest structural swing high/low on 15m. Fallback 5% trailing stop if no structural target is found.
+
+**Risk:** 10x leverage · 5% of total portfolio · SL 0.3% beyond OB outer wick · minimum 2:1 R:R required
+
+**Optional filters (`config_s5.py`):** `S5_SMC_FVG_FILTER` — require an unfilled Fair Value Gap above/below the OB for added confluence (off by default).
 
 **Sentiment gate:** LONG only when BULLISH or NEUTRAL · SHORT only when BEARISH.
 
@@ -173,62 +177,8 @@ The live dashboard shows:
 - **Header stats**: Balance, Open P/L, Total Value (balance + margin + unrealised P/L), Win Rate, Total P/L, Scanned Pairs
 - **Active trades**: entry price, SL, TP, current P/L %, strategy badge, margin used
 - **Trade history**: closed trades with PnL, result, and strategy tag
-- **Pair scanner tabs**: S1 · S2 · S3 · S4 — each showing signals and setup status per pair
+- **Pair scanner tabs**: S1 · S2 · S3 · S4 · S5 — each showing signals and setup status per pair; S5 shows OB zone, entry trigger, SL, and structural TP lines on the 15m chart
 - **Candlestick chart** with RSI and MACD subcharts, entry/SL signal lines, synced scroll across panes
-
----
-
-## File Structure
-
-```
-├── bot.py              # Main entry point (--paper flag for paper mode)
-├── strategy.py         # S1 + S2 + S3 + S4 + S5 signal logic
-├── trader.py           # Bitget order execution (live)
-├── paper_trader.py     # Simulated order execution (paper)
-├── scanner.py          # Pair scanner + market sentiment
-├── dashboard.py        # Live web dashboard (FastAPI, --paper flag)
-├── dashboard.html      # Dashboard frontend (served by dashboard.py)
-├── backtest.py         # Backtesting engine
-├── bitget_client.py    # Bitget REST API client
-├── state.py            # Shared in-memory + on-disk state
-│
-├── config.py           # Credentials + paths (reads from .env / env vars)
-├── config_s1.py        # Strategy 1 parameters
-├── config_s2.py        # Strategy 2 parameters
-├── config_s3.py        # Strategy 3 parameters
-├── config_s4.py        # Strategy 4 parameters
-├── config_s5.py        # Strategy 5 parameters
-│
-├── .env                # Local credentials (gitignored, never commit)
-├── trades.csv          # Live trade log
-├── trades_paper.csv    # Paper trade log
-├── state.json          # Live bot runtime state
-├── state_paper.json    # Paper bot runtime state
-├── paper_state.json    # Paper trader simulation state (balance, positions)
-└── bot.log             # Runtime log
-```
-
----
-
-## Trade Log (`trades.csv` / `trades_paper.csv`)
-
-Each trade open and close is appended as a row. Columns:
-
-| Column | Description |
-|--------|-------------|
-| `timestamp` | UTC ISO timestamp |
-| `action` | `S1_LONG`, `S2_LONG`, `S3_LONG`, `S4_SHORT`, `S*_CLOSE`, etc. |
-| `symbol` | e.g. `BTCUSDT` |
-| `side` | `LONG` or `SHORT` |
-| `qty` | Position size |
-| `entry` | Entry price |
-| `sl` / `tp` | Stop-loss / take-profit price |
-| `leverage` / `margin` | Risk sizing |
-| `strategy` | Strategy tag |
-| `snap_rsi`, `snap_adx`, … | Indicator snapshot at entry |
-| `snap_rsi_peak`, `snap_spike_body_pct`, `snap_rsi_div` | S4-specific snapshot fields |
-| `snap_s5_ob_low`, `snap_s5_ob_high` | S5-specific: 15m Order Block zone at entry |
-| `pnl` / `result` | On close rows: realised PnL and WIN/LOSS |
 
 ---
 
@@ -293,7 +243,7 @@ python optimize.py --min 5   # lower minimum trades threshold (default 10)
 Skip S2 when RSI < 75 AND sentiment is NEUTRAL — 6 consecutive losses, 0 wins.
 ```
 
-Claude suggests changes; you review and apply them manually to the config files.
+Claude suggests changes; you review and apply them manually to the config files. All five strategies (S1–S5) are covered once they have sufficient trade history.
 
 **Cost:** ~$0.015 per run with Claude Sonnet 4.6.
 
@@ -350,8 +300,9 @@ Each trade open and close is appended as a row. Columns:
 | `strategy` | Strategy tag |
 | `snap_rsi`, `snap_adx`, … | Indicator snapshot at entry |
 | `snap_rsi_peak`, `snap_spike_body_pct`, `snap_rsi_div` | S4-specific snapshot fields |
-| `snap_sr_clearance_pct` | S/R clearance % at entry (S2/S3/S4) |
-| `result` / `pnl_pct` / `exit_reason` | On close rows: WIN/LOSS, P/L %, and exit type (SL/TP/TRAIL_STOP) |
+| `snap_s5_ob_low`, `snap_s5_ob_high`, `snap_s5_tp` | S5-specific: OB zone and structural TP at entry |
+| `snap_sr_clearance_pct` | S/R clearance % at entry (S2/S3/S4/S5) |
+| `result` / `pnl_pct` / `exit_reason` | On close rows: WIN/LOSS, P/L %, and exit type (SL/TP/TRAIL_STOP/PARTIAL_TP) |
 
 ---
 

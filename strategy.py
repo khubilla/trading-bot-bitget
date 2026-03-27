@@ -38,7 +38,7 @@ from config_s1 import (
 )
 
 logger = logging.getLogger(__name__)
-Signal   = Literal["LONG", "SHORT", "HOLD"]
+Signal   = Literal["LONG", "SHORT", "HOLD", "PENDING_LONG", "PENDING_SHORT"]
 ExitFlag = Literal["EXIT", "HOLD"]
 
 
@@ -932,6 +932,28 @@ def find_swing_low_target(
     return max(candidates) if candidates else None
 
 
+def find_fvg(
+    df: pd.DataFrame,
+    direction: str = "BULL",
+    lookback: int = 15,
+) -> tuple[float, float] | None:
+    """
+    Most recent Fair Value Gap in the last `lookback` candles.
+    BULL FVG: c3.low > c1.high  →  returns (gap_low=c1.high, gap_high=c3.low)
+    BEAR FVG: c3.high < c1.low  →  returns (gap_low=c3.high, gap_high=c1.low)
+    Returns None if no FVG found.
+    """
+    candles = df.iloc[-lookback:].reset_index(drop=True)
+    for i in range(len(candles) - 1, 1, -1):
+        c1 = candles.iloc[i - 2]
+        c3 = candles.iloc[i]
+        if direction == "BULL" and float(c3["low"]) > float(c1["high"]):
+            return float(c1["high"]), float(c3["low"])
+        if direction == "BEAR" and float(c3["high"]) < float(c1["low"]):
+            return float(c3["high"]), float(c1["low"])
+    return None
+
+
 def find_bullish_ob(
     df: pd.DataFrame,
     lookback: int = 50,
@@ -1057,6 +1079,7 @@ def evaluate_s5(
         S5_OB_LOOKBACK, S5_OB_MIN_IMPULSE, S5_CHOCH_LOOKBACK,
         S5_ENTRY_BUFFER_PCT, S5_SL_BUFFER_PCT,
         S5_MIN_RR, S5_SWING_LOOKBACK,
+        S5_OB_MIN_RANGE_PCT, S5_SMC_FVG_FILTER, S5_SMC_FVG_LOOKBACK,
     )
 
     if not S5_ENABLED:
@@ -1093,8 +1116,28 @@ def evaluate_s5(
     htf_highs  = htf_df["high"].astype(float)
     htf_lows   = htf_df["low"].astype(float)
     current_htf = float(htf_closes.iloc[-1])
-    prior_swing_high = float(htf_highs.iloc[-(S5_HTF_BOS_LOOKBACK + 1):-1].max())
-    prior_swing_low  = float(htf_lows.iloc[-(S5_HTF_BOS_LOOKBACK + 1):-1].min())
+
+    # Find most recent 1H swing high/low pivot (high > both neighbours).
+    # Exclude the last candle (may be forming); fall back to simple max/min if no pivot found.
+    htf_win = htf_df.iloc[-(S5_HTF_BOS_LOOKBACK + 2):-1].reset_index(drop=True)
+    n_htf   = len(htf_win)
+    prior_swing_high = None
+    prior_swing_low  = None
+    for k in range(n_htf - 2, 0, -1):
+        if prior_swing_high is None:
+            h = float(htf_win.iloc[k]["high"])
+            if h > float(htf_win.iloc[k - 1]["high"]) and h > float(htf_win.iloc[k + 1]["high"]):
+                prior_swing_high = h
+        if prior_swing_low is None:
+            lo = float(htf_win.iloc[k]["low"])
+            if lo < float(htf_win.iloc[k - 1]["low"]) and lo < float(htf_win.iloc[k + 1]["low"]):
+                prior_swing_low = lo
+        if prior_swing_high is not None and prior_swing_low is not None:
+            break
+    if prior_swing_high is None:
+        prior_swing_high = float(htf_highs.iloc[-(S5_HTF_BOS_LOOKBACK + 1):-1].max())
+    if prior_swing_low is None:
+        prior_swing_low  = float(htf_lows.iloc[-(S5_HTF_BOS_LOOKBACK + 1):-1].min())
 
     if go_long and current_htf <= prior_swing_high:
         return "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, (
@@ -1115,6 +1158,22 @@ def evaluate_s5(
                 f"Daily EMA ✅ | 1H BOS ✅ | No 15m Bullish OB found (lookback={S5_OB_LOOKBACK})"
             )
         ob_low, ob_high = ob
+
+        # Minimum OB range — reject flat/narrow candles that would put SL too close to entry
+        ob_range = (ob_high - ob_low) / ob_low if ob_low > 0 else 0
+        if ob_range < S5_OB_MIN_RANGE_PCT:
+            return "HOLD", 0.0, 0.0, 0.0, ob_low, ob_high, (
+                f"Daily EMA ✅ | 1H BOS ✅ | Bullish OB too narrow "
+                f"({ob_range*100:.2f}% < {S5_OB_MIN_RANGE_PCT*100:.1f}%)"
+            )
+
+        # FVG confluence (opt-in): require an unfilled bullish FVG near the OB
+        if S5_SMC_FVG_FILTER:
+            fvg = find_fvg(m15_df, direction="BULL", lookback=S5_SMC_FVG_LOOKBACK)
+            if fvg is None or fvg[0] < ob_low:
+                return "HOLD", 0.0, 0.0, 0.0, ob_low, ob_high, (
+                    f"Daily EMA ✅ | 1H BOS ✅ | Bullish OB ✅ | No BULL FVG above OB — skipping"
+                )
 
         # OB touch: any recent candle's low dipped into or through the OB
         recent = m15_df.iloc[-S5_CHOCH_LOOKBACK:]
@@ -1137,13 +1196,7 @@ def evaluate_s5(
         sl_price      = ob_low  * (1 - S5_SL_BUFFER_PCT)
         current_close = float(m15_df["close"].iloc[-1])
 
-        if current_close <= entry_trigger:
-            return "HOLD", entry_trigger, sl_price, 0.0, ob_low, ob_high, (
-                f"Daily EMA ✅ | 1H BOS ✅ | Bullish OB ✅ | ChoCH ✅ | "
-                f"Waiting entry > {entry_trigger:.5f} (now {current_close:.5f})"
-            )
-
-        # Structural TP — nearest swing high above entry on the 15m chart
+        # Structural TP — compute before entry-trigger check so PENDING signals carry full data
         tp_price = find_swing_high_target(m15_df, entry_trigger, lookback=S5_SWING_LOOKBACK)
         if tp_price is None:
             return "HOLD", entry_trigger, sl_price, 0.0, ob_low, ob_high, (
@@ -1156,6 +1209,12 @@ def evaluate_s5(
         if rr < S5_MIN_RR:
             return "HOLD", entry_trigger, sl_price, tp_price, ob_low, ob_high, (
                 f"S5 ChoCH ✅ but R:R={rr:.1f} < {S5_MIN_RR} (TP={tp_price:.5f}) — skip"
+            )
+
+        if current_close <= entry_trigger:
+            return "PENDING_LONG", entry_trigger, sl_price, tp_price, ob_low, ob_high, (
+                f"Daily EMA ✅ | 1H BOS ✅ | Bullish OB ✅ | ChoCH ✅ | R:R={rr:.1f} | "
+                f"⏳ Waiting entry > {entry_trigger:.5f} (now {current_close:.5f})"
             )
 
         logger.info(
@@ -1173,6 +1232,22 @@ def evaluate_s5(
                 f"Daily EMA ✅ | 1H BOS ✅ | No 15m Bearish OB found (lookback={S5_OB_LOOKBACK})"
             )
         ob_low, ob_high = ob
+
+        # Minimum OB range — reject flat/narrow candles that would put SL too close to entry
+        ob_range = (ob_high - ob_low) / ob_low if ob_low > 0 else 0
+        if ob_range < S5_OB_MIN_RANGE_PCT:
+            return "HOLD", 0.0, 0.0, 0.0, ob_low, ob_high, (
+                f"Daily EMA ✅ | 1H BOS ✅ | Bearish OB too narrow "
+                f"({ob_range*100:.2f}% < {S5_OB_MIN_RANGE_PCT*100:.1f}%)"
+            )
+
+        # FVG confluence (opt-in): require an unfilled bearish FVG near the OB
+        if S5_SMC_FVG_FILTER:
+            fvg = find_fvg(m15_df, direction="BEAR", lookback=S5_SMC_FVG_LOOKBACK)
+            if fvg is None or fvg[1] > ob_high:
+                return "HOLD", 0.0, 0.0, 0.0, ob_low, ob_high, (
+                    f"Daily EMA ✅ | 1H BOS ✅ | Bearish OB ✅ | No BEAR FVG below OB — skipping"
+                )
 
         # OB touch: any recent candle's high rallied into the OB zone
         recent = m15_df.iloc[-S5_CHOCH_LOOKBACK:]
@@ -1195,13 +1270,7 @@ def evaluate_s5(
         sl_price      = ob_high * (1 + S5_SL_BUFFER_PCT)
         current_close = float(m15_df["close"].iloc[-1])
 
-        if current_close >= entry_trigger:
-            return "HOLD", entry_trigger, sl_price, 0.0, ob_low, ob_high, (
-                f"Daily EMA ✅ | 1H BOS ✅ | Bearish OB ✅ | ChoCH ✅ | "
-                f"Waiting entry < {entry_trigger:.5f} (now {current_close:.5f})"
-            )
-
-        # Structural TP — nearest swing low below entry on the 15m chart
+        # Structural TP — compute before entry-trigger check so PENDING signals carry full data
         tp_price = find_swing_low_target(m15_df, entry_trigger, lookback=S5_SWING_LOOKBACK)
         if tp_price is None:
             return "HOLD", entry_trigger, sl_price, 0.0, ob_low, ob_high, (
@@ -1214,6 +1283,12 @@ def evaluate_s5(
         if rr < S5_MIN_RR:
             return "HOLD", entry_trigger, sl_price, tp_price, ob_low, ob_high, (
                 f"S5 ChoCH ✅ but R:R={rr:.1f} < {S5_MIN_RR} (TP={tp_price:.5f}) — skip"
+            )
+
+        if current_close >= entry_trigger:
+            return "PENDING_SHORT", entry_trigger, sl_price, tp_price, ob_low, ob_high, (
+                f"Daily EMA ✅ | 1H BOS ✅ | Bearish OB ✅ | ChoCH ✅ | R:R={rr:.1f} | "
+                f"⏳ Waiting entry < {entry_trigger:.5f} (now {current_close:.5f})"
             )
 
         logger.info(

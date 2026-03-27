@@ -8,7 +8,7 @@ Strategy 1: MTF RSI Breakout (ADX trend filter, 1H break, 3m RSI+coil+breakout)
 Strategy 2: 30-Day Breakout + 3m Consolidation (long candle, squeeze, 3m coil+break)
 """
 
-import time, signal, sys, logging, csv, os
+import time, signal, sys, logging, csv, os, threading
 from datetime import datetime, timezone
 
 import config
@@ -121,6 +121,9 @@ class MTFBot:
         self.last_scan_time  = 0
         self.qualified_pairs : list[str] = []
         self.sentiment       = None
+        # Entry watcher — pending signals waiting for price trigger
+        self.pending_signals: dict[str, dict] = {}
+        self._trade_lock = threading.Lock()
 
         st.reset()
         st.set_status("RUNNING")
@@ -175,6 +178,9 @@ class MTFBot:
         signal.signal(signal.SIGINT,  self.stop)
         signal.signal(signal.SIGTERM, self.stop)
         logger.info("▶️  Running...\n")
+        t = threading.Thread(target=self._entry_watcher_loop, daemon=True, name="entry-watcher")
+        t.start()
+        logger.info("🔍 Entry watcher started (polling every 4s)")
 
         while self.running:
             try:
@@ -484,6 +490,9 @@ class MTFBot:
             elif s5_sig == "SHORT":
                 _s5_sup = find_nearest_support(m15_df, close, lookback=300)
                 s5_sr_pct = round((close - _s5_sup) / close * 100, 1) if _s5_sup else None
+            elif s5_sig in ("PENDING_LONG", "PENDING_SHORT") and symbol not in self.pending_signals:
+                self._queue_s5_pending(symbol, s5_sig, s5_trigger, s5_sl, s5_tp,
+                                       s5_ob_low, s5_ob_high, m15_df)
 
         # ── Strategy 4 ───────────────────────────────────────────── #
         s4_sig, s4_rsi, s4_trigger, s4_sl, s4_body_pct, s4_rsi_peak, s4_div, s4_div_str, s4_reason = "HOLD", 50.0, 0.0, 0.0, 0.0, 0.0, False, "", ""
@@ -501,7 +510,7 @@ class MTFBot:
 
         st.update_pair_state(symbol, {
             "rsi": rsi_val, "htf_bull": htf_bull, "htf_bear": htf_bear,
-            "signal": s1_sig if s1_sig != "HOLD" else (s2_sig if s2_sig != "HOLD" else (s3_sig if s3_sig != "HOLD" else (s4_sig if s4_sig != "HOLD" else s5_sig))),
+            "signal": s1_sig if s1_sig != "HOLD" else (s2_sig if s2_sig != "HOLD" else (s3_sig if s3_sig != "HOLD" else (s4_sig if s4_sig != "HOLD" else ("PENDING" if s5_sig.startswith("PENDING") else s5_sig)))),
             "s1_signal": s1_sig,
             "s2_signal": s2_sig,
             "price": close,
@@ -515,7 +524,7 @@ class MTFBot:
             "s4_reason": s4_reason,
             "s4_signal": s4_sig,
             "s5_reason": s5_reason,
-            "s5_signal": s5_sig,
+            "s5_signal": s5_sig if s5_sig in ("LONG", "SHORT", "HOLD") else "PENDING",
             "s5_ob_low":  round(s5_ob_low,  8) if s5_ob_low  else None,
             "s5_ob_high": round(s5_ob_high, 8) if s5_ob_high else None,
             "s5_entry_trigger": round(s5_trigger, 8) if s5_trigger else None,
@@ -524,7 +533,7 @@ class MTFBot:
             "s5_sr_pct":  s5_sr_pct,
             "rsi_ok": rsi_ok,
             "adx": round(adx_val, 1), "trend_ok": trend_ok,
-            "strategy": "S1" if s1_sig != "HOLD" else ("S2" if s2_sig != "HOLD" else ("S3" if s3_sig != "HOLD" else ("S4" if s4_sig != "HOLD" else ("S5" if s5_sig != "HOLD" else "S1")))),
+            "strategy": "S1" if s1_sig != "HOLD" else ("S2" if s2_sig != "HOLD" else ("S3" if s3_sig != "HOLD" else ("S4" if s4_sig != "HOLD" else ("S5" if s5_sig not in ("HOLD", "") else "S1")))),
             "s2_daily_rsi": s2_rsi,
             "s2_big_candle": s2_rsi > 0 and ("big_candle" in s2_reason or "Big candle" in s2_reason or s2_bh > 0),
             "s2_coiling":    s2_bl > 0 and s2_bh > 0,
@@ -771,7 +780,7 @@ class MTFBot:
                 return True
 
         # ── Execute S5 ────────────────────────────────────────────── #
-        if s5_sig in ("LONG", "SHORT") and s5_trigger > 0:
+        if s5_sig in ("LONG", "SHORT") and s5_trigger > 0 and symbol not in self.active_positions:
             mark_now = tr.get_mark_price(symbol)
 
             if s5_sig == "LONG":
@@ -897,6 +906,169 @@ class MTFBot:
                 return True
 
         return False
+
+    # ── Entry Watcher ─────────────────────────────────────────────── #
+
+    def _queue_s5_pending(self, symbol: str, sig: str, trigger: float, sl: float,
+                          tp: float, ob_low: float, ob_high: float, m15_df) -> None:
+        """Pre-validate an S5 PENDING signal (S/R + Claude) and add to pending_signals."""
+        side = "LONG" if sig == "PENDING_LONG" else "SHORT"
+        # S/R clearance check using already-fetched m15_df
+        nearest = None
+        clearance = None
+        if side == "LONG":
+            nearest = find_nearest_resistance(m15_df, trigger, lookback=300)
+            if nearest is not None:
+                clearance = (nearest - trigger) / trigger
+                if clearance < config_s5.S5_MIN_SR_CLEARANCE:
+                    logger.info(
+                        f"[S5][{symbol}] ⛔ PENDING: resistance {nearest:.5f} "
+                        f"only {clearance*100:.1f}% away — not queuing"
+                    )
+                    return
+        else:
+            nearest = find_nearest_support(m15_df, trigger, lookback=300)
+            if nearest is not None:
+                clearance = (trigger - nearest) / trigger
+                if clearance < config_s5.S5_MIN_SR_CLEARANCE:
+                    logger.info(
+                        f"[S5][{symbol}] ⛔ PENDING: support {nearest:.5f} "
+                        f"only {clearance*100:.1f}% away — not queuing"
+                    )
+                    return
+        sr_pct = round(clearance * 100, 1) if clearance is not None else None
+        # Claude filter
+        if config.CLAUDE_FILTER_ENABLED:
+            sr_str = f"{sr_pct}%" if sr_pct is not None else "none found"
+            _cd = claude_approve("S5", symbol, {
+                "OB zone":            f"{ob_low:.5f}–{ob_high:.5f}",
+                "S/R clearance (15m)": sr_str,
+                "Sentiment":           self.sentiment.direction if self.sentiment else "?",
+                "Entry trigger":       round(trigger, 5),
+                "SL":                  round(sl, 5),
+            })
+            if not _cd["approved"]:
+                logger.info(f"[S5][{symbol}] 🤖 PENDING rejected: {_cd['reason']}")
+                st.add_scan_log(f"[S5][{symbol}] 🤖 PENDING rejected: {_cd['reason']}", "WARN")
+                return
+        rr = round((tp - trigger) / (trigger - sl), 2) if side == "LONG" and tp > trigger > sl > 0 \
+             else round((trigger - tp) / (sl - trigger), 2) if 0 < tp < trigger < sl else None
+        self.pending_signals[symbol] = {
+            "strategy": "S5", "side": side,
+            "trigger": trigger, "sl": sl, "tp": tp,
+            "ob_low": ob_low, "ob_high": ob_high,
+            "rr": rr, "sr_clearance_pct": sr_pct,
+            "sentiment": self.sentiment.direction if self.sentiment else "?",
+            "expires": time.time() + 4 * 3600,
+        }
+        logger.info(
+            f"[S5][{symbol}] 🕐 PENDING {side} queued | "
+            f"trigger={trigger:.5f} | SL={sl:.5f} | TP={tp:.5f} | R:R={rr}"
+        )
+        st.add_scan_log(
+            f"[S5][{symbol}] 🕐 PENDING {side} | trigger={trigger:.5f} | TP={tp:.5f}", "SIGNAL"
+        )
+
+    def _entry_watcher_loop(self) -> None:
+        """Background thread — polls mark prices for pending signals every 4s."""
+        while self.running:
+            if self.pending_signals:
+                try:
+                    balance = tr.get_usdt_balance()
+                except Exception:
+                    time.sleep(4)
+                    continue
+                for symbol in list(self.pending_signals):
+                    sig = self.pending_signals.get(symbol)
+                    if not sig:
+                        continue
+                    # Expire stale signals
+                    if time.time() > sig["expires"]:
+                        logger.info(f"[S5][{symbol}] ⏰ Pending signal expired — removing")
+                        st.add_scan_log(f"[S5][{symbol}] ⏰ Pending expired", "INFO")
+                        self.pending_signals.pop(symbol, None)
+                        continue
+                    # Already in a trade
+                    if symbol in self.active_positions:
+                        self.pending_signals.pop(symbol, None)
+                        continue
+                    try:
+                        mark = tr.get_mark_price(symbol)
+                    except Exception:
+                        continue
+                    side = sig["side"]
+                    trigger = sig["trigger"]
+                    triggered = (side == "LONG"  and mark >= trigger) or \
+                                (side == "SHORT" and mark <= trigger)
+                    too_far   = (side == "LONG"  and mark > trigger * (1 + config_s5.S5_MAX_ENTRY_BUFFER)) or \
+                                (side == "SHORT" and mark < trigger * (1 - config_s5.S5_MAX_ENTRY_BUFFER))
+                    if too_far:
+                        logger.info(
+                            f"[S5][{symbol}] ⏸️ Entry missed — "
+                            f"price {mark:.5f} >{config_s5.S5_MAX_ENTRY_BUFFER*100:.0f}% past trigger"
+                        )
+                        self.pending_signals.pop(symbol, None)
+                        continue
+                    if triggered:
+                        with self._trade_lock:
+                            if symbol in self.active_positions:
+                                self.pending_signals.pop(symbol, None)
+                                continue
+                            if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
+                                continue
+                            if st.is_pair_paused(symbol):
+                                continue
+                            self._fire_pending(symbol, sig, mark, balance)
+                        self.pending_signals.pop(symbol, None)
+            time.sleep(4)
+
+    def _fire_pending(self, symbol: str, sig: dict, mark_now: float, balance: float) -> None:
+        """Open a trade for a triggered pending signal. Called under _trade_lock."""
+        side = sig["side"]
+        logger.info(
+            f"[S5][{symbol}] 🎯 Entry watcher triggered {side} @ {mark_now:.5f} "
+            f"(trigger={sig['trigger']:.5f})"
+        )
+        if side == "LONG":
+            trade = tr.open_long(
+                symbol,
+                sl_floor       = sig["sl"],
+                leverage       = config_s5.S5_LEVERAGE,
+                trade_size_pct = config_s5.S5_TRADE_SIZE_PCT,
+                use_s5_exits   = True,
+                tp_price_abs   = sig["tp"],
+            )
+        else:
+            trade = tr.open_short(
+                symbol,
+                sl_floor       = sig["sl"],
+                leverage       = config_s5.S5_LEVERAGE,
+                trade_size_pct = config_s5.S5_TRADE_SIZE_PCT,
+                use_s5_exits   = True,
+                tp_price_abs   = sig["tp"],
+            )
+        trade["strategy"]              = "S5"
+        trade["snap_entry_trigger"]    = round(sig["trigger"], 8)
+        trade["snap_sl"]               = round(sig["sl"], 8)
+        trade["snap_rr"]               = sig.get("rr")
+        trade["snap_sentiment"]        = sig.get("sentiment", "?")
+        trade["snap_sr_clearance_pct"] = sig.get("sr_clearance_pct")
+        trade["snap_s5_ob_low"]        = round(sig["ob_low"],  8) if sig.get("ob_low")  else None
+        trade["snap_s5_ob_high"]       = round(sig["ob_high"], 8) if sig.get("ob_high") else None
+        trade["snap_s5_tp"]            = round(sig["tp"], 8) if sig.get("tp") else None
+        _log_trade(f"S5_{side}", trade)
+        st.add_open_trade(trade)
+        if PAPER_MODE:
+            tr.tag_strategy(symbol, "S5")
+        self.active_positions[symbol] = {
+            "side": side, "strategy": "S5",
+            "box_high": sig["trigger"] if side == "LONG" else sig["sl"],
+            "box_low":  sig["sl"]      if side == "LONG" else sig["trigger"],
+        }
+        st.add_scan_log(
+            f"[S5][{symbol}] 🎯 Entry watcher: {side} @ {mark_now:.5f} | "
+            f"SL={sig['sl']:.5f} | TP={sig['tp']:.5f}", "SIGNAL"
+        )
 
 
 if __name__ == "__main__":

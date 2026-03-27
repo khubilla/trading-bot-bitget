@@ -62,6 +62,19 @@ CURRENT_PARAMS = {
         "S4_TRAILING_TRIGGER_PCT":  "10%",
         "S4_TRAILING_RANGE_PCT":    "10%",
     },
+    "S5": {
+        "S5_HTF_BOS_LOOKBACK":   10,
+        "S5_OB_LOOKBACK":        50,
+        "S5_OB_MIN_IMPULSE":     "1%",
+        "S5_CHOCH_LOOKBACK":     20,
+        "S5_ENTRY_BUFFER_PCT":   "0.5%",
+        "S5_MAX_ENTRY_BUFFER":   "4%",
+        "S5_SL_BUFFER_PCT":      "0.3%",
+        "S5_MIN_SR_CLEARANCE":   "10%",
+        "S5_MIN_RR":             2.0,
+        "S5_SWING_LOOKBACK":     50,
+        "S5_TRAIL_RANGE_PCT":    "5%",
+    },
 }
 
 # Columns to include in the table sent to Claude, per strategy
@@ -75,6 +88,9 @@ STRATEGY_COLUMNS = {
     "S4": ["result", "pnl_pct", "exit_reason", "snap_rsi_peak",
            "snap_spike_body_pct", "snap_rsi_div", "snap_sentiment",
            "snap_sr_clearance_pct"],
+    "S5": ["result", "pnl_pct", "exit_reason", "snap_rr",
+           "snap_s5_ob_low", "snap_s5_ob_high", "snap_s5_tp",
+           "snap_sentiment", "snap_sr_clearance_pct"],
 }
 
 # ── Trade loader ──────────────────────────────────────────────────── #

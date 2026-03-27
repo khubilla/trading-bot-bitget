@@ -369,6 +369,12 @@ class MTFBot:
             s4_sig, s4_rsi, s4_trigger, s4_sl, s4_body_pct, s4_rsi_peak, s4_div, s4_div_str, s4_reason = evaluate_s4(symbol, daily_df)
             logger.info(f"[S4][{symbol}] {s4_reason}")
 
+        # ── S/R Clearance (for dashboard display + entry guard) ──── #
+        _sr_res     = find_nearest_resistance(daily_df, close)
+        _sr_sup     = find_nearest_support(daily_df, close)
+        sr_res_pct  = round((_sr_res - close) / close * 100, 1) if _sr_res else None
+        sr_sup_pct  = round((close - _sr_sup) / close * 100, 1) if _sr_sup else None
+
         st.update_pair_state(symbol, {
             "rsi": rsi_val, "htf_bull": htf_bull, "htf_bear": htf_bear,
             "signal": s1_sig if s1_sig != "HOLD" else (s2_sig if s2_sig != "HOLD" else (s3_sig if s3_sig != "HOLD" else s4_sig)),
@@ -390,6 +396,8 @@ class MTFBot:
             "s2_daily_rsi": s2_rsi,
             "s2_big_candle": s2_rsi > 0 and ("big_candle" in s2_reason or "Big candle" in s2_reason or s2_bh > 0),
             "s2_coiling":    s2_bl > 0 and s2_bh > 0,
+            "sr_resistance_pct": sr_res_pct,
+            "sr_support_pct":    sr_sup_pct,
         })
 
         # ── Min balance check ─────────────────────────────────────── #

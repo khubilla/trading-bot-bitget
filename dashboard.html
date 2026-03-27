@@ -1176,8 +1176,9 @@ function signalScore(sym, ps, tab) {
     const bc      = ps.s2_big_candle;
     const rsiOk   = (ps.s2_daily_rsi || 0) > 70;
     const coiling = ps.s2_coiling;
+    const srClear = ps.sr_resistance_pct != null && ps.sr_resistance_pct >= 15;
     const active  = (ps.s2_signal || 'HOLD') !== 'HOLD';
-    return (bc ? 1 : 0) + (bc && rsiOk ? 1 : 0) + (bc && rsiOk && coiling ? 1 : 0) + (active ? 10 : 0);
+    return (bc ? 1 : 0) + (bc && rsiOk ? 1 : 0) + (bc && rsiOk && coiling ? 1 : 0) + (srClear ? 1 : 0) + (active ? 10 : 0);
   }
   if (tab === 's3') {
     const reason  = ps.s3_reason || '';
@@ -1185,7 +1186,8 @@ function signalScore(sym, ps, tab) {
     const emaOk   = reason.includes('EMA aligned') || reason.includes('EMA10>20>50>200') || sig === 'LONG';
     const stochOs = reason.includes('Stoch oversold') || sig === 'LONG';
     const uptick  = reason.includes('Uptick breakout') || reason.includes('uptick') || sig === 'LONG';
-    return (emaOk ? 1 : 0) + (stochOs ? 1 : 0) + (uptick ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
+    const srClear = ps.sr_resistance_pct != null && ps.sr_resistance_pct >= 15;
+    return (emaOk ? 1 : 0) + (stochOs ? 1 : 0) + (uptick ? 1 : 0) + (srClear ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
   }
   if (tab === 's4') {
     const reason  = ps.s4_reason || '';
@@ -1193,7 +1195,8 @@ function signalScore(sym, ps, tab) {
     const spike   = reason.includes('spike') && !reason.includes('No spike');
     const rsiHot  = reason.includes('RSI peaked') || sig === 'SHORT';
     const div     = reason.includes('RSI div') || sig === 'SHORT';
-    return (spike ? 1 : 0) + (spike && rsiHot ? 1 : 0) + (spike && rsiHot && div ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
+    const srClear = ps.sr_support_pct != null && ps.sr_support_pct >= 15;
+    return (spike ? 1 : 0) + (spike && rsiHot ? 1 : 0) + (spike && rsiHot && div ? 1 : 0) + (srClear ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
   }
   return 0;
 }
@@ -1229,6 +1232,9 @@ function s2CardHTML(sym, ps) {
   const bcClass  = bigCandle ? 'pass' : 'fail';
   const rsiClass = !bigCandle ? 'muted' : rsiOk ? 'pass' : 'fail';
   const coilClass= !bigCandle || !rsiOk ? 'muted' : coiling ? 'pass' : 'fail';
+  const srPct    = ps.sr_resistance_pct;
+  const srClass  = srPct == null ? 'muted' : srPct >= 15 ? 'pass' : srPct >= 10 ? 'warn' : 'fail';
+  const srLabel  = srPct == null ? '—' : `${srPct.toFixed(1)}% away`;
   const reasonClass = sig !== 'HOLD' ? 'signal' : coiling ? 'active' : bigCandle ? 'active' : '';
   const age = ps.updated_at ? (() => {
     const sec = Math.floor((Date.now() - new Date(ps.updated_at).getTime()) / 1000);
@@ -1262,6 +1268,10 @@ function s2CardHTML(sym, ps) {
           <span class="check-label">Coiling</span>
           <span class="check-val ${coilClass}">${!bigCandle || !rsiOk ? '—' : coiling ? 'Coiling ✓' : 'Not yet'}</span>
         </div>
+        <div class="pair-check">
+          <span class="check-label">Resistance</span>
+          <span class="check-val ${srClass}">${srLabel}</span>
+        </div>
       </div>
       <div class="pair-reason ${reasonClass}">${reason.slice(0,60)} · ${age}</div>
     </div>`;
@@ -1283,6 +1293,9 @@ function s3CardHTML(sym, ps) {
   const adxClass   = !emaOk ? 'muted' : adxOk ? 'pass' : 'fail';
   const stochClass = !emaOk || !adxOk ? 'muted' : stochOs ? 'pass' : 'fail';
   const uptickClass= !stochOs ? 'muted' : uptickOk ? 'pass' : 'warn';
+  const srPct      = ps.sr_resistance_pct;
+  const srClass    = srPct == null ? 'muted' : srPct >= 15 ? 'pass' : srPct >= 10 ? 'warn' : 'fail';
+  const srLabel    = srPct == null ? '—' : `${srPct.toFixed(1)}% away`;
   const reasonClass = sig !== 'HOLD' ? 'signal' : stochOs ? 'active' : emaOk ? 'active' : '';
   const age = ps.updated_at ? (() => {
     const sec = Math.floor((Date.now() - new Date(ps.updated_at).getTime()) / 1000);
@@ -1316,6 +1329,10 @@ function s3CardHTML(sym, ps) {
           <span class="check-label">Uptick break</span>
           <span class="check-val ${uptickClass}">${!stochOs ? '—' : uptickOk ? 'Triggered ✓' : 'Watching…'}</span>
         </div>
+        <div class="pair-check">
+          <span class="check-label">Resistance</span>
+          <span class="check-val ${srClass}">${srLabel}</span>
+        </div>
       </div>
       <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').slice(0,60)} · ${age}</div>
     </div>`;
@@ -1332,6 +1349,9 @@ function s4CardHTML(sym, ps) {
   const spikeClass= spikeOk ? 'pass' : 'fail';
   const rsiClass  = !spikeOk ? 'muted' : rsiHot ? 'pass' : 'fail';
   const divClass  = !spikeOk || !rsiHot ? 'muted' : div_ok ? 'pass' : 'warn';
+  const srPct     = ps.sr_support_pct;
+  const srClass   = srPct == null ? 'muted' : srPct >= 15 ? 'pass' : srPct >= 10 ? 'warn' : 'fail';
+  const srLabel   = srPct == null ? '—' : `${srPct.toFixed(1)}% away`;
   const reasonClass = sig !== 'HOLD' ? 'signal' : rsiHot ? 'active' : spikeOk ? 'active' : '';
   const age = ps.updated_at ? (() => {
     const sec = Math.floor((Date.now() - new Date(ps.updated_at).getTime()) / 1000);
@@ -1357,6 +1377,10 @@ function s4CardHTML(sym, ps) {
         <div class="pair-check">
           <span class="check-label">RSI Div</span>
           <span class="check-val ${divClass}">${!spikeOk || !rsiHot ? '—' : div_ok ? 'Detected ✓' : 'Not detected'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">Support</span>
+          <span class="check-val ${srClass}">${srLabel}</span>
         </div>
       </div>
       <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').slice(0,60)} · ${age}</div>

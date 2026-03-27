@@ -207,6 +207,7 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
         s4_entry_trigger = None
         s4_sl_price      = None
         s4_rsi_peak_val  = None
+        s4_base_support  = None   # open of spike candle = pre-pump base (acts as S/R support)
         if is_daily:
             try:
                 _, _, entry_t, sl_p, _, rsi_pk, _, _, _ = evaluate_s4(symbol, df_full)
@@ -216,6 +217,21 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
                     s4_sl_price = round(sl_p, max(2, price_decimals + 1))
                 if rsi_pk > 0:
                     s4_rsi_peak_val = round(rsi_pk, 1)
+            except Exception:
+                pass
+            # Pre-pump base support: open of the biggest spike candle in lookback
+            try:
+                from config_s4 import S4_BIG_CANDLE_BODY_PCT, S4_BIG_CANDLE_LOOKBACK
+                lookback_df = df_full.iloc[-(S4_BIG_CANDLE_LOOKBACK + 1):-1]
+                best_bp, best_open = 0.0, None
+                for _, row in lookback_df.iterrows():
+                    o, c = float(row["open"]), float(row["close"])
+                    bp = abs(c - o) / o if o else 0
+                    if bp >= S4_BIG_CANDLE_BODY_PCT and bp > best_bp:
+                        best_bp  = bp
+                        best_open = o
+                if best_open:
+                    s4_base_support = round(best_open, max(2, price_decimals))
             except Exception:
                 pass
 
@@ -340,6 +356,7 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
             "s4_entry_trigger": s4_entry_trigger,
             "s4_sl_price":      s4_sl_price,
             "s4_rsi_peak":      s4_rsi_peak_val,
+            "s4_base_support":  s4_base_support,
             # S/R levels from chart timeframe
             "sr_resistance":    round(sr_resistance, max(2, price_decimals)) if sr_resistance else None,
             "sr_support":       round(sr_support,    max(2, price_decimals)) if sr_support    else None,

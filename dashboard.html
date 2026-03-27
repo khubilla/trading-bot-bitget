@@ -1812,6 +1812,12 @@ async function loadChart(symbol, interval, fitOnLoad = false) {
             axisLabelVisible: true, title: '✕ SL',
           }));
         }
+        if (data.s4_base_support) {
+          candlePriceLines.push(candleSeries.createPriceLine({
+            price: data.s4_base_support, color: '#4a9eff', lineWidth: 1, lineStyle: 2,
+            axisLabelVisible: true, title: 'S — pre-pump base',
+          }));
+        }
         // RSI thresholds for S4
         rsiPriceLines.push(rsiLineSeries.createPriceLine({ price: 75, color: '#ff4d6a', lineWidth: 1, lineStyle: 1, title: 'S4 OB', axisLabelVisible: true }));
         rsiPriceLines.push(rsiLineSeries.createPriceLine({ price: 70, color: '#f0a500', lineWidth: 1, lineStyle: 2, title: '70',    axisLabelVisible: true }));
@@ -1872,7 +1878,8 @@ async function loadChart(symbol, interval, fitOnLoad = false) {
         axisLabelVisible: true, title: 'R',
       }));
     }
-    if (data.sr_support) {
+    // S4 uses its own pre-pump base support line (drawn above); skip generic for S4
+    if (data.sr_support && activeTab !== 's4') {
       candlePriceLines.push(candleSeries.createPriceLine({
         price: data.sr_support, color: '#4a9eff', lineWidth: 1, lineStyle: 2,
         axisLabelVisible: true, title: 'S',

@@ -996,8 +996,18 @@ class MTFBot:
         )
 
     def _entry_watcher_loop(self) -> None:
-        """Background thread — polls mark prices for pending signals every 4s."""
+        """Background thread — polls mark prices every 4s for:
+        1. Pending S5 signals waiting for entry trigger
+        2. (Paper only) Active position SL/TP simulation — keeps exit prices accurate
+        """
         while self.running:
+            # Paper position monitor — run _check_exit at 4s resolution
+            if PAPER_MODE and self.active_positions:
+                try:
+                    tr.get_all_open_positions()   # internally calls _check_exit for each position
+                except Exception as e:
+                    logger.debug(f"Paper position poll error: {e}")
+
             if self.pending_signals:
                 try:
                     balance = tr.get_usdt_balance()

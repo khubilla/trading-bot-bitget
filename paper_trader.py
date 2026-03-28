@@ -118,11 +118,12 @@ def get_all_open_positions() -> dict:
             "entry_price":    entry,
             "unrealised_pnl": round(upnl, 6),
             # Extra fields for dashboard resume (paper only)
-            "sl":       pos.get("sl"),
-            "tp":       pos.get("tp"),
-            "margin":   pos.get("margin"),
-            "leverage": pos.get("leverage"),
-            "strategy": pos.get("strategy", "UNKNOWN"),
+            "sl":        pos.get("sl"),
+            "tp":        pos.get("tp"),
+            "margin":    pos.get("margin"),
+            "leverage":  pos.get("leverage"),
+            "strategy":  pos.get("strategy", "UNKNOWN"),
+            "opened_at": pos.get("opened_at"),
         }
     return result
 
@@ -301,6 +302,10 @@ def _check_exit(state: dict, sym: str, mark: float):
         if pos["use_trailing"]:
             if mark > pos.get("trail_peak", 0):
                 pos["trail_peak"] = mark
+            # Always sync effective SL from trail_peak once trailing is active
+            # (covers bounce case where trail_peak doesn't move but sl was never written)
+            if pos.get("trail_active") and pos.get("trail_peak"):
+                pos["sl"] = round(pos["trail_peak"] * (1 - pos["trail_range"] / 100), 8)
 
         # 1. SL check (full position)
         if mark <= pos["sl"]:
@@ -333,6 +338,9 @@ def _check_exit(state: dict, sym: str, mark: float):
         if pos["use_trailing"]:
             if mark < pos.get("trail_peak", mark):
                 pos["trail_peak"] = mark
+            # Always sync effective SL from trail_peak once trailing is active
+            if pos.get("trail_active") and pos.get("trail_peak"):
+                pos["sl"] = round(pos["trail_peak"] * (1 + pos["trail_range"] / 100), 8)
 
         # 1. SL check (full position)
         if mark >= pos["sl"]:
@@ -544,6 +552,8 @@ def _record_partial(state: dict, sym: str, exit_price: float, qty: float):
 
     # Store partial pnl on the position so _close_full can compute combined P/L
     pos["partial_pnl"] = pos.get("partial_pnl", 0.0) + pnl
+    # Reduce margin to reflect remaining position size
+    pos["margin"] = round(pos["original_margin"] - margin_used, 4)
 
     state.setdefault("partial_closes", []).append({
         "symbol":   sym,

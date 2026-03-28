@@ -8,7 +8,7 @@ Strategy 1: MTF RSI Breakout (ADX trend filter, 1H break, 3m RSI+coil+breakout)
 Strategy 2: 30-Day Breakout + 3m Consolidation (long candle, squeeze, 3m coil+break)
 """
 
-import time, signal, sys, logging, csv, os, threading
+import time, signal, sys, logging, csv, os, threading, uuid
 from datetime import datetime, timezone
 
 import config
@@ -26,6 +26,7 @@ from strategy import (
     check_daily_trend,
     find_nearest_resistance, find_nearest_support, find_spike_base,
     find_bullish_ob, find_bearish_ob,
+    find_swing_high_target, find_swing_low_target,
 )
 from claude_filter import claude_approve
 PAPER_MODE = "--paper" in sys.argv
@@ -52,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 
 _TRADE_FIELDS = [
-    "timestamp", "action", "symbol", "side", "qty", "entry", "sl", "tp",
+    "timestamp", "trade_id", "action", "symbol", "side", "qty", "entry", "sl", "tp",
     "box_low", "box_high", "leverage", "margin", "tpsl_set", "strategy",
     # S1 snapshot
     "snap_rsi", "snap_adx", "snap_htf", "snap_coil", "snap_box_range_pct", "snap_sentiment",
@@ -67,7 +68,7 @@ _TRADE_FIELDS = [
     # S/R clearance at entry (S2/S3/S4/S5)
     "snap_sr_clearance_pct",
     # Close fields
-    "result", "pnl_pct", "exit_reason",
+    "result", "pnl", "pnl_pct", "exit_reason",
 ]
 
 def _log_trade(action: str, details: dict):
@@ -153,15 +154,16 @@ class MTFBot:
                 }
                 logger.warning(f"⚠️  Resumed: {sym} {pos['side']} qty={pos['qty']} [{strategy}]")
                 st.add_open_trade({
-                    "symbol":   sym,
-                    "side":     pos["side"],
-                    "qty":      pos["qty"],
-                    "entry":    pos["entry_price"],
-                    "sl":       pos.get("sl", "?"),
-                    "tp":       pos.get("tp", "?"),
-                    "margin":   pos.get("margin", 0),
-                    "leverage": pos.get("leverage", 0),
-                    "strategy": strategy,
+                    "symbol":    sym,
+                    "side":      pos["side"],
+                    "qty":       pos["qty"],
+                    "entry":     pos["entry_price"],
+                    "sl":        pos.get("sl", "?"),
+                    "tp":        pos.get("tp", "?"),
+                    "margin":    pos.get("margin", 0),
+                    "leverage":  pos.get("leverage", 0),
+                    "strategy":  strategy,
+                    "opened_at": pos.get("opened_at"),  # preserve original open time
                 })
             if existing:
                 st.add_scan_log(f"Resumed {len(existing)} position(s)", "WARN")
@@ -230,10 +232,12 @@ class MTFBot:
             if PAPER_MODE:
                 for pc in tr.drain_partial_closes():
                     _log_trade(f"{pc['strategy']}_PARTIAL", {
+                        "trade_id": self.active_positions.get(pc["symbol"], {}).get("trade_id", ""),
                         "symbol": pc["symbol"], "side": pc["side"],
                         "pnl": pc["pnl"], "result": "WIN" if pc["pnl"] >= 0 else "LOSS",
                         "pnl_pct": pc["pnl_pct"], "exit_reason": "PARTIAL_TP",
                     })
+                    st.update_open_trade_margin(pc["symbol"], pc["margin"])
                     logger.info(f"[{pc['strategy']}][{pc['symbol']}] 📊 Partial logged: PnL={pc['pnl']:+.4f} ({pc['pnl_pct']:+.1f}%)")
 
             # Sync pnl + detect closed positions
@@ -241,6 +245,8 @@ class MTFBot:
                 if sym in exchange_positions:
                     pos = exchange_positions[sym]
                     st.update_open_trade_pnl(sym, pos["unrealised_pnl"])
+                    if PAPER_MODE and pos.get("sl"):
+                        st.update_open_trade_sl(sym, pos["sl"])
                     ap = self.active_positions[sym]
                     logger.info(
                         f"📊 [{ap['strategy']}][{sym}] {pos['side']} | "
@@ -272,11 +278,13 @@ class MTFBot:
                             ap["partial_logged"] = True
                             ap["partial_pnl"]    = round(partial_pnl, 4)
                             _log_trade(f"{ap['strategy']}_PARTIAL", {
+                                "trade_id": ap.get("trade_id", ""),
                                 "symbol": sym, "side": side,
                                 "pnl": round(partial_pnl, 4),
                                 "result": "WIN" if partial_pnl >= 0 else "LOSS",
                                 "pnl_pct": partial_pct, "exit_reason": "PARTIAL_TP",
                             })
+                            st.update_open_trade_margin(sym, half_margin)
                             logger.info(f"[{ap['strategy']}][{sym}] 📊 Live partial logged: PnL≈{partial_pnl:+.4f} ({partial_pct:+.1f}%)")
                     # Scale-in check (S2/S4 only)
                     if ap.get("scale_in_pending") and time.time() >= ap["scale_in_after"]:
@@ -296,6 +304,11 @@ class MTFBot:
                                     tr.scale_in_short(sym, remaining, config_s4.S4_LEVERAGE)
                                 logger.info(f"[{ap['strategy']}][{sym}] ✅ Scale-in +{remaining*100:.0f}% @ {mark_now:.5f}")
                                 st.add_scan_log(f"[{ap['strategy']}][{sym}] Scale-in executed @ {mark_now:.5f}", "INFO")
+                                _log_trade(f"{ap['strategy']}_SCALE_IN", {
+                                    "trade_id": ap.get("trade_id", ""),
+                                    "symbol": sym, "side": ap["side"],
+                                    "entry": round(mark_now, 8),
+                                })
                             else:
                                 logger.info(f"[{ap['strategy']}][{sym}] ⏸️ Scale-in skipped — price {mark_now:.5f} outside entry window")
                             ap["scale_in_pending"] = False
@@ -303,31 +316,84 @@ class MTFBot:
                             logger.error(f"Scale-in error [{sym}]: {e}")
                             ap["scale_in_pending"] = False
 
-                    # S5 Candle Stop — trail SL to prev 15m candle after partial TP
+                    # S5 Structural Swing Trail — trail SL to nearest swing high/low (SMC style)
                     if config_s5.S5_USE_CANDLE_STOPS and ap.get("strategy") == "S5":
+                        try:
+                            cs_df   = tr.get_candles(sym, config_s5.S5_LTF_INTERVAL, limit=config_s5.S5_SWING_LOOKBACK + 5)
+                            mark_s5 = tr.get_mark_price(sym)
+                            if not cs_df.empty and len(cs_df) >= 3:
+                                if ap["side"] == "LONG":
+                                    raw = find_swing_low_target(cs_df, mark_s5, lookback=config_s5.S5_SWING_LOOKBACK)
+                                    swing_sl = raw * (1 - config_s5.S5_SL_BUFFER_PCT) if raw else None
+                                    hold_s   = "long"
+                                else:
+                                    raw = find_swing_high_target(cs_df, mark_s5, lookback=config_s5.S5_SWING_LOOKBACK)
+                                    swing_sl = raw * (1 + config_s5.S5_SL_BUFFER_PCT) if raw else None
+                                    hold_s   = "short"
+                                if swing_sl is not None and tr.update_position_sl(sym, swing_sl, hold_side=hold_s):
+                                    ap["sl"] = swing_sl
+                                    st.update_open_trade_sl(sym, swing_sl)
+                                    logger.info(
+                                        f"[S5][{sym}] 📍 Swing trail: SL → {swing_sl:.5f} "
+                                        f"(swing {'low' if ap['side'] == 'LONG' else 'high'} ±{config_s5.S5_SL_BUFFER_PCT*100:.1f}% buffer)"
+                                    )
+                        except Exception as e:
+                            logger.error(f"Swing trail error [{sym}]: {e}")
+
+                    # S3 Structural Swing Trail — trail SL to nearest 15m swing low from entry
+                    if config_s3.S3_USE_SWING_TRAIL and ap.get("strategy") == "S3":
+                        try:
+                            cs_df   = tr.get_candles(sym, config_s3.S3_LTF_INTERVAL, limit=config_s3.S3_SWING_LOOKBACK + 5)
+                            mark_s3 = tr.get_mark_price(sym)
+                            if not cs_df.empty and len(cs_df) >= 3:
+                                raw = find_swing_low_target(cs_df, mark_s3, lookback=config_s3.S3_SWING_LOOKBACK)
+                                swing_sl = raw * (1 - config_s3.S3_SL_BUFFER_PCT) if raw else None
+                                if swing_sl is not None and tr.update_position_sl(sym, swing_sl, hold_side="long"):
+                                    ap["sl"] = swing_sl
+                                    st.update_open_trade_sl(sym, swing_sl)
+                                    logger.info(f"[S3][{sym}] 📍 Swing trail: SL → {swing_sl:.5f} (nearest 15m swing low)")
+                        except Exception as e:
+                            logger.error(f"[S3] Swing trail error [{sym}]: {e}")
+
+                    # S2 Structural Swing Trail — after partial, trail SL to nearest daily swing low
+                    if config_s2.S2_USE_SWING_TRAIL and ap.get("strategy") == "S2":
                         partial_done = (
                             tr.is_partial_closed(sym) if PAPER_MODE
                             else ap.get("partial_logged", False)
                         )
                         if partial_done:
                             try:
-                                cs_df = tr.get_candles(sym, config_s5.S5_LTF_INTERVAL, limit=5)
+                                cs_df   = tr.get_candles(sym, "1D", limit=config_s2.S2_SWING_LOOKBACK + 5)
+                                mark_s2 = tr.get_mark_price(sym)
                                 if not cs_df.empty and len(cs_df) >= 3:
-                                    prev = cs_df.iloc[-2]   # last completed 15m candle
-                                    if ap["side"] == "LONG":
-                                        candle_sl = float(prev["low"])
-                                        hold_s = "long"
-                                    else:
-                                        candle_sl = float(prev["high"])
-                                        hold_s = "short"
-                                    if tr.update_position_sl(sym, candle_sl, hold_side=hold_s):
-                                        ap["sl"] = candle_sl
-                                        logger.info(
-                                            f"[S5][{sym}] 📍 Candle stop: SL → {candle_sl:.5f} "
-                                            f"(prev 15m {'low' if ap['side'] == 'LONG' else 'high'})"
-                                        )
+                                    raw = find_swing_low_target(cs_df, mark_s2, lookback=config_s2.S2_SWING_LOOKBACK)
+                                    swing_sl = raw * (1 - config_s2.S2_STOP_LOSS_PCT) if raw else None
+                                    if swing_sl is not None and tr.update_position_sl(sym, swing_sl, hold_side="long"):
+                                        ap["sl"] = swing_sl
+                                        st.update_open_trade_sl(sym, swing_sl)
+                                        logger.info(f"[S2][{sym}] 📍 Swing trail: SL → {swing_sl:.5f} (nearest daily swing low)")
                             except Exception as e:
-                                logger.error(f"Candle stop error [{sym}]: {e}")
+                                logger.error(f"[S2] Swing trail error [{sym}]: {e}")
+
+                    # S4 Structural Swing Trail — after partial, trail SL to nearest daily swing high
+                    if config_s4.S4_USE_SWING_TRAIL and ap.get("strategy") == "S4":
+                        partial_done = (
+                            tr.is_partial_closed(sym) if PAPER_MODE
+                            else ap.get("partial_logged", False)
+                        )
+                        if partial_done:
+                            try:
+                                cs_df   = tr.get_candles(sym, "1D", limit=config_s4.S4_SWING_LOOKBACK + 5)
+                                mark_s4 = tr.get_mark_price(sym)
+                                if not cs_df.empty and len(cs_df) >= 3:
+                                    raw = find_swing_high_target(cs_df, mark_s4, lookback=config_s4.S4_SWING_LOOKBACK)
+                                    swing_sl = raw * (1 + config_s4.S4_ENTRY_BUFFER) if raw else None
+                                    if swing_sl is not None and tr.update_position_sl(sym, swing_sl, hold_side="short"):
+                                        ap["sl"] = swing_sl
+                                        st.update_open_trade_sl(sym, swing_sl)
+                                        logger.info(f"[S4][{sym}] 📍 Swing trail: SL → {swing_sl:.5f} (nearest daily swing high)")
+                            except Exception as e:
+                                logger.error(f"[S4] Swing trail error [{sym}]: {e}")
 
                     # Advisory box-break warning
                     try:
@@ -377,6 +443,7 @@ class MTFBot:
                         f"[{ap['strategy']}][{sym}] Closed {result} | PnL={last_pnl:+.4f} USDT", "INFO"
                     )
                     _log_trade(f"{ap['strategy']}_CLOSE", {
+                        "trade_id": ap.get("trade_id", ""),
                         "symbol": sym, "side": ap["side"],
                         "pnl": round(last_pnl, 4), "result": result,
                         "pnl_pct": pnl_pct, "exit_reason": exit_reason,
@@ -615,12 +682,14 @@ class MTFBot:
             trade["snap_coil"]        = is_coil
             trade["snap_box_range_pct"] = round((s1_bh - s1_bl) / s1_bl * 100, 3) if s1_bh and s1_bl else None
             trade["snap_sentiment"]   = self.sentiment.direction
+            trade["trade_id"] = uuid.uuid4().hex[:8]
             _log_trade(f"S1_{s1_sig}", trade)
             st.add_open_trade(trade)
             if PAPER_MODE: tr.tag_strategy(symbol, "S1")
             self.active_positions[symbol] = {
                 "side": s1_sig, "strategy": "S1",
                 "box_high": s1_bh, "box_low": s1_bl,
+                "trade_id": trade["trade_id"],
             }
             return True
 
@@ -664,6 +733,7 @@ class MTFBot:
             trade["snap_box_range_pct"]  = round((s2_bh - s2_bl) / s2_bl * 100, 3) if s2_bh and s2_bl else None
             trade["snap_sentiment"]      = self.sentiment.direction
             trade["snap_sr_clearance_pct"] = round((nearest_res - mark_now) / mark_now * 100, 1) if nearest_res else None
+            trade["trade_id"] = uuid.uuid4().hex[:8]
             _log_trade("S2_LONG", trade)
             st.add_open_trade(trade)
             if PAPER_MODE: tr.tag_strategy(symbol, "S2")
@@ -673,6 +743,7 @@ class MTFBot:
                 "scale_in_pending": True,
                 "scale_in_after": time.time() + 3600,
                 "scale_in_trade_size_pct": config_s2.S2_TRADE_SIZE_PCT,
+                "trade_id": trade["trade_id"],
             }
             return True
 
@@ -722,12 +793,14 @@ class MTFBot:
             ) if s3_trigger and s3_sl and s3_trigger > s3_sl else None
             trade["snap_sentiment"]     = self.sentiment.direction
             trade["snap_sr_clearance_pct"] = s3_sr_resistance_pct
+            trade["trade_id"] = uuid.uuid4().hex[:8]
             _log_trade("S3_LONG", trade)
             st.add_open_trade(trade)
             if PAPER_MODE: tr.tag_strategy(symbol, "S3")
             self.active_positions[symbol] = {
                 "side": "LONG", "strategy": "S3",
                 "box_high": s3_trigger, "box_low": s3_sl,
+                "trade_id": trade["trade_id"],
             }
             return True
 
@@ -792,6 +865,7 @@ class MTFBot:
                 trade["snap_sl"]             = round(s4_sl_actual, 8)
                 trade["snap_sentiment"]      = self.sentiment.direction
                 trade["snap_sr_clearance_pct"] = round((mark_now - spike_base) / mark_now * 100, 1) if spike_base else None
+                trade["trade_id"] = uuid.uuid4().hex[:8]
                 _log_trade("S4_SHORT", trade)
                 st.add_open_trade(trade)
                 if PAPER_MODE: tr.tag_strategy(symbol, "S4")
@@ -802,6 +876,7 @@ class MTFBot:
                     "scale_in_after": time.time() + 3600,
                     "scale_in_trade_size_pct": config_s4.S4_TRADE_SIZE_PCT,
                     "s4_prev_low": prev_low_approx,
+                    "trade_id": trade["trade_id"],
                 }
                 return True
 
@@ -859,12 +934,14 @@ class MTFBot:
                 trade["snap_s5_ob_low"]      = round(s5_ob_low,  8) if s5_ob_low  else None
                 trade["snap_s5_ob_high"]     = round(s5_ob_high, 8) if s5_ob_high else None
                 trade["snap_s5_tp"]          = round(s5_tp, 8) if s5_tp else None
+                trade["trade_id"] = uuid.uuid4().hex[:8]
                 _log_trade("S5_LONG", trade)
                 st.add_open_trade(trade)
                 if PAPER_MODE: tr.tag_strategy(symbol, "S5")
                 self.active_positions[symbol] = {
                     "side": "LONG", "strategy": "S5",
                     "box_high": s5_trigger, "box_low": s5_sl,
+                    "trade_id": trade["trade_id"],
                 }
                 return True
 
@@ -922,12 +999,14 @@ class MTFBot:
                 trade["snap_s5_ob_low"]      = round(s5_ob_low,  8) if s5_ob_low  else None
                 trade["snap_s5_ob_high"]     = round(s5_ob_high, 8) if s5_ob_high else None
                 trade["snap_s5_tp"]          = round(s5_tp, 8) if s5_tp else None
+                trade["trade_id"] = uuid.uuid4().hex[:8]
                 _log_trade("S5_SHORT", trade)
                 st.add_open_trade(trade)
                 if PAPER_MODE: tr.tag_strategy(symbol, "S5")
                 self.active_positions[symbol] = {
                     "side": "SHORT", "strategy": "S5",
                     "box_high": s5_sl, "box_low": s5_trigger,
+                    "trade_id": trade["trade_id"],
                 }
                 return True
 
@@ -1092,6 +1171,7 @@ class MTFBot:
         trade["snap_s5_ob_low"]        = round(sig["ob_low"],  8) if sig.get("ob_low")  else None
         trade["snap_s5_ob_high"]       = round(sig["ob_high"], 8) if sig.get("ob_high") else None
         trade["snap_s5_tp"]            = round(sig["tp"], 8) if sig.get("tp") else None
+        trade["trade_id"] = uuid.uuid4().hex[:8]
         _log_trade(f"S5_{side}", trade)
         st.add_open_trade(trade)
         if PAPER_MODE:
@@ -1100,6 +1180,7 @@ class MTFBot:
             "side": side, "strategy": "S5",
             "box_high": sig["trigger"] if side == "LONG" else sig["sl"],
             "box_low":  sig["sl"]      if side == "LONG" else sig["trigger"],
+            "trade_id": trade["trade_id"],
         }
         st.add_scan_log(
             f"[S5][{symbol}] 🎯 Entry watcher: {side} @ {mark_now:.5f} | "

@@ -88,7 +88,7 @@ Multi-timeframe Smart Money Concepts strategy. Long or short depending on market
 
 **Entry:** 0.5% beyond the OB boundary. When ChoCH fires but price hasn't yet crossed the trigger, the setup is queued as **PENDING** — the entry watcher thread catches the breakout within 3–7 seconds instead of waiting for the next 60s scan cycle.
 
-**Exits (standard SMC):** 50% partial close at 1:1 R:R → SL moves to breakeven → after partial, SL trails to the previous completed 15m candle's low (LONG) or high (SHORT) each scan cycle (`S5_USE_CANDLE_STOPS`). Remaining 50% targets the nearest structural swing high/low on 15m. Fallback 5% trailing stop if no structural target is found.
+**Exits (standard SMC):** SL trails to the previous completed 15m candle's low (LONG) or high (SHORT) from entry each scan cycle (`S5_USE_CANDLE_STOPS`). 50% partial close at 1:1 R:R → SL moves to breakeven. Remaining 50% targets the nearest structural swing high/low on 15m. Fallback 5% trailing stop if no structural target is found.
 
 **Risk:** 10x leverage · 5% of total portfolio · SL 0.3% beyond OB outer wick · minimum 2:1 R:R required
 

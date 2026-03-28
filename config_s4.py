@@ -24,6 +24,8 @@ S4_ENTRY_BUFFER         = 0.01   # entry = prev_low * (1 - 0.01), i.e. 1% below 
 S4_MAX_ENTRY_BUFFER     = 0.04   # max drop from prev_low to still enter; beyond this = missed entry
 S4_TRAILING_TRIGGER_PCT = 0.10   # close 50% when price drops 10% from entry
 S4_TRAILING_RANGE_PCT   = 10     # trailing callback % on remaining 50%
+S4_USE_SWING_TRAIL      = False  # S4 uses exchange-side % trailing stop instead
+S4_SWING_LOOKBACK       = 30     # daily candles to scan for structural swing high
 S4_LEVERAGE             = 10
 S4_TRADE_SIZE_PCT       = 0.05   # 5% of total portfolio as margin
 

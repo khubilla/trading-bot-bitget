@@ -116,10 +116,10 @@ def update_pair_state(symbol: str, data: dict):
 
 def add_open_trade(trade: dict):
     s = _read()
-    trade["opened_at"] = _now()
+    if not trade.get("opened_at"):
+        trade["opened_at"] = _now()
     trade["unrealised_pnl"] = 0.0
     s["open_trades"].append(trade)
-    s["stats"]["total_trades"] += 1
     _write(s)
 
 def update_open_trade_pnl(symbol: str, pnl: float):
@@ -127,6 +127,22 @@ def update_open_trade_pnl(symbol: str, pnl: float):
     for t in s["open_trades"]:
         if t["symbol"] == symbol:
             t["unrealised_pnl"] = round(pnl, 4)
+            break
+    _write(s)
+
+def update_open_trade_margin(symbol: str, new_margin: float):
+    s = _read()
+    for t in s["open_trades"]:
+        if t["symbol"] == symbol:
+            t["margin"] = round(new_margin, 4)
+            break
+    _write(s)
+
+def update_open_trade_sl(symbol: str, new_sl: float):
+    s = _read()
+    for t in s["open_trades"]:
+        if t["symbol"] == symbol:
+            t["sl"] = round(new_sl, 8)
             break
     _write(s)
 

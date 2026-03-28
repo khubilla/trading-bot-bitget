@@ -33,6 +33,8 @@ S2_STOP_LOSS_PCT    = 0.05       # 5% price move = -50% margin at 10x (via box_l
 
 S2_TRAILING_TRIGGER_PCT = 0.10   # 10% price move = 100% margin at 10x
 S2_TRAILING_RANGE_PCT   = 10     # 10% trailing callback = 100% margin at 10x
+S2_USE_SWING_TRAIL      = False  # S2 uses exchange-side % trailing stop instead
+S2_SWING_LOOKBACK       = 30     # daily candles to scan for structural swing low
 
 # ── S/R Clearance ─────────────────────────────────────── #
 S2_MIN_SR_CLEARANCE = 0.15       # Skip LONG if resistance < 15% above entry

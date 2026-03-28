@@ -631,8 +631,8 @@
   }
   .sentiment-bar-mid {
     position: absolute; left: 50%; top: 0; bottom: 0;
-    width: 1px; background: var(--border2);
-    opacity: 0.6;
+    width: 1px; background: var(--bg1);
+    opacity: 0.4;
   }
 
   .sentiment-counts {
@@ -670,6 +670,135 @@
     z-index: 9999;
   }
   .conn-banner.visible { display: block; }
+
+  /* ══════════════════════════════════════════════
+     MOBILE / TABLET  (≤ 900px)
+     ══════════════════════════════════════════════ */
+  @media (max-width: 900px) {
+
+    /* Header: let stats wrap below logo row */
+    .shell { grid-template-rows: auto 1fr; }
+
+    header {
+      flex-wrap: wrap;
+      height: auto;
+      gap: 8px;
+      padding: 8px 4px;
+    }
+
+    /* Stats row wraps below, 3-up grid */
+    .header-center {
+      order: 3;
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px 12px;
+    }
+
+    .header-stat { align-items: flex-start; }
+    .header-stat .val { font-size: 13px; }
+    .header-stat .lbl { font-size: 9px; }
+
+    .status-badge { padding: 4px 10px; font-size: 10px; }
+    .logo { font-size: 15px; }
+
+    /* 3-col → single col stacked */
+    .main-grid {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto;
+      gap: 10px;
+    }
+
+    .col-left   { grid-column: 1; grid-row: auto; }
+    .col-center { grid-column: 1; grid-row: auto; }
+    .col-right  { grid-column: 1; grid-row: auto; }
+    .col-bottom { grid-column: 1; grid-row: auto; }
+
+    /* Remove rigid height constraints so panels size naturally */
+    .col-left  { flex-direction: row; flex-wrap: wrap; }
+    .col-left .panel { min-width: 0; }
+
+    /* First panel in col-left (Performance) — fixed height on mobile */
+    .col-left .panel:first-child { flex: 1 1 260px; max-height: 380px; }
+    /* Second panel (Active Trades) */
+    .col-left .panel:last-child  { flex: 1 1 260px; max-height: 380px; }
+
+    /* Scanner: let it breathe but keep scrollable */
+    .col-center.panel { max-height: 420px !important; }
+
+    /* Trade history */
+    .col-right .panel { max-height: 320px; }
+
+    /* Pair grid: 2 columns */
+    .pair-grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+
+    /* Strategy tabs: horizontal scroll, no wrap */
+    .strat-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .strat-tab  { white-space: nowrap; flex-shrink: 0; padding: 7px 12px; font-size: 9px; }
+
+    /* Active trade card: collapse 2-col grid to 1 */
+    .trade-grid { grid-template-columns: 1fr; }
+
+    /* Chart modal: full screen on mobile */
+    .chart-modal {
+      width: 100vw !important;
+      max-width: 100vw !important;
+      max-height: 100dvh !important;
+      height: 100dvh;
+      border-left: none;
+      border-right: none;
+      border-bottom: none;
+    }
+
+    .chart-modal-header {
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px 12px;
+    }
+
+    .chart-modal-title  { font-size: 13px; gap: 8px; }
+    .chart-modal-meta   { gap: 10px; }
+    .chart-interval-btns { gap: 3px; flex-wrap: wrap; }
+    .chart-interval-btn  { font-size: 9px; padding: 4px 8px; }
+
+    #chart-rsi { height: 80px; }
+
+    /* Prevent iOS auto-zoom on input focus (requires font-size ≥ 16px) */
+    #pair-search { font-size: 16px; }
+  }
+
+  /* Extra-narrow phones: 1-column pair grid, 2-up header stats */
+  @media (max-width: 480px) {
+
+    .shell { padding: 0 8px 12px; }
+
+    .header-center { grid-template-columns: repeat(2, 1fr); }
+
+    /* Hide less critical header stats on very small screens */
+    .header-center .header-stat:nth-child(5),
+    .header-center .header-stat:nth-child(6) { display: none; }
+
+    .pair-grid { grid-template-columns: 1fr; }
+
+    .col-left  { flex-direction: column; }
+    .col-left .panel:first-child,
+    .col-left .panel:last-child { max-height: none; flex: unset; }
+
+    /* Active Trades first on phones — most actionable info */
+    .col-left .panel:first-child { order: 2; }
+    .col-left .panel:last-child  { order: 1; }
+
+    /* Compact sentiment block on phones */
+    .sentiment-block { padding: 8px 10px; margin-bottom: 6px; }
+    .sentiment-direction { font-size: 13px; margin-bottom: 5px; }
+    .trade-gate { padding: 4px 8px; }
+
+    /* Chart legend: wrap on small screens */
+    .chart-legend { flex-wrap: wrap; gap: 10px; padding: 8px 12px; }
+    .chart-modal-meta { display: none; }
+  }
 
 </style>
 </head>
@@ -748,9 +877,9 @@
               <div class="sentiment-bar-mid"></div>
             </div>
             <div class="sentiment-counts">
-              <span class="green">🟢 <span id="sent-green">0</span> coins</span>
-              <span class="pct" id="sent-pct">50.0%</span>
-              <span class="red">🔴 <span id="sent-red">0</span> coins</span>
+              <span class="green">🟢 <span id="sent-green">0</span></span>
+              <span class="pct"><span id="sent-pct">50.0%</span> <span style="opacity:0.5;font-size:8px">vol</span></span>
+              <span class="red"><span id="sent-red">0</span> 🔴</span>
             </div>
             <div class="trade-gate blocked" id="trade-gate">⊘ Waiting for sentiment</div>
           </div>
@@ -1030,9 +1159,9 @@ function render(s) {
 
   // ── Performance stats
   const st = s.stats || {};
-  const total = (st.total_trades || 0);
   const wins  = (st.wins || 0);
   const losses= (st.losses || 0);
+  const total = wins + losses;
   const wr    = total > 0 ? (wins / total * 100) : 0;
   const pnl   = st.total_pnl || 0;
 
@@ -1047,12 +1176,15 @@ function render(s) {
   const trades = s.open_trades || [];
   $('open-count').textContent = trades.length;
 
-  // If chart is showing an active-trade overlay and that trade just closed, clear the overlay
+  // If chart is open on an active trade, sync SL/TP live so chart lines update
   if (window._tradeOverlay && currentSymbol) {
-    const stillActive = trades.some(t => t.symbol === currentSymbol);
-    if (!stillActive) {
+    const liveTrade = trades.find(t => t.symbol === currentSymbol);
+    if (!liveTrade) {
       window._tradeOverlay = null;
       if (currentSymbol) loadChart(currentSymbol, currentInterval);
+    } else {
+      window._tradeOverlay.sl = parseFloat(liveTrade.sl);
+      window._tradeOverlay.tp = parseFloat(liveTrade.tp);
     }
   }
 
@@ -1226,8 +1358,8 @@ function signalScore(sym, ps, tab) {
   if (tab === 's5') {
     const reason  = ps.s5_reason || '';
     const sig     = ps.s5_signal || 'HOLD';
-    const emaOk   = reason.includes('EMA bias') || reason.includes('Daily EMA') || sig !== 'HOLD';
-    const bosOk   = reason.includes('1H BOS') || sig !== 'HOLD';
+    const emaOk   = reason.includes('EMA bullish') || reason.includes('EMA bearish') || reason.includes('EMA ✅') || reason.includes('EMA bias') || sig !== 'HOLD';
+    const bosOk   = reason.includes('BOS ✅') || sig !== 'HOLD';
     const obOk    = reason.includes('OB found') || ps.s5_ob_high > 0 || sig !== 'HOLD';
     const chochOk = sig !== 'HOLD';
     return (emaOk ? 1 : 0) + (bosOk ? 1 : 0) + (obOk ? 1 : 0) + (chochOk ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
@@ -1368,7 +1500,7 @@ function s3CardHTML(sym, ps) {
           <span class="check-val ${srClass}">${srLabel}</span>
         </div>
       </div>
-      <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').slice(0,60)} · ${age}</div>
+      <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0,60)} · ${age}</div>
     </div>`;
 }
 
@@ -1417,7 +1549,7 @@ function s4CardHTML(sym, ps) {
           <span class="check-val ${srClass}">${srLabel}</span>
         </div>
       </div>
-      <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').slice(0,60)} · ${age}</div>
+      <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0,60)} · ${age}</div>
     </div>`;
 }
 
@@ -1426,8 +1558,8 @@ function s5CardHTML(sym, ps) {
   const reason   = ps.s5_reason || '—';
   const symShort = sym.replace('USDT', '');
   const cardClass = sig === 'LONG' ? 'signal-long' : sig === 'SHORT' ? 'signal-short' : '';
-  const emaOk   = reason.includes('EMA bias') || reason.includes('Daily EMA') || sig !== 'HOLD';
-  const bosOk   = reason.includes('1H BOS') || sig !== 'HOLD';
+  const emaOk   = reason.includes('EMA bullish') || reason.includes('EMA bearish') || reason.includes('EMA ✅') || reason.includes('EMA bias') || sig !== 'HOLD';
+  const bosOk   = reason.includes('BOS ✅') || sig !== 'HOLD';
   const obOk    = (ps.s5_ob_high != null && ps.s5_ob_high > 0) || sig !== 'HOLD';
   const chochOk = sig !== 'HOLD';
   const emaClass   = emaOk ? 'pass' : 'fail';
@@ -1468,7 +1600,7 @@ function s5CardHTML(sym, ps) {
           <span class="check-val ${chochClass}">${!obOk ? '—' : chochOk ? 'Confirmed ✓' : 'Waiting…'}</span>
         </div>
       </div>
-      <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').slice(0,60)} · ${age}</div>
+      <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0,60)} · ${age}</div>
     </div>`;
 }
 

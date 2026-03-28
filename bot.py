@@ -564,12 +564,17 @@ class MTFBot:
 
         # ── Strategy 3 ───────────────────────────────────────────── #
         s3_sig, s3_adx, s3_trigger, s3_sl, s3_reason = "HOLD", 0.0, 0.0, 0.0, ""
-        s3_sr_resistance_pct = None
+        s3_sr_resistance_pct   = None
+        s3_sr_resistance_price = None
         if config_s3.S3_ENABLED and self.sentiment.direction != "BEARISH" and m15_df is not None:
             s3_sig, s3_adx, s3_trigger, s3_sl, s3_reason = evaluate_s3(symbol, m15_df)
             logger.info(f"[S3][{symbol}] {s3_reason}")
-            _s3_res = find_nearest_resistance(m15_df, close, lookback=300)
-            s3_sr_resistance_pct = round((_s3_res - close) / close * 100, 1) if _s3_res else None
+            # Skip the pre-pullback peak (highest high in last 50 15m candles) —
+            # same logic as _execute_s3 resistance check.
+            _s3_peak = float(m15_df["high"].iloc[-50:].max())
+            _s3_res  = find_nearest_resistance(m15_df, _s3_peak * 1.01, lookback=300)
+            s3_sr_resistance_pct   = round((_s3_res - close) / close * 100, 1) if _s3_res else None
+            s3_sr_resistance_price = round(_s3_res, 8) if _s3_res else None
 
         # ── Strategy 5 ───────────────────────────────────────────── #
         s5_sig, s5_trigger, s5_sl, s5_tp, s5_ob_low, s5_ob_high, s5_reason = "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, ""
@@ -658,7 +663,8 @@ class MTFBot:
             "sr_resistance_pct":    sr_res_pct,
             "s2_sr_resistance_pct":   s2_sr_resistance_pct,
             "s2_sr_resistance_price": s2_sr_resistance_price,
-            "s3_sr_resistance_pct": s3_sr_resistance_pct,
+            "s3_sr_resistance_pct":   s3_sr_resistance_pct,
+            "s3_sr_resistance_price": s3_sr_resistance_price if s3_sig != "HOLD" else None,
             "sr_support_pct":       sr_sup_pct,
             "s4_sr_support_pct":    s4_sr_sup_pct,
             # Reset S5 priority rank each cycle — patched in by _execute_best_s5_candidate

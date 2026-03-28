@@ -381,15 +381,17 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
         except Exception:
             sr_resistance = None
             sr_support    = None
-        # For S2 on 1D: use spike-adjusted resistance stored by bot (avoids spike-high false R)
-        if interval == "1D":
-            try:
-                with open(STATE_FILE, "r") as _sf:
-                    _ps = json.load(_sf).get("pair_states", {}).get(symbol, {})
-                if _ps.get("s2_signal", "HOLD") != "HOLD" and _ps.get("s2_sr_resistance_price"):
-                    sr_resistance = _ps["s2_sr_resistance_price"]
-            except Exception:
-                pass
+        # For S2/S3: use spike/peak-adjusted resistance stored by bot
+        # (avoids drawing R at the spike/pre-pullback high that created the signal)
+        try:
+            with open(STATE_FILE, "r") as _sf:
+                _ps = json.load(_sf).get("pair_states", {}).get(symbol, {})
+            if interval == "1D" and _ps.get("s2_signal", "HOLD") != "HOLD" and _ps.get("s2_sr_resistance_price"):
+                sr_resistance = _ps["s2_sr_resistance_price"]
+            elif interval == "15m" and _ps.get("s3_signal", "HOLD") != "HOLD" and _ps.get("s3_sr_resistance_price"):
+                sr_resistance = _ps["s3_sr_resistance_price"]
+        except Exception:
+            pass
 
         # For 1H: return previous candle high for HTF break visualisation
         prev_high = None

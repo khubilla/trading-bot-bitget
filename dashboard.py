@@ -69,6 +69,19 @@ def get_state():
         csv_history = _load_csv_history(csv_path)
         if csv_history:
             state["trade_history"] = csv_history
+        # Inject live enabled/disabled flags from config so the dashboard can
+        # hide tabs for strategies that are turned off.
+        try:
+            import config_s1, config_s2, config_s3, config_s4, config_s5
+            state["strategy_enabled"] = {
+                "S1": bool(config_s1.S1_ENABLED),
+                "S2": bool(config_s2.S2_ENABLED),
+                "S3": bool(config_s3.S3_ENABLED),
+                "S4": bool(config_s4.S4_ENABLED),
+                "S5": bool(config_s5.S5_ENABLED),
+            }
+        except Exception:
+            pass
         return JSONResponse(state)
     except Exception as e:
         return JSONResponse({"status": "ERROR", "error": str(e)})

@@ -1233,6 +1233,20 @@ function render(s) {
     errBanner.style.display = 'none';
   }
 
+  // ── Hide tabs for disabled strategies
+  if (s.strategy_enabled) {
+    ['S1','S2','S3','S4','S5'].forEach(k => {
+      const tab = $('tab-' + k.toLowerCase());
+      if (tab) tab.style.display = s.strategy_enabled[k] ? '' : 'none';
+    });
+    // If the active tab is now hidden, switch to the first visible one
+    const activeTab = document.querySelector('.strat-tab.active');
+    if (activeTab && activeTab.style.display === 'none') {
+      const first = document.querySelector('.strat-tab:not([style*="none"])');
+      if (first) first.click();
+    }
+  }
+
   // ── Status badge
   const badge = $('statusBadge');
   const statuses = { RUNNING: 'running', STOPPED: 'stopped', ERROR: 'error' };

@@ -940,24 +940,23 @@ class MTFBot:
                 )
 
         for candidate in ranked:
+            if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
+                break
             sym = candidate["symbol"]
             if sym in self.active_positions or st.is_pair_paused(sym):
                 continue
             sig = candidate["sig"]
             if sig in ("LONG", "SHORT"):
-                executed = self._execute_s5(
+                self._execute_s5(
                     sym, sig, candidate["trigger"], candidate["sl"], candidate["tp"],
                     candidate["ob_low"], candidate["ob_high"], candidate["reason"],
                     candidate["m15_df"], balance,
                 )
-                if executed:
-                    break
             elif sig in ("PENDING_LONG", "PENDING_SHORT") and sym not in self.pending_signals:
                 self._queue_s5_pending(
                     sym, sig, candidate["trigger"], candidate["sl"], candidate["tp"],
                     candidate["ob_low"], candidate["ob_high"], candidate["m15_df"],
                 )
-                break  # only queue the top-ranked PENDING signal per cycle
 
     def _execute_s5(self, symbol: str, s5_sig: str, s5_trigger: float, s5_sl: float,
                     s5_tp: float, s5_ob_low: float, s5_ob_high: float,

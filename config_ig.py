@@ -59,7 +59,12 @@ LOG_FILE   = "ig_bot.log"
 TRADE_LOG  = "ig_trades.csv"
 STATE_FILE = "ig_state.json"
 
+# ── S5 strategy parameters ──────────────────────────────────── #
+# All S5 params for US30 are in config_ig_s5.py.
+# ig_bot.py patches config_s5 with those values at startup so
+# strategy.evaluate_s5() uses the US30-tuned settings automatically.
+
 # ── Candle fetch limits ─────────────────────────────────────── #
 DAILY_LIMIT = 200   # 1D candles  (strategy needs RSI_PERIOD + 50 ≈ 64+)
-HTF_LIMIT   = 50    # 1H candles  (S5_HTF_BOS_LOOKBACK + 2 = 12)
+HTF_LIMIT   = 50    # 1H candles  (S5_HTF_BOS_LOOKBACK + 2)
 M15_LIMIT   = 300   # 15m candles (OB lookback + ChoCH lookback + buffer)

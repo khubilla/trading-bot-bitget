@@ -21,7 +21,16 @@ from datetime import datetime, timezone
 
 import ig_client as ig
 import config_ig
-from config_s5 import (
+
+# Apply US30-specific S5 params — must happen before strategy.evaluate_s5() is imported
+# or called, since evaluate_s5() does `from config_s5 import ...` at call time.
+import config_s5 as _cs5_orig
+import config_ig_s5 as _cs5_ig
+for _attr in [a for a in dir(_cs5_ig) if not a.startswith('_')]:
+    setattr(_cs5_orig, _attr, getattr(_cs5_ig, _attr))
+del _cs5_orig, _cs5_ig, _attr
+
+from config_ig_s5 import (
     S5_DAILY_EMA_FAST, S5_DAILY_EMA_SLOW,
     S5_USE_CANDLE_STOPS, S5_SL_BUFFER_PCT, S5_SWING_LOOKBACK, S5_MAX_ENTRY_BUFFER,
     S5_LTF_INTERVAL,

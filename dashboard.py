@@ -389,6 +389,9 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
             if interval == "1D" and (_ps.get("s2_coiling") or _ps.get("s2_signal", "HOLD") != "HOLD"):
                 # S2 setup active — always use spike-adjusted value (None = no R line drawn)
                 sr_resistance = _ps.get("s2_sr_resistance_price")
+                # Support = coil box bottom (SL level), not historical swing low
+                if _ps.get("s2_box_low"):
+                    sr_support = _ps["s2_box_low"]
             elif interval == "15m" and "s3_sr_resistance_price" in _ps:
                 # S3 setup active — always use peak-adjusted value (None = no R line drawn)
                 sr_resistance = _ps.get("s3_sr_resistance_price")

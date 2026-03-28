@@ -662,6 +662,8 @@ class MTFBot:
             "s2_daily_rsi": s2_rsi,
             "s2_big_candle": s2_rsi > 0 and ("big_candle" in s2_reason or "Big candle" in s2_reason or s2_bh > 0),
             "s2_coiling":    s2_bl > 0 and s2_bh > 0,
+            "s2_box_low":    round(s2_bl, 8) if s2_bl > 0 else None,
+            "s2_box_high":   round(s2_bh, 8) if s2_bh > 0 else None,
             "sr_resistance_pct":    sr_res_pct,
             "s2_sr_resistance_pct":   s2_sr_resistance_pct,
             "s2_sr_resistance_price": s2_sr_resistance_price,

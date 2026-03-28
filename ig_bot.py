@@ -251,6 +251,10 @@ class IGBot:
         self.running     = True
         self.position: dict | None = None   # live position state dict
         self._paper      = _PaperState() if paper else None
+        # Candle cache: fetch full history once, then append new candles only.
+        # IG limits historical price data to 10,000 points/week — fetching 550
+        # points every 45s would exceed that in ~4 minutes.
+        self._candle_cache: dict[str, pd.DataFrame] = {}
 
         mode = "PAPER" if paper else f"LIVE ({config_ig.IG_ACC_TYPE})"
         logger.info(
@@ -265,6 +269,45 @@ class IGBot:
             self.position = self._paper.position
         else:
             self._sync_live_position()
+
+    def _get_candles(self, interval: str, limit: int) -> pd.DataFrame:
+        """
+        Return candles from in-memory cache.  Only calls IG's price history API
+        when a new candle has formed since the last fetch — keeping weekly data
+        point usage well under IG's 10,000-point limit.
+
+        Cold start (cache empty): fetches full history (one-time cost).
+        Subsequent ticks: fetches 3 candles only when the next candle period
+        has opened, then appends & deduplicates.
+        """
+        interval_ms = {"1D": 86_400_000, "1H": 3_600_000, "15m": 900_000}.get(interval, 60_000)
+        now_ms      = int(time.time() * 1000)
+        cached      = self._candle_cache.get(interval)
+
+        if cached is None or cached.empty:
+            df = ig.get_candles(EPIC, interval, limit)
+            if not df.empty:
+                self._candle_cache[interval] = df
+            return df
+
+        last_candle_ts = int(cached["ts"].iloc[-1])
+        if now_ms < last_candle_ts + interval_ms:
+            return cached   # current candle still open — no new data
+
+        # A new candle period has started — fetch the last 3 to catch any missed
+        fresh = ig.get_candles(EPIC, interval, 3)
+        if fresh.empty:
+            return cached
+        combined = (
+            pd.concat([cached, fresh])
+            .drop_duplicates("ts")
+            .sort_values("ts")
+            .reset_index(drop=True)
+            .tail(limit)
+            .reset_index(drop=True)
+        )
+        self._candle_cache[interval] = combined
+        return combined
 
     def _sync_live_position(self) -> None:
         """On startup, restore position from STATE_FILE if dealId is still open on exchange."""
@@ -337,10 +380,10 @@ class IGBot:
         if self.position:
             return
 
-        # 5. Fetch candles
-        daily_df = ig.get_candles(EPIC, "1D",  config_ig.DAILY_LIMIT)
-        htf_df   = ig.get_candles(EPIC, "1H",  config_ig.HTF_LIMIT)
-        m15_df   = ig.get_candles(EPIC, "15m", config_ig.M15_LIMIT)
+        # 5. Fetch candles (cached — only hits API when new candle has formed)
+        daily_df = self._get_candles("1D",  config_ig.DAILY_LIMIT)
+        htf_df   = self._get_candles("1H",  config_ig.HTF_LIMIT)
+        m15_df   = self._get_candles("15m", config_ig.M15_LIMIT)
 
         if daily_df.empty or htf_df.empty or m15_df.empty:
             logger.warning("Candle fetch returned empty — skipping tick")

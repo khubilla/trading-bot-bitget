@@ -12,6 +12,16 @@ Usage:
   python ig_bot.py          # live (demo or live depending on IG_ACC_TYPE)
 """
 import os
+from pathlib import Path
+
+# Load .env from project root (no python-dotenv needed)
+_env_file = Path(__file__).parent / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
 
 # ── IG Credentials ──────────────────────────────────────────── #
 IG_API_KEY    = os.environ.get("IG_API_KEY",    "")
@@ -30,8 +40,8 @@ CURRENCY     = "USD"
 # ── Contract sizing ─────────────────────────────────────────── #
 # Min contract on Wall Street Cash is 0.02.
 # Open 0.04 → partial close 0.02 at 1:1 R:R → trail remaining 0.02.
-CONTRACT_SIZE = 0.04   # opening size (contracts)
-PARTIAL_SIZE  = 0.02   # close at TP1 (50%)
+CONTRACT_SIZE = 1   # opening size (contracts)
+PARTIAL_SIZE  = 0.5   # close at TP1 (50%)
 POINT_VALUE   = 1.0    # USD per point per contract (Wall Street Cash = $1/pt)
 
 # ── Trading Session (US Eastern Time) ───────────────────────── #
@@ -41,7 +51,7 @@ SESSION_START = (9, 30)    # 09:30 ET
 SESSION_END   = (12, 30)   # 12:30 ET
 
 # ── Bot Behaviour ───────────────────────────────────────────── #
-POLL_INTERVAL_SEC = 45     # 45s → ~8 ticks/min → ~40 API calls/min (IG limit)
+POLL_INTERVAL_SEC = 45     # 45s; candles are cached so price history stays under 10k pts/week
 PAPER_MODE        = False  # override with --paper flag
 
 # ── File paths ──────────────────────────────────────────────── #

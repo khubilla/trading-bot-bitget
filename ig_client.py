@@ -57,11 +57,10 @@ class _IGSession:
             "Version":       "2",
         }
         body = {
-            "identifier": self._username,
-            "password":   self._password,
+            "identifier":        self._username,
+            "password":          self._password,
+            "encryptedPassword": False,
         }
-        if self._account_id:
-            body["encryptedPassword"] = False
 
         resp = requests.post(url, json=body, headers=headers, timeout=15)
         if resp.status_code != 200:
@@ -162,7 +161,7 @@ def get_candles(epic: str, interval: str, limit: int = 100) -> pd.DataFrame:
         data = _get_session().get(
             f"/prices/{epic}",
             params={"resolution": resolution, "numPoints": limit},
-            version="1",
+            version="2",
         )
     except Exception as e:
         logger.error(f"get_candles({epic},{interval}): {e}")
@@ -258,7 +257,7 @@ def get_open_position(deal_id: str) -> dict | None:
     {side, entry_price, qty, sl, tp, deal_id}
     """
     try:
-        data = _get_session().get("/positions/otc", version="2")
+        data = _get_session().get("/positions", version="2")
         for item in data.get("positions", []):
             pos = item.get("position", {}) or {}
             if pos.get("dealId") == deal_id:

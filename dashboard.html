@@ -800,6 +800,46 @@
     .chart-modal-meta { display: none; }
   }
 
+  /* ── Exchange Switcher ── */
+  .exch-bar {
+    display: flex; align-items: center; gap: 0;
+    padding: 0 20px;
+    background: var(--bg1);
+    border-bottom: 2px solid var(--border);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .exch-tab {
+    display: flex; align-items: center; gap: 7px;
+    padding: 11px 22px;
+    background: none; border: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    color: var(--muted);
+    cursor: pointer;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px; font-weight: 500;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    transition: color 0.15s;
+  }
+  .exch-tab:hover { color: var(--text); }
+  .exch-tab.active { color: var(--amber); border-bottom-color: var(--amber); }
+  .exch-dot { width: 7px; height: 7px; border-radius: 50%; }
+  .exch-dot.bitget { background: var(--scan); }
+  .exch-dot.ig     { background: var(--blue); }
+
+  /* ── IG Panel ── */
+  .ig-grid {
+    display: grid;
+    grid-template-columns: 300px 1fr;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .ig-pos-row {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 6px 16px; padding: 14px;
+  }
+  .ig-pos-item { display: flex; flex-direction: column; gap: 3px; }
+
 </style>
 </head>
 <body>
@@ -810,7 +850,17 @@
 <div class="conn-banner" id="errBanner" style="display:none; background:#5c2a00;">
 </div>
 
-<div class="shell">
+<!-- ── EXCHANGE TABS ── -->
+<div class="exch-bar">
+  <button class="exch-tab active" id="exch-bitget" onclick="switchExchange('bitget')">
+    <span class="exch-dot bitget"></span> Bitget
+  </button>
+  <button class="exch-tab" id="exch-ig" onclick="switchExchange('ig')">
+    <span class="exch-dot ig"></span> IG
+  </button>
+</div>
+
+<div class="shell" id="bitget-panel">
 
   <!-- ── HEADER ── -->
   <header>
@@ -956,6 +1006,75 @@
           <span class="panel-badge" id="hist-count">0</span>
         </div>
         <div class="panel-body" id="trade-history"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── IG PANEL ── -->
+<div id="ig-panel" class="shell" style="display:none;">
+
+  <header>
+    <div class="logo">
+      <div class="logo-icon">◆</div>
+      IG Bot
+    </div>
+    <div class="header-center">
+      <div class="header-stat">
+        <span class="val" id="ig-h-pnl">$0.00</span>
+        <span class="lbl">Total P&amp;L</span>
+      </div>
+      <div class="header-stat">
+        <span class="val" id="ig-h-trades">0</span>
+        <span class="lbl">Trades</span>
+      </div>
+      <div class="header-stat">
+        <span class="val" id="ig-h-wr">—</span>
+        <span class="lbl">Win Rate</span>
+      </div>
+      <div class="header-stat">
+        <span class="val" id="ig-h-et">—</span>
+        <span class="lbl">ET Time</span>
+      </div>
+      <div class="header-stat">
+        <span class="val" style="font-size:11px;">US30</span>
+        <span class="lbl">Instrument</span>
+      </div>
+    </div>
+    <div style="display:flex; align-items:center; gap:8px;">
+      <div class="status-badge stopped" id="ig-sess-badge">
+        <div class="pulse-dot"></div>
+        <span id="ig-sess-text">Session —</span>
+      </div>
+      <div class="status-badge stopped" id="ig-bot-badge">
+        <div class="pulse-dot"></div>
+        <span id="ig-bot-text">Bot —</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="ig-grid">
+
+    <!-- Position card -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Open Position</span>
+        <span class="panel-sub" style="font-size:9px; color:var(--muted);">Wall Street Cash · US30</span>
+      </div>
+      <div id="ig-pos-body" class="panel-body">
+        <div style="color:var(--muted); text-align:center; padding:40px 0; font-size:11px;">No open position</div>
+      </div>
+    </div>
+
+    <!-- Trade History -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Trade History</span>
+        <span class="panel-sub" id="ig-hist-count" style="font-size:9px; color:var(--muted);"></span>
+      </div>
+      <div id="ig-hist-body" class="panel-body" style="padding:0; overflow-y:auto; max-height:420px;">
+        <div style="color:var(--muted); text-align:center; padding:40px 0; font-size:11px;">No trades yet</div>
       </div>
     </div>
 
@@ -1358,10 +1477,13 @@ function signalScore(sym, ps, tab) {
   if (tab === 's5') {
     const reason  = ps.s5_reason || '';
     const sig     = ps.s5_signal || 'HOLD';
-    const emaOk   = reason.includes('EMA bullish') || reason.includes('EMA bearish') || reason.includes('EMA ✅') || reason.includes('EMA bias') || sig !== 'HOLD';
-    const bosOk   = reason.includes('BOS ✅') || sig !== 'HOLD';
-    const obOk    = reason.includes('OB found') || ps.s5_ob_high > 0 || sig !== 'HOLD';
-    const chochOk = sig !== 'HOLD';
+    const chochStage = reason.includes('ChoCH') || reason.includes('R:R');
+    const obStage    = chochStage || reason.includes('OB');
+    const bosStage   = obStage   || reason.includes('BOS ✅');
+    const emaOk   = bosStage  || reason.includes('EMA bullish') || reason.includes('EMA bearish') || sig !== 'HOLD';
+    const bosOk   = obStage   || reason.includes('BOS ✅') || sig !== 'HOLD';
+    const obOk    = chochStage || ps.s5_ob_high > 0 || sig !== 'HOLD';
+    const chochOk = reason.includes('ChoCH ✅') || sig !== 'HOLD';
     return (emaOk ? 1 : 0) + (bosOk ? 1 : 0) + (obOk ? 1 : 0) + (chochOk ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
   }
   return 0;
@@ -1558,10 +1680,16 @@ function s5CardHTML(sym, ps) {
   const reason   = ps.s5_reason || '—';
   const symShort = sym.replace('USDT', '');
   const cardClass = sig === 'LONG' ? 'signal-long' : sig === 'SHORT' ? 'signal-short' : '';
-  const emaOk   = reason.includes('EMA bullish') || reason.includes('EMA bearish') || reason.includes('EMA ✅') || reason.includes('EMA bias') || sig !== 'HOLD';
-  const bosOk   = reason.includes('BOS ✅') || sig !== 'HOLD';
-  const obOk    = (ps.s5_ob_high != null && ps.s5_ob_high > 0) || sig !== 'HOLD';
-  const chochOk = sig !== 'HOLD';
+  // Infer which stages passed by detecting how far the strategy got.
+  // S5 is sequential: EMA → BOS → OB → ChoCH → R:R → signal.
+  // If reason mentions ChoCH or R:R, all prior stages already passed.
+  const chochStage = reason.includes('ChoCH') || reason.includes('R:R');
+  const obStage    = chochStage || reason.includes('OB');
+  const bosStage   = obStage   || reason.includes('BOS ✅');
+  const emaOk   = bosStage  || reason.includes('EMA bullish') || reason.includes('EMA bearish') || sig !== 'HOLD';
+  const bosOk   = obStage   || reason.includes('BOS ✅') || sig !== 'HOLD';
+  const obOk    = chochStage || (ps.s5_ob_high != null && ps.s5_ob_high > 0) || sig !== 'HOLD';
+  const chochOk = reason.includes('ChoCH ✅') || sig !== 'HOLD';
   const emaClass   = emaOk ? 'pass' : 'fail';
   const bosClass   = !emaOk ? 'muted' : bosOk ? 'pass' : 'fail';
   const obClass    = !bosOk ? 'muted' : obOk ? 'pass' : 'fail';
@@ -2228,6 +2356,100 @@ function attachCardClicks() {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') closeChart({target: $('chartOverlay')});
 });
+
+// ── Exchange Switcher ────────────────────────────────────
+let activeExchange = 'bitget';
+
+function switchExchange(ex) {
+  activeExchange = ex;
+  $('exch-bitget').classList.toggle('active', ex === 'bitget');
+  $('exch-ig').classList.toggle('active', ex === 'ig');
+  $('bitget-panel').style.display = ex === 'bitget' ? '' : 'none';
+  $('ig-panel').style.display     = ex === 'ig'     ? '' : 'none';
+  if (ex === 'ig') pollIG();
+}
+
+// ── IG Bot Poll ──────────────────────────────────────────
+async function pollIG() {
+  if (activeExchange !== 'ig') return;
+  try {
+    const res = await fetch('/api/ig/state');
+    if (!res.ok) return;
+    renderIG(await res.json());
+  } catch(e) { console.warn('IG poll:', e.message); }
+}
+
+function renderIG(d) {
+  const pnl = d.stats?.total_pnl ?? 0;
+  const pnlEl = $('ig-h-pnl');
+  pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+  pnlEl.style.color = pnl >= 0 ? 'var(--emerald)' : 'var(--rose)';
+  $('ig-h-trades').textContent = d.stats?.total ?? 0;
+  $('ig-h-wr').textContent = d.stats?.win_rate ?? '—';
+  $('ig-h-et').textContent = d.et_time ?? '—';
+
+  const sb = $('ig-sess-badge'), st = $('ig-sess-text');
+  sb.className = 'status-badge ' + (d.session_active ? 'running' : 'stopped');
+  st.textContent = d.session_active ? 'In Session' : 'Closed';
+
+  const bb = $('ig-bot-badge'), bt = $('ig-bot-text');
+  bb.className = 'status-badge ' + (d.bot_running ? 'running' : 'stopped');
+  bt.textContent = d.bot_running ? 'Running' : 'Stopped';
+
+  renderIGPosition(d.position);
+  renderIGHistory(d.trade_history);
+}
+
+function renderIGPosition(pos) {
+  const body = $('ig-pos-body');
+  if (!pos) {
+    body.innerHTML = '<div style="color:var(--muted);text-align:center;padding:40px 0;font-size:11px;">No open position</div>';
+    return;
+  }
+  const sc = pos.side === 'LONG' ? 'var(--emerald)' : 'var(--rose)';
+  const partial = pos.partial_done
+    ? '<span style="background:rgba(240,165,0,0.12);color:var(--amber);padding:1px 6px;font-size:9px;border:1px solid rgba(240,165,0,0.3);margin-left:6px;">PARTIAL ✓</span>'
+    : '';
+  body.innerHTML = `<div class="ig-pos-row">
+    <div class="ig-pos-item"><div class="stat-label">Side</div><div style="color:${sc};font-weight:700;font-size:15px;">${pos.side}</div></div>
+    <div class="ig-pos-item"><div class="stat-label">Entry</div><div style="font-size:15px;">${(+pos.entry).toFixed(1)}</div></div>
+    <div class="ig-pos-item"><div class="stat-label">Stop Loss</div><div style="color:var(--rose);">${pos.sl ? (+pos.sl).toFixed(1) : '—'}</div></div>
+    <div class="ig-pos-item"><div class="stat-label">TP1 (1:1 R)</div><div style="color:var(--amber);">${pos.tp1 ? (+pos.tp1).toFixed(1) : '—'}</div></div>
+    <div class="ig-pos-item"><div class="stat-label">Final TP</div><div style="color:var(--emerald);">${pos.tp ? (+pos.tp).toFixed(1) : '—'}</div></div>
+    <div class="ig-pos-item"><div class="stat-label">Qty</div><div>${pos.current_qty} contracts${partial}</div></div>
+    <div class="ig-pos-item" style="grid-column:1/-1;"><div class="stat-label">OB Zone</div><div style="color:var(--muted);font-size:10px;">${pos.ob_low ? (+pos.ob_low).toFixed(1) + ' – ' + (+pos.ob_high).toFixed(1) : '—'}</div></div>
+    <div class="ig-pos-item" style="grid-column:1/-1;"><div class="stat-label">Opened</div><div style="color:var(--muted);font-size:9px;">${pos.opened_at || '—'}</div></div>
+  </div>`;
+}
+
+function renderIGHistory(history) {
+  const body = $('ig-hist-body');
+  const count = $('ig-hist-count');
+  if (!history || !history.length) {
+    if (count) count.textContent = '';
+    body.innerHTML = '<div style="color:var(--muted);text-align:center;padding:40px 0;font-size:11px;">No trades yet</div>';
+    return;
+  }
+  if (count) count.textContent = history.length + ' trades';
+  const rows = history.map(t => {
+    const pnl = t.pnl ?? null;
+    const pnlClass = pnl === null ? '' : pnl >= 0 ? 'pos' : 'neg';
+    const pnlStr = pnl === null ? '—' : (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+    const sc = t.side === 'LONG' ? 'var(--emerald)' : 'var(--rose)';
+    const res = t.result || '—';
+    const mode = t.mode ? `<span style="color:var(--muted);font-size:8px;margin-left:4px;">[${t.mode}]</span>` : '';
+    return `<div class="hist-row" style="padding:6px 12px;gap:8px;">
+      <span style="color:${sc};font-size:9px;font-weight:600;min-width:38px;">${t.side || '—'}</span>
+      <span class="hist-badge ${res}" style="min-width:36px;text-align:center;">${res}</span>
+      <span class="hist-pnl ${pnlClass}" style="min-width:62px;text-align:right;">${pnlStr}</span>
+      <span style="color:var(--muted);font-size:9px;flex:1;">${(t.exit_reason||'').replace(/_/g,' ')}${mode}</span>
+      <span class="hist-time">${(t.closed_at||'').slice(0,16)}</span>
+    </div>`;
+  }).join('');
+  body.innerHTML = rows;
+}
+
+setInterval(pollIG, 5000);
 </script>
 </body>
 </html>

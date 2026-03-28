@@ -1,12 +1,22 @@
-# Bitget USDT-Futures MTF Bot
+# Multi-Exchange Algorithmic Trading Bot
 
-Automated crypto futures trading bot for Bitget USDT-margined perpetual futures. Runs four independent strategies simultaneously with a shared live dashboard. Supports both **live trading** and **paper trading** mode.
+Automated trading bot supporting **Bitget USDT-margined crypto futures** and **IG CFD (Wall Street Cash / US30)**. Runs multiple independent strategies with a unified live dashboard. Supports both **live trading** and **paper trading** modes.
+
+---
+
+## Exchanges
+
+| Exchange | Instrument | Strategies |
+|----------|-----------|-----------|
+| Bitget | USDT-margined perpetual futures | S1 · S2 · S3 · S4 · S5 |
+| IG | Wall Street Cash (US30 / Dow Jones) | S5 only |
 
 ---
 
 ## Strategies
 
-### Strategy 1 — MTF RSI Breakout
+### Strategy 1 — MTF RSI Breakout *(Bitget only)*
+
 Multi-timeframe breakout with trend and momentum filters.
 
 | Timeframe | Filter |
@@ -20,7 +30,8 @@ Multi-timeframe breakout with trend and momentum filters.
 
 ---
 
-### Strategy 2 — Daily Momentum Coil Breakout
+### Strategy 2 — Daily Momentum Coil Breakout *(Bitget only)*
+
 Pure daily-chart strategy targeting post-squeeze breakouts.
 
 1. Big momentum candle (≥20% body) within last 30 daily candles
@@ -36,7 +47,8 @@ Pure daily-chart strategy targeting post-squeeze breakouts.
 
 ---
 
-### Strategy 3 — 15m Swing Pullback
+### Strategy 3 — 15m Swing Pullback *(Bitget only)*
+
 Long-only pullback strategy on the 15m timeframe.
 
 **Prerequisites (15m):**
@@ -55,7 +67,8 @@ Long-only pullback strategy on the 15m timeframe.
 
 ---
 
-### Strategy 4 — Post-Pump RSI Divergence Short
+### Strategy 4 — Post-Pump RSI Divergence Short *(Bitget only)*
+
 Short-only strategy targeting reversals after momentum spikes.
 
 1. Big momentum spike (≥20% body) within last 30 daily candles
@@ -74,7 +87,8 @@ Short-only strategy targeting reversals after momentum spikes.
 
 ---
 
-### Strategy 5 — SMC Order Block Pullback
+### Strategy 5 — SMC Order Block Pullback *(Bitget + IG)*
+
 Multi-timeframe Smart Money Concepts strategy. Long or short depending on market direction.
 
 **Structure (top-down):**
@@ -86,11 +100,13 @@ Multi-timeframe Smart Money Concepts strategy. Long or short depending on market
 | 15m | Pullback touches OB zone |
 | 15m | Change of Character (ChoCH) — close back through OB boundary confirms entry |
 
-**Entry:** 0.5% beyond the OB boundary. When ChoCH fires but price hasn't yet crossed the trigger, the setup is queued as **PENDING** — the entry watcher thread catches the breakout within 3–7 seconds instead of waiting for the next 60s scan cycle.
+**Entry:** 0.5% beyond the OB boundary. When ChoCH fires but price hasn't yet crossed the trigger, the setup is queued as **PENDING** — the entry watcher thread catches the breakout within 3–7 seconds instead of waiting for the next scan cycle.
 
-**Exits (standard SMC):** SL trails to the previous completed 15m candle's low (LONG) or high (SHORT) from entry each scan cycle (`S5_USE_CANDLE_STOPS`). 50% partial close at 1:1 R:R → SL moves to breakeven. Remaining 50% targets the nearest structural swing high/low on 15m. Fallback 5% trailing stop if no structural target is found.
+**Exits (standard SMC):** SL trails to the previous completed 15m candle's low (LONG) or high (SHORT) each scan cycle (`S5_USE_CANDLE_STOPS`). 50% partial close at 1:1 R:R → SL moves to breakeven. Remaining 50% targets the nearest structural swing high/low on 15m. Fallback 5% trailing stop if no structural target is found.
 
-**Risk:** 10x leverage · 5% of total portfolio · SL 0.3% beyond OB outer wick · minimum 2:1 R:R required
+**Risk (Bitget):** 10x leverage · 5% of total portfolio · SL 0.3% beyond OB outer wick · minimum 2:1 R:R required
+
+**Risk (IG):** 0.04 contracts (Wall Street Cash, min 0.02) · partial close 0.02 at 1:1 R:R · SL trails to prev 15m candle · $1/point per contract
 
 **Optional filters (`config_s5.py`):** `S5_SMC_FVG_FILTER` — require an unfilled Fair Value Gap above/below the OB for added confluence (off by default).
 
@@ -98,33 +114,38 @@ Multi-timeframe Smart Money Concepts strategy. Long or short depending on market
 
 ---
 
-All strategies share a **market sentiment gate** — volume-weighted bull/bear ratio across all scanned pairs filters the allowed trade direction.
+All Bitget strategies share a **market sentiment gate** — volume-weighted bull/bear ratio across all scanned pairs filters the allowed trade direction.
 
 Trade sizes are always calculated as a percentage of **total portfolio equity** (available balance + locked margin + unrealized P/L), not just the free balance.
 
 ---
 
-## Setup
+## Bitget Setup
 
-**1. Clone and install dependencies**
+**1. Create a Bitget account**
+
+Register with the referral link to get a fee discount:
+👉 **[Sign up for Bitget](https://www.bitgetapps.com/referral/register?clacCode=PTQGU9EF&from=%2Fevents%2Freferral-all-program&source=events&utmSource=PremierInviter)**
+
+Then in your account: enable **Futures trading** and create an **API key** with Futures read/trade permissions (no withdrawal permission needed).
+
+**2. Install dependencies**
 ```bash
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-**2. Set your API credentials**
+**3. Configure credentials**
 
-Create a `.env` file in the project root (it is gitignored):
-```bash
+Add to your `.env` file:
+```
 BITGET_API_KEY=your_api_key
 BITGET_API_SECRET=your_api_secret
 BITGET_API_PASSPHRASE=your_passphrase
 ```
 
-`config.py` auto-loads `.env` on startup so no extra tooling is needed. Environment variables take precedence if already set (e.g. on a server).
-
-**3. Tune strategy parameters (optional)**
+**4. Tune strategy parameters (optional)**
 
 | File | Purpose |
 |------|---------|
@@ -138,35 +159,78 @@ Each config has an `S*_ENABLED = True/False` switch to disable a strategy withou
 
 ---
 
+## IG Setup
+
+**1. Create an IG account**
+
+Register with the referral link:
+👉 **[Sign up for IG](https://refer.ig.com/jonkevinh-2)**
+
+Open a **CFD account** (not spread betting). A **demo account** is available for paper testing — recommended before going live.
+
+> Wall Street Cash (US30) minimum contract size is **0.02**. The bot opens **0.04** contracts and partially closes 0.02 at 1:1 R:R, leaving 0.02 to trail.
+
+**2. Get your API key**
+
+IG API keys are separate from your account login — they must be generated from IG Labs:
+
+1. Go to **[labs.ig.com](https://labs.ig.com)** and log in with your IG account
+2. Click **My Applications** → **Create application**
+3. Copy the generated **API Key**
+
+**3. Configure credentials**
+
+Add to your `.env` file:
+```
+IG_API_KEY=your_api_key_from_labs_ig_com
+IG_USERNAME=your_ig_username
+IG_PASSWORD=your_ig_password
+IG_ACC_TYPE=LIVE   # or DEMO
+IG_ACCOUNT_ID=     # optional — leave blank to auto-select
+```
+
+> `IG_USERNAME` is your IG account username (not email). Find it in the IG platform under My Account.
+
+**4. Tune IG parameters (optional)**
+
+| File | Purpose |
+|------|---------|
+| `config_ig.py` | Session hours (ET), contract sizing, poll interval, file paths |
+| `config_s5.py` | Shared S5 strategy parameters (OB lookback, ChoCH window, R:R minimum) |
+
+---
+
 ## Running
 
-### Live trading
-
-**Start the bot**
+### Bitget — Live trading
 ```bash
 python bot.py
 ```
 
-**Start the dashboard** (separate terminal)
-```bash
-python dashboard.py
-```
-Then open [http://localhost:8080](http://localhost:8080).
-
-### Paper trading (simulated, no real orders)
-
-**Start the paper bot**
+### Bitget — Paper trading *(simulated, no real orders)*
 ```bash
 python bot.py --paper
 ```
 
-**Start the paper dashboard** (separate terminal)
+### IG — Live trading *(sessions: Mon–Fri 09:30–12:30 ET only)*
 ```bash
-python dashboard.py --paper
+python ig_bot.py
 ```
-Then open [http://localhost:8081](http://localhost:8081).
 
-Paper trading uses real market data from Bitget but simulates all order execution locally. State is persisted in `paper_state.json` and `state_paper.json`. Paper trades are logged to `trades_paper.csv`.
+The IG bot automatically skips weekends, waits for the session window, and force-closes any open position at 12:30 ET.
+
+### IG — Paper trading
+```bash
+python ig_bot.py --paper
+```
+
+### Dashboard *(both bots, unified)*
+```bash
+python dashboard.py          # Bitget live  → http://localhost:8080
+python dashboard.py --paper  # Bitget paper → http://localhost:8081
+```
+
+The dashboard has a **Bitget / IG tab switcher** at the top. The IG tab shows the current session status (active/closed), open position, and trade history. Both bots can run simultaneously — the dashboard reads from their respective state and log files.
 
 ---
 
@@ -206,19 +270,26 @@ docker compose down                 # stop everything
 
 ## Dashboard
 
-The live dashboard shows:
+The unified dashboard has a **Bitget** tab and an **IG** tab.
 
-- **Header stats**: Balance, Open P/L, Total Value (balance + margin + unrealised P/L), Win Rate, Total P/L, Scanned Pairs
-- **Active trades**: entry price, SL, TP, current P/L %, strategy badge, margin used
-- **Trade history**: closed trades with PnL, result, and strategy tag
-- **Pair scanner tabs**: S1 · S2 · S3 · S4 · S5 — each showing signals and setup status per pair; S5 shows OB zone, entry trigger, SL, and structural TP lines on the 15m chart
-- **Candlestick chart** with RSI and MACD subcharts, entry/SL signal lines, synced scroll across panes
+**Bitget tab:**
+- Header stats: Balance, Open P/L, Total Value, Win Rate, Total P/L, Scanned Pairs
+- Active trades: entry price, SL, TP, current P/L %, strategy badge, margin used
+- Trade history: closed trades with PnL, result, and strategy tag
+- Pair scanner tabs: S1 · S2 · S3 · S4 · S5 — each showing signals and setup status per pair; S5 shows OB zone, entry trigger, SL, and structural TP lines on the 15m chart
+- Candlestick chart with RSI and MACD subcharts, entry/SL signal lines
+
+**IG tab:**
+- Session badge: **In Session** (green, 09:30–12:30 ET weekdays) or **Closed** (red)
+- Bot status badge: Running / Stopped
+- Current open position: side, entry, SL, TP1, final TP, contracts, OB zone, partial-close status
+- Trade history: all closed trades with P/L and exit reason
 
 ---
 
 ## Claude AI Integration
 
-### Trade Approval Filter (`claude_filter.py`)
+### Trade Approval Filter (`claude_filter.py`) *(Bitget only)*
 
 An optional Claude Haiku gate that runs before S2, S3, and S4 execute a trade. When enabled, it sends the current signal indicators + recent trade history to Claude and asks for an APPROVE or REJECT decision with a one-line reason.
 
@@ -234,11 +305,11 @@ An optional Claude Haiku gate that runs before S2, S3, and S4 execute a trade. W
 **Enable in `config.py`:**
 ```python
 CLAUDE_FILTER_ENABLED   = True
-CLAUDE_FILTER_MODEL     = "claude-3-haiku-20240307"  # cheapest model
-CLAUDE_FILTER_HISTORY_N = 30                          # last N trades as context
+CLAUDE_FILTER_MODEL     = "claude-3-haiku-20240307"
+CLAUDE_FILTER_HISTORY_N = 30   # last N trades as context
 ```
 
-Add your API key to `.env`:
+Add to `.env`:
 ```
 ANTHROPIC_API_KEY=sk-ant-...
 ```
@@ -249,11 +320,10 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 ---
 
-### Strategy Optimizer (`optimize.py`)
+### Strategy Optimizer (`optimize.py`) *(Bitget only)*
 
 A one-off analysis script that reads all closed trades, groups them by strategy, and asks Claude Sonnet to identify win/loss patterns and suggest specific config parameter changes.
 
-**Run it:**
 ```bash
 python optimize.py           # analyze trades.csv (live)
 python optimize.py --paper   # analyze trades_paper.csv
@@ -262,22 +332,16 @@ python optimize.py --min 5   # lower minimum trades threshold (default 10)
 
 **Sample output:**
 ```
-🔍 Analyzing S2 — 34 trades | 21W / 13L
-============================================================
+Analyzing S2 — 34 trades | 21W / 13L
 1. KEY PATTERNS
-• Winning trades had RSI ≥ 75 in 18/21 cases; losses averaged RSI 71.2
-• All 7 losses with NEUTRAL sentiment vs 18/21 wins during BULLISH
-• S/R clearance < 18% appeared in 9/13 losses
+   Winning trades had RSI >= 75 in 18/21 cases; losses averaged RSI 71.2
+   All 7 losses with NEUTRAL sentiment vs 18/21 wins during BULLISH
 
 2. SUGGESTED CHANGES
-• S2_RSI_LONG_THRESH: 70 → 75  (filters 8 losing trades, keeps 19 winners)
-• S2_MIN_SR_CLEARANCE: 0.15 → 0.18  (removes 9 losses, loses 2 winners)
-
-3. TRADES TO FILTER
-Skip S2 when RSI < 75 AND sentiment is NEUTRAL — 6 consecutive losses, 0 wins.
+   S2_RSI_LONG_THRESH: 70 → 75  (filters 8 losing trades, keeps 19 winners)
 ```
 
-Claude suggests changes; you review and apply them manually to the config files. All five strategies (S1–S5) are covered once they have sufficient trade history.
+Claude suggests changes; you review and apply them manually. All five strategies (S1–S5) are covered once they have sufficient trade history.
 
 **Cost:** ~$0.015 per run with Claude Sonnet 4.6.
 
@@ -286,63 +350,86 @@ Claude suggests changes; you review and apply them manually to the config files.
 ## File Structure
 
 ```
-├── bot.py              # Main entry point (--paper flag for paper mode)
-├── strategy.py         # S1 + S2 + S3 + S4 + S5 signal logic
+├── bot.py              # Bitget main entry point (--paper flag for paper mode)
+├── ig_bot.py           # IG main entry point — S5 on US30, session-gated
+│
+├── strategy.py         # S1–S5 signal logic (shared by Bitget + IG)
+│
 ├── trader.py           # Bitget order execution (live)
-├── paper_trader.py     # Simulated order execution (paper)
-├── scanner.py          # Pair scanner + market sentiment
-├── dashboard.py        # Live web dashboard (FastAPI, --paper flag)
-├── dashboard.html      # Dashboard frontend (served by dashboard.py)
-├── backtest.py         # Backtesting engine
+├── paper_trader.py     # Simulated order execution (Bitget paper)
 ├── bitget_client.py    # Bitget REST API client
-├── state.py            # Shared in-memory + on-disk state
+├── scanner.py          # Pair scanner + market sentiment (Bitget)
+│
+├── ig_client.py        # IG REST API client
+│
+├── dashboard.py        # Live web dashboard (FastAPI) — Bitget + IG tab
+├── dashboard.html      # Dashboard frontend
+├── backtest.py         # Backtesting engine
+├── state.py            # Shared in-memory + on-disk state (Bitget)
 ├── claude_filter.py    # Claude Haiku trade approval gate (S2/S3/S4)
 ├── optimize.py         # Claude Sonnet strategy parameter optimizer
 │
-├── config.py           # Credentials + paths + Claude filter settings
+├── config.py           # Bitget credentials + bot settings
+├── config_ig.py        # IG credentials + session hours + sizing
 ├── config_s1.py        # Strategy 1 parameters
 ├── config_s2.py        # Strategy 2 parameters
 ├── config_s3.py        # Strategy 3 parameters
 ├── config_s4.py        # Strategy 4 parameters
-├── config_s5.py        # Strategy 5 parameters
+├── config_s5.py        # Strategy 5 parameters (shared: Bitget + IG)
 │
-├── .env                # Local credentials (gitignored, never commit)
-├── trades.csv          # Live trade log
-├── trades_paper.csv    # Paper trade log
-├── state.json          # Live bot runtime state
-├── state_paper.json    # Paper bot runtime state
-├── paper_state.json    # Paper trader simulation state (balance, positions)
-└── bot.log             # Runtime log
+├── .env                # Credentials for all exchanges (gitignored)
+│
+├── trades.csv          # Bitget live trade log
+├── trades_paper.csv    # Bitget paper trade log
+├── ig_trades.csv       # IG trade log (live + paper)
+├── state.json          # Bitget live runtime state
+├── state_paper.json    # Bitget paper runtime state
+├── ig_state.json       # IG runtime state (current position)
+├── paper_state.json    # Bitget paper simulation state
+└── bot.log / ig_bot.log
 ```
 
 ---
 
-## Trade Log (`trades.csv` / `trades_paper.csv`)
+## Trade Log
 
-Each trade open and close is appended as a row. Columns:
+### Bitget (`trades.csv` / `trades_paper.csv`)
 
 | Column | Description |
 |--------|-------------|
 | `timestamp` | UTC ISO timestamp |
-| `action` | `S1_LONG`, `S2_LONG`, `S3_LONG`, `S4_SHORT`, `S*_CLOSE`, etc. |
+| `action` | `S1_LONG`, `S2_LONG`, `S*_CLOSE`, etc. |
 | `symbol` | e.g. `BTCUSDT` |
 | `side` | `LONG` or `SHORT` |
 | `qty` | Position size |
 | `entry` | Entry price |
 | `sl` / `tp` | Stop-loss / take-profit price |
 | `leverage` / `margin` | Risk sizing |
-| `strategy` | Strategy tag |
 | `snap_rsi`, `snap_adx`, … | Indicator snapshot at entry |
-| `snap_rsi_peak`, `snap_spike_body_pct`, `snap_rsi_div` | S4-specific snapshot fields |
-| `snap_s5_ob_low`, `snap_s5_ob_high`, `snap_s5_tp` | S5-specific: OB zone and structural TP at entry |
-| `snap_sr_clearance_pct` | S/R clearance % at entry (S2/S3/S4/S5) |
-| `result` / `pnl_pct` / `exit_reason` | On close rows: WIN/LOSS, P/L %, and exit type (SL/TP/TRAIL_STOP/PARTIAL_TP) |
+| `snap_s5_ob_low`, `snap_s5_ob_high`, `snap_s5_tp` | S5 OB zone and structural TP |
+| `result` / `pnl_pct` / `exit_reason` | On close: WIN/LOSS, P/L %, exit type |
+
+### IG (`ig_trades.csv`)
+
+| Column | Description |
+|--------|-------------|
+| `timestamp` | UTC ISO timestamp |
+| `action` | `S5_OPEN`, `S5_PARTIAL`, `S5_CLOSE` |
+| `side` | `LONG` or `SHORT` |
+| `qty` | Contracts |
+| `entry` / `sl` / `tp` | Prices |
+| `snap_entry_trigger`, `snap_sl`, `snap_rr` | Snapshot at entry |
+| `snap_s5_ob_low`, `snap_s5_ob_high`, `snap_s5_tp` | OB zone and structural TP |
+| `result` / `pnl` / `exit_reason` | On close: WIN/LOSS, USD P/L, exit type |
+| `session_date` | Trading session date (ET) |
+| `mode` | `LIVE` or `PAPER` |
 
 ---
 
 ## Requirements
 
 - Python 3.10+
-- Bitget account with Futures enabled and API key created (Register here -> https://www.bitgetapps.com/referral/register?clacCode=PTQGU9EF&from=%2Fevents%2Freferral-all-program&source=events&utmSource=PremierInviter)
-- `.env` file with valid API credentials
+- **Bitget account** with Futures enabled → [Register here](https://www.bitgetapps.com/referral/register?clacCode=PTQGU9EF&from=%2Fevents%2Freferral-all-program&source=events&utmSource=PremierInviter)
+- **IG account** (CFD) with API key from [labs.ig.com](https://labs.ig.com) → [Register here](https://refer.ig.com/jonkevinh-2)
+- `.env` file with valid credentials for the exchange(s) you intend to use
 - (Optional) Anthropic API key for Claude filter and optimizer

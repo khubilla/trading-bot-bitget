@@ -6,8 +6,9 @@ Run in a separate terminal alongside bot.py:
     python dashboard.py
 """
 
-import csv, json, os, sys
+import csv, json, os, sys, time, zoneinfo
 from pathlib import Path
+from datetime import datetime
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
@@ -17,9 +18,11 @@ import sys as _sys
 from pathlib import Path as _Path
 PAPER_MODE = "--paper" in _sys.argv or _os.environ.get("PAPER_MODE", "") == "1"
 _DATA_DIR  = _Path(_os.environ.get("DATA_DIR", "."))
-STATE_FILE = str(_DATA_DIR / ("state_paper.json" if PAPER_MODE else "state.json"))
+STATE_FILE     = str(_DATA_DIR / ("state_paper.json" if PAPER_MODE else "state.json"))
+IG_STATE_FILE  = str(_DATA_DIR / "ig_state.json")
+IG_TRADES_FILE = str(_DATA_DIR / "ig_trades.csv")
 PORT       = int(_os.environ.get("PORT", 8081 if PAPER_MODE else 8080))
-app = FastAPI(title="Bitget MTF Bot Dashboard" + (" [PAPER]" if PAPER_MODE else ""))
+app = FastAPI(title="MTF Bot Dashboard" + (" [PAPER]" if PAPER_MODE else ""))
 
 # Add bot directory to path so we can import trader + config
 sys.path.insert(0, str(Path(__file__).parent))
@@ -433,6 +436,76 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
     except Exception as e:
         import traceback
         return JSONResponse({"error": str(e), "trace": traceback.format_exc()})
+
+
+@app.get("/api/ig/state")
+def get_ig_state():
+    _ET = zoneinfo.ZoneInfo("America/New_York")
+    now_et = datetime.now(_ET)
+    h, m = now_et.hour, now_et.minute
+    session_active = (
+        now_et.weekday() < 5 and
+        (h, m) >= (9, 30) and
+        (h, m) < (12, 30)
+    )
+
+    # Bot running: state file touched within last 120s
+    bot_running = False
+    if os.path.exists(IG_STATE_FILE):
+        bot_running = (time.time() - os.path.getmtime(IG_STATE_FILE)) < 120
+
+    # Position
+    position = None
+    if os.path.exists(IG_STATE_FILE):
+        try:
+            with open(IG_STATE_FILE) as f:
+                position = json.load(f).get("position")
+        except Exception:
+            pass
+
+    # Trade history
+    trade_history = []
+    stats = {"total": 0, "wins": 0, "total_pnl": 0.0, "win_rate": "—"}
+    if os.path.exists(IG_TRADES_FILE):
+        try:
+            with open(IG_TRADES_FILE, newline="") as f:
+                for r in csv.DictReader(f):
+                    if "_CLOSE" not in (r.get("action") or ""):
+                        continue
+                    try:
+                        pnl = float(r["pnl"]) if r.get("pnl") else None
+                    except (ValueError, TypeError):
+                        pnl = None
+                    trade_history.append({
+                        "side":        r.get("side", ""),
+                        "result":      r.get("result", ""),
+                        "pnl":         round(pnl, 2) if pnl is not None else None,
+                        "exit_reason": r.get("exit_reason", ""),
+                        "closed_at":   r.get("timestamp", ""),
+                        "qty":         r.get("qty", ""),
+                        "mode":        r.get("mode", ""),
+                    })
+            closed = [t for t in trade_history if t["pnl"] is not None]
+            wins   = [t for t in closed if (t["pnl"] or 0) > 0]
+            total_pnl = sum(t["pnl"] for t in closed)
+            stats = {
+                "total":     len(closed),
+                "wins":      len(wins),
+                "total_pnl": round(total_pnl, 2),
+                "win_rate":  f"{round(len(wins)/len(closed)*100)}%" if closed else "—",
+            }
+            trade_history = list(reversed(trade_history))[:30]
+        except Exception:
+            pass
+
+    return JSONResponse({
+        "bot_running":    bot_running,
+        "session_active": session_active,
+        "et_time":        now_et.strftime("%H:%M ET"),
+        "position":       position,
+        "trade_history":  trade_history,
+        "stats":          stats,
+    })
 
 
 @app.get("/", response_class=HTMLResponse)

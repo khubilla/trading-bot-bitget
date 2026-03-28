@@ -114,6 +114,13 @@ def update_pair_state(symbol: str, data: dict):
     s["pair_states"][symbol] = {**data, "updated_at": _now()}
     _write(s)
 
+def patch_pair_state(symbol: str, patch: dict):
+    """Merge patch into an existing pair state entry without overwriting other fields."""
+    s = _read()
+    existing = s["pair_states"].get(symbol, {})
+    s["pair_states"][symbol] = {**existing, **patch, "updated_at": _now()}
+    _write(s)
+
 def add_open_trade(trade: dict):
     s = _read()
     if not trade.get("opened_at"):

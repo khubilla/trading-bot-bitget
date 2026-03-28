@@ -654,6 +654,9 @@ class MTFBot:
             "s3_sr_resistance_pct": s3_sr_resistance_pct,
             "sr_support_pct":       sr_sup_pct,
             "s4_sr_support_pct":    s4_sr_sup_pct,
+            # Reset S5 priority rank each cycle — patched in by _execute_best_s5_candidate
+            "s5_priority_rank":  None,
+            "s5_priority_score": None,
         })
 
         # ── Min balance check ─────────────────────────────────────── #
@@ -920,6 +923,13 @@ class MTFBot:
             return (c["rr"] or 0) * 10 + (c["sr_pct"] or 0)
 
         ranked = sorted(self.s5_candidates, key=_score, reverse=True)
+
+        # Push rank + score to dashboard pair cards
+        for i, c in enumerate(ranked):
+            st.patch_pair_state(c["symbol"], {
+                "s5_priority_rank":  i + 1,
+                "s5_priority_score": round(_score(c), 1),
+            })
 
         if len(ranked) > 1:
             logger.info(f"[S5] {len(ranked)} candidates — ranked by R:R + S/R clearance:")

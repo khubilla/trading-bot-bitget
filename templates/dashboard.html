@@ -339,9 +339,14 @@
     padding: 2px 6px; letter-spacing: 0.08em;
     text-transform: uppercase; flex-shrink: 0;
   }
-  .pair-sig-badge.LONG  { color: var(--emerald); border: 1px solid rgba(0,214,143,0.4); background: rgba(0,214,143,0.08); }
-  .pair-sig-badge.SHORT { color: var(--rose);    border: 1px solid rgba(255,77,106,0.4); background: rgba(255,77,106,0.08); }
-  .pair-sig-badge.HOLD  { color: var(--muted);   border: 1px solid var(--border2); }
+  .pair-sig-badge.LONG    { color: var(--emerald); border: 1px solid rgba(0,214,143,0.4);  background: rgba(0,214,143,0.08); }
+  .pair-sig-badge.SHORT   { color: var(--rose);    border: 1px solid rgba(255,77,106,0.4); background: rgba(255,77,106,0.08); }
+  .pair-sig-badge.HOLD    { color: var(--muted);   border: 1px solid var(--border2); }
+  .pair-sig-badge.PENDING { color: var(--amber);   border: 1px solid rgba(240,165,0,0.4);  background: rgba(240,165,0,0.08); }
+  .s5-rank-badge { font-size: 8px; font-weight: 700; padding: 2px 5px; letter-spacing: 0.06em; }
+  .s5-rank-badge.rank-1 { color: var(--amber);  border: 1px solid rgba(240,165,0,0.5);  background: rgba(240,165,0,0.12); }
+  .s5-rank-badge.rank-2 { color: var(--blue);   border: 1px solid rgba(61,159,255,0.4); background: rgba(61,159,255,0.08); }
+  .s5-rank-badge.rank-3 { color: var(--muted);  border: 1px solid var(--border2); }
 
   /* RSI row */
   .pair-rsi-bar {
@@ -799,6 +804,7 @@
         <button class="strat-tab"        id="tab-s2" onclick="switchTab('s2')">S2 — Coil</button>
         <button class="strat-tab"        id="tab-s3" onclick="switchTab('s3')">S3 — Pullback</button>
         <button class="strat-tab"        id="tab-s4" onclick="switchTab('s4')">S4 — Short</button>
+        <button class="strat-tab"        id="tab-s5" onclick="switchTab('s5')">S5 — OB</button>
       </div>
       <div class="scanner-toolbar">
         <input id="pair-search" type="text" placeholder="Search pair…" oninput="onSearchInput(this.value)" autocomplete="off">
@@ -1211,6 +1217,17 @@ function signalScore(sym, ps, tab) {
     const srClear = ps.s4_sr_support_pct != null && ps.s4_sr_support_pct >= 15;
     return (spike ? 1 : 0) + (spike && rsiHot ? 1 : 0) + (spike && rsiHot && div ? 1 : 0) + (srClear ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
   }
+  if (tab === 's5') {
+    const reason  = ps.s5_reason || '';
+    const sig     = ps.s5_signal || 'HOLD';
+    const rank    = ps.s5_priority_rank;
+    const emaOk   = reason.includes('Daily EMA') && (reason.includes('✅') || reason.includes('bullish') || reason.includes('bearish'));
+    const bosOk   = reason.includes('1H BOS ✅');
+    const obOk    = (reason.includes('OB') && (reason.includes('✅') || reason.includes('ob_low'))) || sig !== 'HOLD';
+    const active  = sig !== 'HOLD';
+    const rankBonus = rank === 1 ? 100 : rank === 2 ? 50 : rank != null ? 25 : 0;
+    return rankBonus + (active ? 10 : 0) + (obOk ? 3 : 0) + (bosOk ? 2 : 0) + (emaOk ? 1 : 0);
+  }
   return 0;
 }
 
@@ -1400,6 +1417,97 @@ function s4CardHTML(sym, ps) {
     </div>`;
 }
 
+function s5CardHTML(sym, ps) {
+  const sig      = ps.s5_signal || 'HOLD';   // LONG | SHORT | PENDING | HOLD
+  const reason   = ps.s5_reason || '—';
+  const symShort = sym.replace('USDT', '');
+  const rank     = ps.s5_priority_rank;
+  const score    = ps.s5_priority_score;
+  const cardClass = sig === 'LONG' ? 'signal-long' : sig === 'SHORT' ? 'signal-short' : '';
+  const rankBadge = rank != null
+    ? `<span class="s5-rank-badge rank-${Math.min(rank, 3)}">#${rank}</span>`
+    : '';
+
+  // Condition checks from reason string
+  const emaOk   = reason.includes('Daily EMA') && (reason.includes('✅') || reason.includes('bullish') || reason.includes('bearish') || sig !== 'HOLD');
+  const bosOk   = reason.includes('1H BOS ✅') || sig !== 'HOLD';
+  const obOk    = (reason.includes('Bullish OB') || reason.includes('Bearish OB') || sig !== 'HOLD');
+  const chochOk = reason.includes('ChoCH ✅') || sig === 'LONG' || sig === 'SHORT' || sig === 'PENDING';
+
+  const emaClass   = emaOk ? 'pass' : 'fail';
+  const bosClass   = !emaOk ? 'muted' : bosOk ? 'pass' : 'fail';
+  const obClass    = !bosOk ? 'muted' : obOk ? 'pass' : 'fail';
+  const chochClass = !obOk  ? 'muted' : chochOk ? 'pass' : 'warn';
+
+  // Price levels
+  const entry  = ps.s5_entry_trigger;
+  const sl     = ps.s5_sl;
+  const tp     = ps.s5_tp;
+  const obLow  = ps.s5_ob_low;
+  const obHigh = ps.s5_ob_high;
+  const srPct  = ps.s5_sr_pct;
+
+  const srClass = srPct == null ? 'muted' : srPct >= 15 ? 'pass' : srPct >= 8 ? 'warn' : 'fail';
+  const srLabel = srPct == null ? '—' : `${srPct.toFixed(1)}% away`;
+
+  // R:R from stored values
+  let rrLabel = '';
+  if (entry && sl && tp && entry !== sl) {
+    const rr = sig === 'SHORT' || sig === 'PENDING'
+      ? (entry - tp) / (sl - entry)
+      : (tp - entry) / (entry - sl);
+    if (rr > 0) rrLabel = ` · R:R ${rr.toFixed(1)}`;
+  }
+
+  const obZone = obLow && obHigh
+    ? `${obLow < 1 ? obLow.toFixed(5) : obLow.toFixed(3)}–${obHigh < 1 ? obHigh.toFixed(5) : obHigh.toFixed(3)}`
+    : 'Searching…';
+  const entryLabel = entry ? (entry < 1 ? entry.toFixed(5) : entry.toFixed(3)) : '—';
+  const scoreLabel = rank != null && score != null ? ` · score ${score.toFixed(1)}` : '';
+  const reasonClass = sig !== 'HOLD' ? 'signal' : chochOk ? 'active' : obOk ? 'active' : '';
+
+  const age = ps.updated_at ? (() => {
+    const sec = Math.floor((Date.now() - new Date(ps.updated_at).getTime()) / 1000);
+    if (sec < 60) return sec + 's ago';
+    if (sec < 3600) return Math.floor(sec/60) + 'm ago';
+    return Math.floor(sec/3600) + 'h ago';
+  })() : 'not scanned';
+
+  return `
+    <div class="pair-card ${cardClass}" data-symbol="${sym}">
+      <div class="pair-top">
+        <div class="pair-name" title="${sym}">${symShort}</div>
+        <div style="display:flex;gap:4px;align-items:center">
+          ${rankBadge}
+          <span class="pair-sig-badge ${sig}">${sig}</span>
+        </div>
+      </div>
+      <div class="pair-checks">
+        <div class="pair-check">
+          <span class="check-label">Daily EMA</span>
+          <span class="check-val ${emaClass}">${emaOk ? 'Bias confirmed ✓' : 'No EMA bias'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">1H BOS</span>
+          <span class="check-val ${bosClass}">${!emaOk ? '—' : bosOk ? 'Confirmed ✓' : 'Not confirmed'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">Order Block</span>
+          <span class="check-val ${obClass}">${!bosOk ? '—' : obOk ? obZone : 'Not found'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">ChoCH / Entry</span>
+          <span class="check-val ${chochClass}">${!obOk ? '—' : chochOk ? `${entryLabel}${rrLabel}` : 'Watching…'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">S/R Clearance</span>
+          <span class="check-val ${srClass}">${srLabel}</span>
+        </div>
+      </div>
+      <div class="pair-reason ${reasonClass}">${reason.replace(/✅/g,'✓').slice(0,70)} · ${age}${scoreLabel}</div>
+    </div>`;
+}
+
 function renderPairGrid(s) {
   const pairStates = s.pair_states || {};
   let pairs = s.qualified_pairs || [];
@@ -1422,7 +1530,9 @@ function renderPairGrid(s) {
   $('pair-count').textContent = pairs.length + ' pairs';
   const grid = $('pair-grid-inner');
   let html = '';
-  if (activeTab === 's4') {
+  if (activeTab === 's5') {
+    html = pairs.map(sym => s5CardHTML(sym, pairStates[sym] || {})).join('');
+  } else if (activeTab === 's4') {
     html = pairs.map(sym => s4CardHTML(sym, pairStates[sym] || {})).join('');
   } else if (activeTab === 's3') {
     html = pairs.map(sym => s3CardHTML(sym, pairStates[sym] || {})).join('');

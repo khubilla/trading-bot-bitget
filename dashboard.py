@@ -283,6 +283,7 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
         s3_sl_price       = None
         s3_stoch_last     = None
         s3_macd_last      = None
+        s3_signal_live    = "HOLD"
 
         # ── S5 indicators (15m only) ──────────────────────────── #
         s5_ob_low_val    = None
@@ -339,7 +340,6 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
                 s3_macd_last = macd_hist_series[-1]["value"]
 
             # Run S3 evaluator to get entry trigger + SL levels
-            s3_signal_live = "HOLD"
             try:
                 _s3sig, _, entry_t, sl_p, _ = evaluate_s3(symbol, df_full)
                 s3_signal_live = _s3sig

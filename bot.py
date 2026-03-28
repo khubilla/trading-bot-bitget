@@ -621,8 +621,10 @@ class MTFBot:
         sr_res_pct     = round((_sr_res - close) / close * 100, 1) if _sr_res else None
         sr_sup_pct     = round((close - _sr_sup) / close * 100, 1) if _sr_sup else None
         s4_sr_sup_pct  = round((close - _s4_base) / close * 100, 1) if _s4_base else None
-        # S2-specific resistance: skip the spike peak (same logic as _execute_s2)
-        if s2_sig != "HOLD":
+        # S2-specific resistance: skip the spike peak (same logic as _execute_s2).
+        # Apply whenever S2 setup is detected (big candle + coiling), not just on signal,
+        # so the chart R line is correct during the coiling/watching phase too.
+        if s2_bh > 0:
             _spike_peak  = float(daily_df["high"].iloc[-config_s2.S2_BIG_CANDLE_LOOKBACK:].max())
             _s2_res      = find_nearest_resistance(daily_df, _spike_peak * 1.01)
             s2_sr_resistance_pct   = round((_s2_res - close) / close * 100, 1) if _s2_res else None
@@ -664,7 +666,7 @@ class MTFBot:
             "s2_sr_resistance_pct":   s2_sr_resistance_pct,
             "s2_sr_resistance_price": s2_sr_resistance_price,
             "s3_sr_resistance_pct":   s3_sr_resistance_pct,
-            "s3_sr_resistance_price": s3_sr_resistance_price if s3_sig != "HOLD" else None,
+            "s3_sr_resistance_price": s3_sr_resistance_price if s3_trigger > 0 else None,
             "sr_support_pct":       sr_sup_pct,
             "s4_sr_support_pct":    s4_sr_sup_pct,
             # Reset S5 priority rank each cycle — patched in by _execute_best_s5_candidate

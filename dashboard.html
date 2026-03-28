@@ -2168,9 +2168,12 @@ async function loadChart(symbol, interval, fitOnLoad = false) {
           $('chartStatus').textContent = '⏸ No S5 OB';
           $('chartStatus').style.color = 'var(--muted)';
         }
-      } else if (data.s3_entry_trigger) {
+      } else if (data.s3_signal_live === 'LONG' && data.s3_entry_trigger) {
         $('chartStatus').textContent = '🟢 Entry set';
         $('chartStatus').style.color = 'var(--emerald)';
+      } else if (data.s3_entry_trigger) {
+        $('chartStatus').textContent = '🟡 Watching — trigger set';
+        $('chartStatus').style.color = 'var(--amber)';
       } else if (data.s3_stoch_last != null && data.s3_stoch_last < 30) {
         $('chartStatus').textContent = '🟡 Stoch OS — watching';
         $('chartStatus').style.color = 'var(--amber)';

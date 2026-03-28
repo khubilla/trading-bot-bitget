@@ -339,8 +339,10 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
                 s3_macd_last = macd_hist_series[-1]["value"]
 
             # Run S3 evaluator to get entry trigger + SL levels
+            s3_signal_live = "HOLD"
             try:
-                _, _, entry_t, sl_p, _ = evaluate_s3(symbol, df_full)
+                _s3sig, _, entry_t, sl_p, _ = evaluate_s3(symbol, df_full)
+                s3_signal_live = _s3sig
                 if entry_t > 0:
                     s3_entry_trigger = round(entry_t, max(2, price_decimals + 1))
                 if sl_p > 0:
@@ -430,6 +432,7 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
             "macd_signal":      macd_sig_series,
             "macd_hist":        macd_hist_series,
             "s3_entry_trigger": s3_entry_trigger,
+            "s3_signal_live":   s3_signal_live,
             "s3_sl_price":      s3_sl_price,
             "s3_stoch_last":    s3_stoch_last,
             "s3_macd_last":     s3_macd_last,

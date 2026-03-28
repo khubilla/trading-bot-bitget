@@ -632,6 +632,7 @@ def evaluate_s3(
         S3_STOCH_K_PERIOD, S3_STOCH_D_SMOOTH, S3_STOCH_OVERSOLD, S3_STOCH_LOOKBACK,
         S3_MACD_FAST, S3_MACD_SLOW, S3_MACD_SIGNAL,
         S3_ENTRY_BUFFER_PCT, S3_SL_BUFFER_PCT, S3_MIN_RR, S3_TRAILING_TRIGGER_PCT,
+        S3_MIN_SR_CLEARANCE,
     )
 
     if not S3_ENABLED:
@@ -710,6 +711,20 @@ def evaluate_s3(
 
     entry_trigger = float(first_green["high"]) * (1 + S3_ENTRY_BUFFER_PCT)
     current_close = float(m15_df["close"].iloc[-1])
+
+    # Resistance clearance: skip if resistance is too close above entry trigger.
+    # S3 is designed to enter on a breakout — if resistance is right above the
+    # trigger there is no room to run.
+    _s3_peak = float(m15_df["high"].iloc[-50:].max())
+    _s3_res  = find_nearest_resistance(m15_df, max(entry_trigger, _s3_peak) * 1.01,
+                                       lookback=300)
+    if _s3_res is not None:
+        _res_clearance = (_s3_res - entry_trigger) / entry_trigger
+        if _res_clearance < S3_MIN_SR_CLEARANCE:
+            return "HOLD", adx_val, 0.0, sl_price, (
+                f"S3 setup ✅ | Resistance {_s3_res:.5f} too close to entry trigger "
+                f"({_res_clearance * 100:.1f}% < {S3_MIN_SR_CLEARANCE * 100:.0f}% min)"
+            )
 
     if current_close <= entry_trigger:
         return "HOLD", adx_val, entry_trigger, sl_price, (

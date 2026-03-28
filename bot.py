@@ -856,10 +856,14 @@ class MTFBot:
         if mark_now > s2_bh * (1 + config_s2.S2_MAX_ENTRY_BUFFER):
             logger.info(f"[S2][{symbol}] ⏸️ LONG entry missed — price {mark_now:.5f} >{config_s2.S2_MAX_ENTRY_BUFFER*100:.0f}% above trigger {s2_bh:.5f}")
             return False
-        # For S2, the spike that created the signal IS s2_bh — its high is not pre-existing
-        # resistance. Skip any swing high within 3% of the trigger (the spike itself).
-        _spike_band = s2_bh * 1.03
-        nearest_res = find_nearest_resistance(c["daily_df"], _spike_band)
+        # S2 setup: big spike candle → coil (consolidation under spike) → breakout.
+        # s2_bh is the coil top, NOT the spike high. The spike peak sits above the coil
+        # and is picked up as resistance, but S2 is designed to trade through it.
+        # Find the spike peak (highest high in the big-candle lookback window) and
+        # search for pre-existing resistance only above that level.
+        _daily = c["daily_df"]
+        _spike_peak = float(_daily["high"].iloc[-config_s2.S2_BIG_CANDLE_LOOKBACK:].max())
+        nearest_res = find_nearest_resistance(_daily, _spike_peak * 1.01)
         if nearest_res is not None:
             clearance = (nearest_res - mark_now) / mark_now
             if clearance < config_s2.S2_MIN_SR_CLEARANCE:

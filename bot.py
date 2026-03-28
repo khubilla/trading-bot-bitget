@@ -909,60 +909,63 @@ class MTFBot:
     # ── S5 Priority Evaluation ────────────────────────────────────── #
 
     def _execute_best_s5_candidate(self, direction: str, balance: float) -> None:
-        """Rank all S5 candidates collected during the scan cycle and execute the best one."""
+        """Rank all S5 candidates (LONG/SHORT/PENDING) by R:R + S/R and execute/queue in order."""
         if not self.s5_candidates:
-            return
-
-        # Split immediate signals (rankable, consume a slot) from pending (just queued)
-        immediate = [c for c in self.s5_candidates if c["sig"] in ("LONG", "SHORT")]
-        pending   = [c for c in self.s5_candidates if c["sig"] in ("PENDING_LONG", "PENDING_SHORT")]
-
-        # Queue pending signals regardless of slot availability — they don't open a position
-        for c in pending:
-            sym = c["symbol"]
-            if sym not in self.pending_signals and not st.is_pair_paused(sym):
-                self._queue_s5_pending(
-                    sym, c["sig"], c["trigger"], c["sl"], c["tp"],
-                    c["ob_low"], c["ob_high"], c["m15_df"],
-                )
-
-        if not immediate:
-            return
-        if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
-            return
-        min_bal = 5.0 / (config_s5.S5_TRADE_SIZE_PCT * config_s5.S5_LEVERAGE)
-        if balance < min_bal:
             return
 
         def _score(c: dict) -> float:
             # Primary: R:R (weight 10×); Secondary: S/R clearance %
             return (c["rr"] or 0) * 10 + (c["sr_pct"] or 0)
 
-        ranked = sorted(immediate, key=_score, reverse=True)
+        ranked = sorted(self.s5_candidates, key=_score, reverse=True)
 
-        # Push rank + score to dashboard pair cards (immediate candidates only)
+        # Assign rank/score to every candidate — shared reference for entry watcher
         for i, c in enumerate(ranked):
-            st.patch_pair_state(c["symbol"], {
-                "s5_priority_rank":  i + 1,
-                "s5_priority_score": round(_score(c), 1),
-            })
+            c["priority_rank"]  = i + 1
+            c["priority_score"] = round(_score(c), 1)
+
+        # Push rank badges to dashboard for immediate (LONG/SHORT) candidates only
+        for c in ranked:
+            if c["sig"] in ("LONG", "SHORT"):
+                st.patch_pair_state(c["symbol"], {
+                    "s5_priority_rank":  c["priority_rank"],
+                    "s5_priority_score": c["priority_score"],
+                })
 
         if len(ranked) > 1:
             logger.info(f"[S5] {len(ranked)} candidates — ranked by R:R + S/R clearance:")
-            for i, c in enumerate(ranked):
+            for c in ranked:
                 logger.info(
-                    f"  #{i+1} {c['symbol']}: R:R={c['rr']} SR={c['sr_pct']}% "
-                    f"sig={c['sig']} score={_score(c):.1f}"
+                    f"  #{c['priority_rank']} {c['symbol']}: R:R={c['rr']} SR={c['sr_pct']}% "
+                    f"sig={c['sig']} score={c['priority_score']}"
                 )
 
+        min_bal = 5.0 / (config_s5.S5_TRADE_SIZE_PCT * config_s5.S5_LEVERAGE)
+
         for candidate in ranked:
+            sym = candidate["symbol"]
+            sig = candidate["sig"]
+
+            if sig in ("PENDING_LONG", "PENDING_SHORT"):
+                # Queue with rank so entry watcher respects ordering
+                if sym not in self.pending_signals and not st.is_pair_paused(sym):
+                    self._queue_s5_pending(
+                        sym, sig, candidate["trigger"], candidate["sl"], candidate["tp"],
+                        candidate["ob_low"], candidate["ob_high"], candidate["m15_df"],
+                        priority_rank=candidate["priority_rank"],
+                        priority_score=candidate["priority_score"],
+                    )
+                continue
+
+            # LONG / SHORT — execute in rank order, stop if slots full
             if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
                 break
-            sym = candidate["symbol"]
+            if balance < min_bal:
+                break
             if sym in self.active_positions or st.is_pair_paused(sym):
                 continue
             self._execute_s5(
-                sym, candidate["sig"], candidate["trigger"], candidate["sl"], candidate["tp"],
+                sym, sig, candidate["trigger"], candidate["sl"], candidate["tp"],
                 candidate["ob_low"], candidate["ob_high"], candidate["reason"],
                 candidate["m15_df"], balance,
             )
@@ -1104,7 +1107,8 @@ class MTFBot:
     # ── Entry Watcher ─────────────────────────────────────────────── #
 
     def _queue_s5_pending(self, symbol: str, sig: str, trigger: float, sl: float,
-                          tp: float, ob_low: float, ob_high: float, m15_df) -> None:
+                          tp: float, ob_low: float, ob_high: float, m15_df,
+                          priority_rank: int = 999, priority_score: float = 0.0) -> None:
         """Pre-validate an S5 PENDING signal (S/R + Claude) and add to pending_signals."""
         side = "LONG" if sig == "PENDING_LONG" else "SHORT"
         # S/R clearance check using already-fetched m15_df
@@ -1154,6 +1158,8 @@ class MTFBot:
             "rr": rr, "sr_clearance_pct": sr_pct,
             "sentiment": self.sentiment.direction if self.sentiment else "?",
             "expires": time.time() + 4 * 3600,
+            "priority_rank": priority_rank,
+            "priority_score": priority_score,
         }
         logger.info(
             f"[S5][{symbol}] 🕐 PENDING {side} queued | "
@@ -1182,8 +1188,12 @@ class MTFBot:
                 except Exception:
                     time.sleep(4)
                     continue
-                for symbol in list(self.pending_signals):
-                    sig = self.pending_signals.get(symbol)
+                # Process pending signals in priority rank order (best setup first)
+                ordered = sorted(
+                    self.pending_signals.items(),
+                    key=lambda kv: kv[1].get("priority_rank", 999),
+                )
+                for symbol, sig in ordered:
                     if not sig:
                         continue
                     # Expire stale signals
@@ -1219,7 +1229,8 @@ class MTFBot:
                                 self.pending_signals.pop(symbol, None)
                                 continue
                             if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
-                                continue
+                                # Slots full — stop processing lower-ranked signals this tick
+                                break
                             if st.is_pair_paused(symbol):
                                 continue
                             self._fire_pending(symbol, sig, mark, balance)

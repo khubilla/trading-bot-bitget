@@ -912,6 +912,22 @@ class MTFBot:
         """Rank all S5 candidates collected during the scan cycle and execute the best one."""
         if not self.s5_candidates:
             return
+
+        # Split immediate signals (rankable, consume a slot) from pending (just queued)
+        immediate = [c for c in self.s5_candidates if c["sig"] in ("LONG", "SHORT")]
+        pending   = [c for c in self.s5_candidates if c["sig"] in ("PENDING_LONG", "PENDING_SHORT")]
+
+        # Queue pending signals regardless of slot availability — they don't open a position
+        for c in pending:
+            sym = c["symbol"]
+            if sym not in self.pending_signals and not st.is_pair_paused(sym):
+                self._queue_s5_pending(
+                    sym, c["sig"], c["trigger"], c["sl"], c["tp"],
+                    c["ob_low"], c["ob_high"], c["m15_df"],
+                )
+
+        if not immediate:
+            return
         if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
             return
         min_bal = 5.0 / (config_s5.S5_TRADE_SIZE_PCT * config_s5.S5_LEVERAGE)
@@ -922,9 +938,9 @@ class MTFBot:
             # Primary: R:R (weight 10×); Secondary: S/R clearance %
             return (c["rr"] or 0) * 10 + (c["sr_pct"] or 0)
 
-        ranked = sorted(self.s5_candidates, key=_score, reverse=True)
+        ranked = sorted(immediate, key=_score, reverse=True)
 
-        # Push rank + score to dashboard pair cards
+        # Push rank + score to dashboard pair cards (immediate candidates only)
         for i, c in enumerate(ranked):
             st.patch_pair_state(c["symbol"], {
                 "s5_priority_rank":  i + 1,
@@ -945,18 +961,11 @@ class MTFBot:
             sym = candidate["symbol"]
             if sym in self.active_positions or st.is_pair_paused(sym):
                 continue
-            sig = candidate["sig"]
-            if sig in ("LONG", "SHORT"):
-                self._execute_s5(
-                    sym, sig, candidate["trigger"], candidate["sl"], candidate["tp"],
-                    candidate["ob_low"], candidate["ob_high"], candidate["reason"],
-                    candidate["m15_df"], balance,
-                )
-            elif sig in ("PENDING_LONG", "PENDING_SHORT") and sym not in self.pending_signals:
-                self._queue_s5_pending(
-                    sym, sig, candidate["trigger"], candidate["sl"], candidate["tp"],
-                    candidate["ob_low"], candidate["ob_high"], candidate["m15_df"],
-                )
+            self._execute_s5(
+                sym, candidate["sig"], candidate["trigger"], candidate["sl"], candidate["tp"],
+                candidate["ob_low"], candidate["ob_high"], candidate["reason"],
+                candidate["m15_df"], balance,
+            )
 
     def _execute_s5(self, symbol: str, s5_sig: str, s5_trigger: float, s5_sl: float,
                     s5_tp: float, s5_ob_low: float, s5_ob_high: float,

@@ -910,10 +910,16 @@ class MTFBot:
         if mark_now > s3_trigger * (1 + config_s3.S3_MAX_ENTRY_BUFFER):
             logger.info(f"[S3][{symbol}] ⏸️ LONG entry missed — price {mark_now:.5f} >{config_s3.S3_MAX_ENTRY_BUFFER*100:.0f}% above trigger {s3_trigger:.5f}")
             return False
-        # Skip swing highs within 3% of s3_trigger — the move that generated the signal
-        # may have left its own high as a 15m pivot, which is not pre-existing resistance.
-        _trigger_band = c["s3_trigger"] * 1.03
-        nearest_res = find_nearest_resistance(c["m15_df"], _trigger_band, lookback=300) if c["m15_df"] is not None else None
+        # S3 is a pullback strategy: the swing high that caused the Stochastic to go
+        # oversold is the pre-pullback peak — it's part of the setup, not a resistance
+        # to avoid. Find that recent peak and search for resistance above it.
+        _m15 = c["m15_df"]
+        if _m15 is not None:
+            _recent_peak = float(_m15["high"].iloc[-50:].max())  # highest high in last ~12h
+            _res_floor   = _recent_peak * 1.01
+        else:
+            _res_floor = c["s3_trigger"]
+        nearest_res = find_nearest_resistance(_m15, _res_floor, lookback=300) if _m15 is not None else None
         if nearest_res is not None:
             clearance = (nearest_res - mark_now) / mark_now
             if clearance < config_s3.S3_MIN_SR_CLEARANCE:

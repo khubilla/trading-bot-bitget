@@ -712,7 +712,7 @@ class MTFBot:
             s2_rr = round(config_s2.S2_TAKE_PROFIT_PCT / config_s2.S2_STOP_LOSS_PCT, 2)
             self.candidates.append({
                 "strategy": "S2", "symbol": symbol, "sig": "LONG",
-                "rr": s2_rr, "sr_pct": sr_res_pct,
+                "rr": s2_rr, "sr_pct": s2_sr_resistance_pct,
                 "s2_bh": s2_bh, "s2_bl": s2_bl,
                 "s2_rsi": s2_rsi, "s2_reason": s2_reason, "daily_df": daily_df,
             })

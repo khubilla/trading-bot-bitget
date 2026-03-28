@@ -618,11 +618,13 @@ class MTFBot:
         s4_sr_sup_pct  = round((close - _s4_base) / close * 100, 1) if _s4_base else None
         # S2-specific resistance: skip the spike peak (same logic as _execute_s2)
         if s2_sig != "HOLD":
-            _spike_peak = float(daily_df["high"].iloc[-config_s2.S2_BIG_CANDLE_LOOKBACK:].max())
-            _s2_res     = find_nearest_resistance(daily_df, _spike_peak * 1.01)
-            s2_sr_resistance_pct = round((_s2_res - close) / close * 100, 1) if _s2_res else None
+            _spike_peak  = float(daily_df["high"].iloc[-config_s2.S2_BIG_CANDLE_LOOKBACK:].max())
+            _s2_res      = find_nearest_resistance(daily_df, _spike_peak * 1.01)
+            s2_sr_resistance_pct   = round((_s2_res - close) / close * 100, 1) if _s2_res else None
+            s2_sr_resistance_price = round(_s2_res, 8) if _s2_res else None
         else:
-            s2_sr_resistance_pct = sr_res_pct  # fallback to generic when no S2 signal
+            s2_sr_resistance_pct   = sr_res_pct
+            s2_sr_resistance_price = None
 
         st.update_pair_state(symbol, {
             "rsi": rsi_val, "htf_bull": htf_bull, "htf_bear": htf_bear,
@@ -654,7 +656,8 @@ class MTFBot:
             "s2_big_candle": s2_rsi > 0 and ("big_candle" in s2_reason or "Big candle" in s2_reason or s2_bh > 0),
             "s2_coiling":    s2_bl > 0 and s2_bh > 0,
             "sr_resistance_pct":    sr_res_pct,
-            "s2_sr_resistance_pct": s2_sr_resistance_pct,
+            "s2_sr_resistance_pct":   s2_sr_resistance_pct,
+            "s2_sr_resistance_price": s2_sr_resistance_price,
             "s3_sr_resistance_pct": s3_sr_resistance_pct,
             "sr_support_pct":       sr_sup_pct,
             "s4_sr_support_pct":    s4_sr_sup_pct,

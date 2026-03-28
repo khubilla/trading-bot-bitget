@@ -1457,7 +1457,7 @@ function signalScore(sym, ps, tab) {
     const bc      = ps.s2_big_candle;
     const rsiOk   = (ps.s2_daily_rsi || 0) > 70;
     const coiling = ps.s2_coiling;
-    const srClear = ps.sr_resistance_pct != null && ps.sr_resistance_pct >= 15;
+    const srClear = ps.s2_sr_resistance_pct != null && ps.s2_sr_resistance_pct >= 15;
     const active  = (ps.s2_signal || 'HOLD') !== 'HOLD';
     return (bc ? 1 : 0) + (bc && rsiOk ? 1 : 0) + (bc && rsiOk && coiling ? 1 : 0) + (srClear ? 1 : 0) + (active ? 10 : 0);
   }
@@ -1527,7 +1527,7 @@ function s2CardHTML(sym, ps) {
   const bcClass  = bigCandle ? 'pass' : 'fail';
   const rsiClass = !bigCandle ? 'muted' : rsiOk ? 'pass' : 'fail';
   const coilClass= !bigCandle || !rsiOk ? 'muted' : coiling ? 'pass' : 'fail';
-  const srPct    = ps.sr_resistance_pct;
+  const srPct    = ps.s2_sr_resistance_pct;
   const srClass  = srPct == null ? 'muted' : srPct >= 15 ? 'pass' : srPct >= 10 ? 'warn' : 'fail';
   const srLabel  = srPct == null ? '—' : `${srPct.toFixed(1)}% away`;
   const reasonClass = sig !== 'HOLD' ? 'signal' : coiling ? 'active' : bigCandle ? 'active' : '';

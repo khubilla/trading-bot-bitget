@@ -7,7 +7,7 @@
 #   3m:  RSI > 70 (long) or < 30 (short) + tight consolidation
 #   3m:  Candle closes above/below box + buffer
 
-S1_ENABLED = True
+S1_ENABLED = False
 
 # ── Timeframes (Bitget granularity format) ───────────────── #
 HTF_INTERVAL   = "1H"     # 1-hour chart

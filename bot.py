@@ -910,7 +910,10 @@ class MTFBot:
         if mark_now > s3_trigger * (1 + config_s3.S3_MAX_ENTRY_BUFFER):
             logger.info(f"[S3][{symbol}] ⏸️ LONG entry missed — price {mark_now:.5f} >{config_s3.S3_MAX_ENTRY_BUFFER*100:.0f}% above trigger {s3_trigger:.5f}")
             return False
-        nearest_res = find_nearest_resistance(c["m15_df"], mark_now, lookback=300) if c["m15_df"] is not None else None
+        # Skip swing highs within 3% of s3_trigger — the move that generated the signal
+        # may have left its own high as a 15m pivot, which is not pre-existing resistance.
+        _trigger_band = c["s3_trigger"] * 1.03
+        nearest_res = find_nearest_resistance(c["m15_df"], _trigger_band, lookback=300) if c["m15_df"] is not None else None
         if nearest_res is not None:
             clearance = (nearest_res - mark_now) / mark_now
             if clearance < config_s3.S3_MIN_SR_CLEARANCE:

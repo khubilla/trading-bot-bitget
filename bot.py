@@ -125,6 +125,8 @@ class MTFBot:
         # Entry watcher — pending signals waiting for price trigger
         self.pending_signals: dict[str, dict] = {}
         self._trade_lock = threading.Lock()
+        # Priority evaluation — candidates collected each scan cycle (all strategies)
+        self.candidates: list = []
 
         st.reset()
         st.set_status("RUNNING")
@@ -474,12 +476,10 @@ class MTFBot:
             f"scanning {allowed} | {open_count}/{config.MAX_CONCURRENT_TRADES} trades open"
         )
 
-        # ── 6. Scan pairs for new entries ─────────────────────────── #
+        # ── 6. Scan pairs — collect candidates, no execution yet ──── #
+        self.candidates = []   # reset candidate list each cycle
         for symbol in self.qualified_pairs:
             if not self.running:
-                break
-            # Re-check limit inside loop (a trade may have opened this cycle)
-            if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
                 break
             # Skip symbols already in a trade
             if symbol in self.active_positions:
@@ -488,8 +488,7 @@ class MTFBot:
             if st.is_pair_paused(symbol):
                 continue
             try:
-                if self._evaluate_pair(symbol, direction, balance):
-                    pass  # keep scanning for more if limit allows
+                self._evaluate_pair(symbol, direction, balance)
             except RuntimeError as e:
                 if "429" in str(e):
                     logger.warning("Rate limited — backing off 5s")
@@ -499,6 +498,9 @@ class MTFBot:
             except Exception as e:
                 logger.error(f"[{symbol}] Error: {e}", exc_info=True)
             time.sleep(0.4)
+
+        # ── 7. Execute best candidates (priority-ranked across all strategies) ─ #
+        self._execute_best_candidate(direction, balance)
 
     def _evaluate_pair(self, symbol: str, allowed_direction: str, balance: float) -> bool:
         htf_df   = tr.get_candles(symbol, config_s1.HTF_INTERVAL,   limit=15)
@@ -562,12 +564,17 @@ class MTFBot:
 
         # ── Strategy 3 ───────────────────────────────────────────── #
         s3_sig, s3_adx, s3_trigger, s3_sl, s3_reason = "HOLD", 0.0, 0.0, 0.0, ""
-        s3_sr_resistance_pct = None
+        s3_sr_resistance_pct   = None
+        s3_sr_resistance_price = None
         if config_s3.S3_ENABLED and self.sentiment.direction != "BEARISH" and m15_df is not None:
             s3_sig, s3_adx, s3_trigger, s3_sl, s3_reason = evaluate_s3(symbol, m15_df)
             logger.info(f"[S3][{symbol}] {s3_reason}")
-            _s3_res = find_nearest_resistance(m15_df, close, lookback=300)
-            s3_sr_resistance_pct = round((_s3_res - close) / close * 100, 1) if _s3_res else None
+            # Skip the pre-pullback peak (highest high in last 50 15m candles) —
+            # same logic as _execute_s3 resistance check.
+            _s3_peak = float(m15_df["high"].iloc[-50:].max())
+            _s3_res  = find_nearest_resistance(m15_df, _s3_peak * 1.01, lookback=300)
+            s3_sr_resistance_pct   = round((_s3_res - close) / close * 100, 1) if _s3_res else None
+            s3_sr_resistance_price = round(_s3_res, 8) if _s3_res else None
 
         # ── Strategy 5 ───────────────────────────────────────────── #
         s5_sig, s5_trigger, s5_sl, s5_tp, s5_ob_low, s5_ob_high, s5_reason = "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, ""
@@ -577,15 +584,29 @@ class MTFBot:
                 symbol, daily_df, htf_df, m15_df, allowed_direction
             )
             logger.info(f"[S5][{symbol}] {s5_reason}")
-            if s5_sig == "LONG":
-                _s5_res = find_nearest_resistance(m15_df, close, lookback=300)
-                s5_sr_pct = round((_s5_res - close) / close * 100, 1) if _s5_res else None
-            elif s5_sig == "SHORT":
-                _s5_sup = find_nearest_support(m15_df, close, lookback=300)
-                s5_sr_pct = round((close - _s5_sup) / close * 100, 1) if _s5_sup else None
-            elif s5_sig in ("PENDING_LONG", "PENDING_SHORT") and symbol not in self.pending_signals:
-                self._queue_s5_pending(symbol, s5_sig, s5_trigger, s5_sl, s5_tp,
-                                       s5_ob_low, s5_ob_high, m15_df)
+            if s5_sig in ("LONG", "SHORT", "PENDING_LONG", "PENDING_SHORT") and s5_trigger > 0:
+                # Compute R:R from returned values
+                if s5_sig in ("LONG", "PENDING_LONG") and s5_tp > s5_trigger > s5_sl > 0:
+                    _s5_rr = round((s5_tp - s5_trigger) / (s5_trigger - s5_sl), 2)
+                elif s5_sig in ("SHORT", "PENDING_SHORT") and 0 < s5_tp < s5_trigger < s5_sl:
+                    _s5_rr = round((s5_trigger - s5_tp) / (s5_sl - s5_trigger), 2)
+                else:
+                    _s5_rr = None
+                # Compute S/R clearance from entry trigger (uniform reference for ranking)
+                if s5_sig in ("LONG", "PENDING_LONG"):
+                    _s5_nr = find_nearest_resistance(m15_df, s5_trigger, lookback=300)
+                    s5_sr_pct = round((_s5_nr - s5_trigger) / s5_trigger * 100, 1) if _s5_nr else None
+                else:
+                    _s5_ns = find_nearest_support(m15_df, s5_trigger, lookback=300)
+                    s5_sr_pct = round((s5_trigger - _s5_ns) / s5_trigger * 100, 1) if _s5_ns else None
+                # Collect for priority ranking — execution deferred to _execute_best_candidate()
+                self.candidates.append({
+                    "strategy": "S5", "symbol": symbol, "sig": s5_sig,
+                    "trigger": s5_trigger, "sl": s5_sl, "tp": s5_tp,
+                    "ob_low": s5_ob_low, "ob_high": s5_ob_high,
+                    "reason": s5_reason, "rr": _s5_rr, "sr_pct": s5_sr_pct,
+                    "m15_df": m15_df,
+                })
 
         # ── Strategy 4 ───────────────────────────────────────────── #
         s4_sig, s4_rsi, s4_trigger, s4_sl, s4_body_pct, s4_rsi_peak, s4_div, s4_div_str, s4_reason = "HOLD", 50.0, 0.0, 0.0, 0.0, 0.0, False, "", ""
@@ -600,6 +621,17 @@ class MTFBot:
         sr_res_pct     = round((_sr_res - close) / close * 100, 1) if _sr_res else None
         sr_sup_pct     = round((close - _sr_sup) / close * 100, 1) if _sr_sup else None
         s4_sr_sup_pct  = round((close - _s4_base) / close * 100, 1) if _s4_base else None
+        # S2-specific resistance: skip the spike peak (same logic as _execute_s2).
+        # Apply whenever S2 setup is detected (big candle + coiling), not just on signal,
+        # so the chart R line is correct during the coiling/watching phase too.
+        if s2_bh > 0:
+            _spike_peak  = float(daily_df["high"].iloc[-config_s2.S2_BIG_CANDLE_LOOKBACK:].max())
+            _s2_res      = find_nearest_resistance(daily_df, _spike_peak * 1.01)
+            s2_sr_resistance_pct   = round((_s2_res - close) / close * 100, 1) if _s2_res else None
+            s2_sr_resistance_price = round(_s2_res, 8) if _s2_res else None
+        else:
+            s2_sr_resistance_pct   = sr_res_pct
+            s2_sr_resistance_price = None
 
         st.update_pair_state(symbol, {
             "rsi": rsi_val, "htf_bull": htf_bull, "htf_bear": htf_bear,
@@ -630,10 +662,18 @@ class MTFBot:
             "s2_daily_rsi": s2_rsi,
             "s2_big_candle": s2_rsi > 0 and ("big_candle" in s2_reason or "Big candle" in s2_reason or s2_bh > 0),
             "s2_coiling":    s2_bl > 0 and s2_bh > 0,
+            "s2_box_low":    round(s2_bl, 8) if s2_bl > 0 else None,
+            "s2_box_high":   round(s2_bh, 8) if s2_bh > 0 else None,
             "sr_resistance_pct":    sr_res_pct,
-            "s3_sr_resistance_pct": s3_sr_resistance_pct,
+            "s2_sr_resistance_pct":   s2_sr_resistance_pct,
+            "s2_sr_resistance_price": s2_sr_resistance_price,
+            "s3_sr_resistance_pct":   s3_sr_resistance_pct,
+            "s3_sr_resistance_price": s3_sr_resistance_price if s3_trigger > 0 else None,
             "sr_support_pct":       sr_sup_pct,
             "s4_sr_support_pct":    s4_sr_sup_pct,
+            # Reset S5 priority rank each cycle — patched in by _execute_best_s5_candidate
+            "s5_priority_rank":  None,
+            "s5_priority_score": None,
         })
 
         # ── Min balance check ─────────────────────────────────────── #
@@ -642,380 +682,512 @@ class MTFBot:
             st.add_scan_log(f"[{symbol}] Skipped — balance ${balance:.2f} < ${min_bal:.2f}", "WARN")
             return False
 
-        # ── Execute S1 ────────────────────────────────────────────── #
+        # ── Collect S1 candidate ──────────────────────────────────── #
         if s1_sig in ("LONG", "SHORT") and allowed_direction != "NEUTRAL":
-            st.add_scan_log(
-                f"[S1][{symbol}] {'🟢' if s1_sig == 'LONG' else '🔴'} {s1_sig} | "
-                f"RSI={rsi_val:.1f} ADX={adx_val:.1f} | SL=box",
-                "SIGNAL"
-            )
-            # SL = tighter of (box-edge swing candle) or (-50% P/L cap)
-            # LONG:  max() → higher price = closer to entry from below = tighter
-            # SHORT: min() → lower price  = closer to entry from above = tighter
             lev = config_s1.LEVERAGE
-            mark_now = float(ltf_df["close"].iloc[-1])
-            pnl50_long  = mark_now * (1 - 0.50 / lev)   # -50% P/L cap for long
-            pnl50_short = mark_now * (1 + 0.50 / lev)   # -50% P/L cap for short
-            last_red_low = next(
-                (float(r["low"])  for _, r in ltf_df.iloc[::-1].iterrows() if float(r["close"]) < float(r["open"])),
-                None
-            )
-            last_grn_high = next(
-                (float(r["high"]) for _, r in ltf_df.iloc[::-1].iterrows() if float(r["close"]) > float(r["open"])),
-                None
-            )
-            sl_long  = max(pnl50_long,  last_red_low  * 0.998 if last_red_low  else pnl50_long)
-            sl_short = min(pnl50_short, last_grn_high * 1.002 if last_grn_high else pnl50_short)
-
-            if s1_sig == "LONG":
-                trade = tr.open_long(symbol, sl_floor=sl_long, leverage=config_s1.LEVERAGE,
-                                     trade_size_pct=config_s1.TRADE_SIZE_PCT,
-                                     take_profit_pct=config_s1.TAKE_PROFIT_PCT)
+            last_red_low  = next((float(r["low"])  for _, r in ltf_df.iloc[::-1].iterrows() if float(r["close"]) < float(r["open"])), None)
+            last_grn_high = next((float(r["high"]) for _, r in ltf_df.iloc[::-1].iterrows() if float(r["close"]) > float(r["open"])), None)
+            pnl50_long  = close * (1 - 0.50 / lev)
+            pnl50_short = close * (1 + 0.50 / lev)
+            sl_long_est  = max(pnl50_long,  last_red_low  * 0.998 if last_red_low  else pnl50_long)
+            sl_short_est = min(pnl50_short, last_grn_high * 1.002 if last_grn_high else pnl50_short)
+            if s1_sig == "LONG" and close > sl_long_est:
+                s1_rr = round(config_s1.TAKE_PROFIT_PCT / ((close - sl_long_est) / close), 2)
+            elif s1_sig == "SHORT" and sl_short_est > close:
+                s1_rr = round(config_s1.TAKE_PROFIT_PCT / ((sl_short_est - close) / close), 2)
             else:
-                trade = tr.open_short(symbol, sl_floor=sl_short, leverage=config_s1.LEVERAGE,
-                                      trade_size_pct=config_s1.TRADE_SIZE_PCT,
-                                      take_profit_pct=config_s1.TAKE_PROFIT_PCT)
-            trade["strategy"] = "S1"
-            trade["snap_rsi"]         = round(rsi_val, 1)
-            trade["snap_adx"]         = round(adx_val, 1)
-            trade["snap_htf"]         = "BULL" if htf_bull else "BEAR" if htf_bear else "NONE"
-            trade["snap_coil"]        = is_coil
-            trade["snap_box_range_pct"] = round((s1_bh - s1_bl) / s1_bl * 100, 3) if s1_bh and s1_bl else None
-            trade["snap_sentiment"]   = self.sentiment.direction
-            trade["trade_id"] = uuid.uuid4().hex[:8]
-            _log_trade(f"S1_{s1_sig}", trade)
-            st.add_open_trade(trade)
-            if PAPER_MODE: tr.tag_strategy(symbol, "S1")
-            self.active_positions[symbol] = {
-                "side": s1_sig, "strategy": "S1",
-                "box_high": s1_bh, "box_low": s1_bl,
-                "trade_id": trade["trade_id"],
-            }
-            return True
+                s1_rr = None
+            self.candidates.append({
+                "strategy": "S1", "symbol": symbol, "sig": s1_sig,
+                "rr": s1_rr,
+                "sr_pct": sr_res_pct if s1_sig == "LONG" else sr_sup_pct,
+                "s1_bh": s1_bh, "s1_bl": s1_bl,
+                "rsi_val": rsi_val, "adx_val": adx_val,
+                "htf_bull": htf_bull, "htf_bear": htf_bear, "is_coil": is_coil,
+                "ltf_df": ltf_df, "allowed_direction": allowed_direction,
+            })
 
-        # ── Execute S2 ────────────────────────────────────────────── #
+        # ── Collect S2 candidate ──────────────────────────────────── #
         if s2_sig == "LONG":
-            mark_now = tr.get_mark_price(symbol)
-            if mark_now > s2_bh * (1 + config_s2.S2_MAX_ENTRY_BUFFER):
-                logger.info(f"[S2][{symbol}] ⏸️ LONG setup valid but entry missed — price {mark_now:.5f} already >{config_s2.S2_MAX_ENTRY_BUFFER*100:.0f}% above trigger {s2_bh:.5f}")
-                return False
-            nearest_res = find_nearest_resistance(daily_df, mark_now)
-            if nearest_res is not None:
-                clearance = (nearest_res - mark_now) / mark_now
-                if clearance < config_s2.S2_MIN_SR_CLEARANCE:
-                    logger.info(
-                        f"[S2][{symbol}] ⏸️ LONG skipped — resistance {nearest_res:.5f} "
-                        f"only {clearance*100:.1f}% away (min {config_s2.S2_MIN_SR_CLEARANCE*100:.0f}%)"
-                    )
-                    st.add_scan_log(f"[S2][{symbol}] ⛔ Resistance {nearest_res:.5f} too close ({clearance*100:.1f}%)", "WARN")
-                    return False
-            if config.CLAUDE_FILTER_ENABLED:
-                _sr_str = f"{round((nearest_res - mark_now) / mark_now * 100, 1)}%" if nearest_res else "none found"
-                _cd = claude_approve("S2", symbol, {
-                    "RSI": round(s2_rsi, 1),
-                    "S/R clearance": _sr_str,
-                    "Sentiment": self.sentiment.direction,
-                    "Entry": round(mark_now, 5),
-                    "SL": round(s2_bl, 5),
-                })
-                if not _cd["approved"]:
-                    logger.info(f"[S2][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
-                    st.add_scan_log(f"[S2][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
-                    return False
-            st.add_scan_log(f"[S2][{symbol}] 🟢 LONG | {s2_reason}", "SIGNAL")
-            trade = tr.open_long(symbol, box_low=s2_bl, leverage=config_s2.S2_LEVERAGE,
-                                 trade_size_pct=config_s2.S2_TRADE_SIZE_PCT * 0.5,
-                                 take_profit_pct=config_s2.S2_TAKE_PROFIT_PCT,
-                                 stop_loss_pct=config_s2.S2_STOP_LOSS_PCT,
-                                 use_s2_exits=True)
-            trade["strategy"] = "S2"
-            trade["snap_daily_rsi"]      = round(s2_rsi, 1)
-            trade["snap_box_range_pct"]  = round((s2_bh - s2_bl) / s2_bl * 100, 3) if s2_bh and s2_bl else None
-            trade["snap_sentiment"]      = self.sentiment.direction
-            trade["snap_sr_clearance_pct"] = round((nearest_res - mark_now) / mark_now * 100, 1) if nearest_res else None
-            trade["trade_id"] = uuid.uuid4().hex[:8]
-            _log_trade("S2_LONG", trade)
-            st.add_open_trade(trade)
-            if PAPER_MODE: tr.tag_strategy(symbol, "S2")
-            self.active_positions[symbol] = {
-                "side": "LONG", "strategy": "S2",
-                "box_high": s2_bh if s2_bh else 0.0, "box_low": s2_bl,
-                "scale_in_pending": True,
-                "scale_in_after": time.time() + 3600,
-                "scale_in_trade_size_pct": config_s2.S2_TRADE_SIZE_PCT,
-                "trade_id": trade["trade_id"],
-            }
-            return True
+            s2_rr = round(config_s2.S2_TAKE_PROFIT_PCT / config_s2.S2_STOP_LOSS_PCT, 2)
+            self.candidates.append({
+                "strategy": "S2", "symbol": symbol, "sig": "LONG",
+                "rr": s2_rr, "sr_pct": s2_sr_resistance_pct,
+                "s2_bh": s2_bh, "s2_bl": s2_bl,
+                "s2_rsi": s2_rsi, "s2_reason": s2_reason, "daily_df": daily_df,
+            })
 
-        # ── Execute S3 ────────────────────────────────────────────── #
+        # ── Collect S3 candidate ──────────────────────────────────── #
         if s3_sig == "LONG":
-            mark_now = tr.get_mark_price(symbol)
-            if mark_now > s3_trigger * (1 + config_s3.S3_MAX_ENTRY_BUFFER):
-                logger.info(f"[S3][{symbol}] ⏸️ LONG setup valid but entry missed — price {mark_now:.5f} already >{config_s3.S3_MAX_ENTRY_BUFFER*100:.0f}% above trigger {s3_trigger:.5f}")
+            s3_rr = round(config_s3.S3_TRAILING_TRIGGER_PCT * s3_trigger / (s3_trigger - s3_sl), 2) \
+                    if s3_trigger and s3_sl and s3_trigger > s3_sl else None
+            self.candidates.append({
+                "strategy": "S3", "symbol": symbol, "sig": "LONG",
+                "rr": s3_rr, "sr_pct": s3_sr_resistance_pct,
+                "s3_trigger": s3_trigger, "s3_sl": s3_sl,
+                "s3_adx": s3_adx, "s3_reason": s3_reason,
+                "s3_sr_resistance_pct": s3_sr_resistance_pct, "m15_df": m15_df,
+            })
+
+        # ── Collect S4 candidate ──────────────────────────────────── #
+        if s4_sig == "SHORT" and s4_trigger > 0:
+            self.candidates.append({
+                "strategy": "S4", "symbol": symbol, "sig": "SHORT",
+                "rr": None, "sr_pct": s4_sr_sup_pct,
+                "s4_trigger": s4_trigger, "s4_sl": s4_sl,
+                "s4_rsi": s4_rsi, "s4_rsi_peak": s4_rsi_peak,
+                "s4_body_pct": s4_body_pct, "s4_div": s4_div, "s4_div_str": s4_div_str,
+                "s4_reason": s4_reason, "daily_df": daily_df,
+            })
+
+        # All strategies deferred — executed by _execute_best_candidate()
+        return False
+
+    # ── Priority Evaluation (all strategies) ─────────────────────── #
+
+    def _execute_best_candidate(self, direction: str, balance: float) -> None:
+        """Rank all candidates (S1–S5, LONG/SHORT/PENDING) by R:R + S/R and execute/queue in order."""
+        if not self.candidates:
+            return
+
+        def _score(c: dict) -> float:
+            # Primary: R:R (weight 10×); Secondary: S/R clearance %
+            return (c["rr"] or 0) * 10 + (c["sr_pct"] or 0)
+
+        ranked = sorted(self.candidates, key=_score, reverse=True)
+
+        # Assign rank/score to every candidate — shared reference for entry watcher
+        for i, c in enumerate(ranked):
+            c["priority_rank"]  = i + 1
+            c["priority_score"] = round(_score(c), 1)
+
+        # Push rank badges to dashboard for S5 immediate candidates
+        for c in ranked:
+            if c["strategy"] == "S5" and c["sig"] in ("LONG", "SHORT"):
+                st.patch_pair_state(c["symbol"], {
+                    "s5_priority_rank":  c["priority_rank"],
+                    "s5_priority_score": c["priority_score"],
+                })
+
+        if len(ranked) > 1:
+            logger.info(f"[RANK] {len(ranked)} candidates — ranked by R:R + S/R clearance:")
+            for c in ranked:
+                logger.info(
+                    f"  #{c['priority_rank']} [{c['strategy']}][{c['symbol']}]: "
+                    f"R:R={c['rr']} SR={c['sr_pct']}% sig={c['sig']} score={c['priority_score']}"
+                )
+
+        _dispatchers = {
+            "S1": self._execute_s1,
+            "S2": self._execute_s2,
+            "S3": self._execute_s3,
+            "S4": self._execute_s4,
+        }
+
+        for candidate in ranked:
+            sym      = candidate["symbol"]
+            sig      = candidate["sig"]
+            strategy = candidate["strategy"]
+
+            if sig in ("PENDING_LONG", "PENDING_SHORT"):
+                # S5 PENDING only — queue with rank so entry watcher respects ordering
+                if sym not in self.pending_signals and not st.is_pair_paused(sym):
+                    self._queue_s5_pending(
+                        sym, sig, candidate["trigger"], candidate["sl"], candidate["tp"],
+                        candidate["ob_low"], candidate["ob_high"], candidate["m15_df"],
+                        priority_rank=candidate["priority_rank"],
+                        priority_score=candidate["priority_score"],
+                    )
+                continue
+
+            # Immediate LONG/SHORT — stop if slots full
+            if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
+                break
+            if sym in self.active_positions or st.is_pair_paused(sym):
+                continue
+
+            if strategy == "S5":
+                min_bal = 5.0 / (config_s5.S5_TRADE_SIZE_PCT * config_s5.S5_LEVERAGE)
+                if balance < min_bal:
+                    continue
+                self._execute_s5(
+                    sym, sig, candidate["trigger"], candidate["sl"], candidate["tp"],
+                    candidate["ob_low"], candidate["ob_high"], candidate["reason"],
+                    candidate["m15_df"], balance,
+                )
+            elif strategy in _dispatchers:
+                min_bal = 5.0 / (config_s1.TRADE_SIZE_PCT * config_s1.LEVERAGE)
+                if balance < min_bal:
+                    continue
+                _dispatchers[strategy](candidate, balance)
+
+    # ── Per-strategy executors ────────────────────────────────────── #
+
+    def _execute_s1(self, c: dict, balance: float) -> bool:
+        symbol = c["symbol"]
+        if symbol in self.active_positions:
+            return False
+        s1_sig = c["sig"]
+        ltf_df = c["ltf_df"]
+        lev    = config_s1.LEVERAGE
+        mark_now = tr.get_mark_price(symbol)
+        pnl50_long  = mark_now * (1 - 0.50 / lev)
+        pnl50_short = mark_now * (1 + 0.50 / lev)
+        last_red_low  = next((float(r["low"])  for _, r in ltf_df.iloc[::-1].iterrows() if float(r["close"]) < float(r["open"])), None)
+        last_grn_high = next((float(r["high"]) for _, r in ltf_df.iloc[::-1].iterrows() if float(r["close"]) > float(r["open"])), None)
+        sl_long  = max(pnl50_long,  last_red_low  * 0.998 if last_red_low  else pnl50_long)
+        sl_short = min(pnl50_short, last_grn_high * 1.002 if last_grn_high else pnl50_short)
+        st.add_scan_log(
+            f"[S1][{symbol}] {'🟢' if s1_sig == 'LONG' else '🔴'} {s1_sig} | "
+            f"RSI={c['rsi_val']:.1f} ADX={c['adx_val']:.1f} | rank=#{c['priority_rank']}",
+            "SIGNAL"
+        )
+        if s1_sig == "LONG":
+            trade = tr.open_long(symbol, sl_floor=sl_long, leverage=lev,
+                                 trade_size_pct=config_s1.TRADE_SIZE_PCT,
+                                 take_profit_pct=config_s1.TAKE_PROFIT_PCT)
+        else:
+            trade = tr.open_short(symbol, sl_floor=sl_short, leverage=lev,
+                                  trade_size_pct=config_s1.TRADE_SIZE_PCT,
+                                  take_profit_pct=config_s1.TAKE_PROFIT_PCT)
+        trade["strategy"] = "S1"
+        trade["snap_rsi"]           = round(c["rsi_val"], 1)
+        trade["snap_adx"]           = round(c["adx_val"], 1)
+        trade["snap_htf"]           = "BULL" if c["htf_bull"] else "BEAR" if c["htf_bear"] else "NONE"
+        trade["snap_coil"]          = c["is_coil"]
+        trade["snap_box_range_pct"] = round((c["s1_bh"] - c["s1_bl"]) / c["s1_bl"] * 100, 3) if c["s1_bh"] and c["s1_bl"] else None
+        trade["snap_sentiment"]     = self.sentiment.direction
+        trade["trade_id"] = uuid.uuid4().hex[:8]
+        _log_trade(f"S1_{s1_sig}", trade)
+        st.add_open_trade(trade)
+        if PAPER_MODE: tr.tag_strategy(symbol, "S1")
+        self.active_positions[symbol] = {
+            "side": s1_sig, "strategy": "S1",
+            "box_high": c["s1_bh"], "box_low": c["s1_bl"],
+            "trade_id": trade["trade_id"],
+        }
+        return True
+
+    def _execute_s2(self, c: dict, balance: float) -> bool:
+        symbol = c["symbol"]
+        if symbol in self.active_positions:
+            return False
+        mark_now = tr.get_mark_price(symbol)
+        s2_bh = c["s2_bh"]
+        if mark_now > s2_bh * (1 + config_s2.S2_MAX_ENTRY_BUFFER):
+            logger.info(f"[S2][{symbol}] ⏸️ LONG entry missed — price {mark_now:.5f} >{config_s2.S2_MAX_ENTRY_BUFFER*100:.0f}% above trigger {s2_bh:.5f}")
+            return False
+        # S2 setup: big spike candle → coil (consolidation under spike) → breakout.
+        # s2_bh is the coil top, NOT the spike high. The spike peak sits above the coil
+        # and is picked up as resistance, but S2 is designed to trade through it.
+        # Find the spike peak (highest high in the big-candle lookback window) and
+        # search for pre-existing resistance only above that level.
+        _daily = c["daily_df"]
+        _spike_peak = float(_daily["high"].iloc[-config_s2.S2_BIG_CANDLE_LOOKBACK:].max())
+        nearest_res = find_nearest_resistance(_daily, _spike_peak * 1.01)
+        if nearest_res is not None:
+            clearance = (nearest_res - mark_now) / mark_now
+            if clearance < config_s2.S2_MIN_SR_CLEARANCE:
+                logger.info(f"[S2][{symbol}] ⏸️ LONG skipped — resistance {nearest_res:.5f} only {clearance*100:.1f}% away")
+                st.add_scan_log(f"[S2][{symbol}] ⛔ Resistance {nearest_res:.5f} too close ({clearance*100:.1f}%)", "WARN")
+                return False
+        if config.CLAUDE_FILTER_ENABLED:
+            _sr_str = f"{round((nearest_res - mark_now) / mark_now * 100, 1)}%" if nearest_res else "none found"
+            _cd = claude_approve("S2", symbol, {
+                "RSI": round(c["s2_rsi"], 1), "S/R clearance": _sr_str,
+                "Sentiment": self.sentiment.direction,
+                "Entry": round(mark_now, 5), "SL": round(c["s2_bl"], 5),
+            })
+            if not _cd["approved"]:
+                logger.info(f"[S2][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
+                st.add_scan_log(f"[S2][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
+                return False
+        st.add_scan_log(f"[S2][{symbol}] 🟢 LONG | {c['s2_reason']} | rank=#{c['priority_rank']}", "SIGNAL")
+        trade = tr.open_long(symbol, box_low=c["s2_bl"], leverage=config_s2.S2_LEVERAGE,
+                             trade_size_pct=config_s2.S2_TRADE_SIZE_PCT * 0.5,
+                             take_profit_pct=config_s2.S2_TAKE_PROFIT_PCT,
+                             stop_loss_pct=config_s2.S2_STOP_LOSS_PCT,
+                             use_s2_exits=True)
+        trade["strategy"] = "S2"
+        trade["snap_daily_rsi"]        = round(c["s2_rsi"], 1)
+        trade["snap_box_range_pct"]    = round((s2_bh - c["s2_bl"]) / c["s2_bl"] * 100, 3) if s2_bh and c["s2_bl"] else None
+        trade["snap_sentiment"]        = self.sentiment.direction
+        trade["snap_sr_clearance_pct"] = round((nearest_res - mark_now) / mark_now * 100, 1) if nearest_res else None
+        trade["trade_id"] = uuid.uuid4().hex[:8]
+        _log_trade("S2_LONG", trade)
+        st.add_open_trade(trade)
+        if PAPER_MODE: tr.tag_strategy(symbol, "S2")
+        self.active_positions[symbol] = {
+            "side": "LONG", "strategy": "S2",
+            "box_high": s2_bh if s2_bh else 0.0, "box_low": c["s2_bl"],
+            "scale_in_pending": True, "scale_in_after": time.time() + 3600,
+            "scale_in_trade_size_pct": config_s2.S2_TRADE_SIZE_PCT,
+            "trade_id": trade["trade_id"],
+        }
+        return True
+
+    def _execute_s3(self, c: dict, balance: float) -> bool:
+        symbol = c["symbol"]
+        if symbol in self.active_positions:
+            return False
+        mark_now = tr.get_mark_price(symbol)
+        s3_trigger = c["s3_trigger"]
+        if mark_now > s3_trigger * (1 + config_s3.S3_MAX_ENTRY_BUFFER):
+            logger.info(f"[S3][{symbol}] ⏸️ LONG entry missed — price {mark_now:.5f} >{config_s3.S3_MAX_ENTRY_BUFFER*100:.0f}% above trigger {s3_trigger:.5f}")
+            return False
+        # S3 is a pullback strategy: the swing high that caused the Stochastic to go
+        # oversold is the pre-pullback peak — it's part of the setup, not a resistance
+        # to avoid. Find that recent peak and search for resistance above it.
+        _m15 = c["m15_df"]
+        if _m15 is not None:
+            _recent_peak = float(_m15["high"].iloc[-50:].max())  # highest high in last ~12h
+            _res_floor   = _recent_peak * 1.01
+        else:
+            _res_floor = c["s3_trigger"]
+        nearest_res = find_nearest_resistance(_m15, _res_floor, lookback=300) if _m15 is not None else None
+        if nearest_res is not None:
+            clearance = (nearest_res - mark_now) / mark_now
+            if clearance < config_s3.S3_MIN_SR_CLEARANCE:
+                logger.info(f"[S3][{symbol}] ⏸️ LONG skipped — 15m resistance {nearest_res:.5f} only {clearance*100:.1f}% away")
+                st.add_scan_log(f"[S3][{symbol}] ⛔ 15m resistance {nearest_res:.5f} too close ({clearance*100:.1f}%)", "WARN")
+                return False
+        if config.CLAUDE_FILTER_ENABLED:
+            _sr_str = f"{c['s3_sr_resistance_pct']}%" if c["s3_sr_resistance_pct"] else "none found"
+            _cd = claude_approve("S3", symbol, {
+                "ADX": round(c["s3_adx"], 1) if c["s3_adx"] else "?",
+                "S/R clearance (15m)": _sr_str, "Sentiment": self.sentiment.direction,
+                "Entry": round(mark_now, 5), "SL": round(c["s3_sl"], 5),
+            })
+            if not _cd["approved"]:
+                logger.info(f"[S3][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
+                st.add_scan_log(f"[S3][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
+                return False
+        st.add_scan_log(f"[S3][{symbol}] 🟢 LONG | {c['s3_reason']} | rank=#{c['priority_rank']}", "SIGNAL")
+        trade = tr.open_long(symbol, sl_floor=c["s3_sl"], leverage=config_s3.S3_LEVERAGE,
+                             trade_size_pct=config_s3.S3_TRADE_SIZE_PCT, use_s2_exits=True)
+        trade["strategy"] = "S3"
+        trade["snap_adx"]              = round(c["s3_adx"], 1) if c["s3_adx"] else None
+        trade["snap_entry_trigger"]    = round(s3_trigger, 8)
+        trade["snap_sl"]               = round(c["s3_sl"], 8)
+        trade["snap_rr"]               = round(config_s3.S3_TRAILING_TRIGGER_PCT * s3_trigger / (s3_trigger - c["s3_sl"]), 2) \
+                                         if s3_trigger and c["s3_sl"] and s3_trigger > c["s3_sl"] else None
+        trade["snap_sentiment"]        = self.sentiment.direction
+        trade["snap_sr_clearance_pct"] = c["s3_sr_resistance_pct"]
+        trade["trade_id"] = uuid.uuid4().hex[:8]
+        _log_trade("S3_LONG", trade)
+        st.add_open_trade(trade)
+        if PAPER_MODE: tr.tag_strategy(symbol, "S3")
+        self.active_positions[symbol] = {
+            "side": "LONG", "strategy": "S3",
+            "box_high": s3_trigger, "box_low": c["s3_sl"],
+            "trade_id": trade["trade_id"],
+        }
+        return True
+
+    def _execute_s4(self, c: dict, balance: float) -> bool:
+        symbol = c["symbol"]
+        if symbol in self.active_positions:
+            return False
+        mark_now        = tr.get_mark_price(symbol)
+        s4_trigger      = c["s4_trigger"]
+        prev_low_approx = s4_trigger / (1 - config_s4.S4_ENTRY_BUFFER)
+        too_far         = mark_now < prev_low_approx * (1 - config_s4.S4_MAX_ENTRY_BUFFER)
+        if too_far:
+            logger.info(
+                f"[S4][{symbol}] ⏸️ SHORT entry missed — "
+                f"price {mark_now:.5f} >{config_s4.S4_MAX_ENTRY_BUFFER*100:.0f}% below prev_low {prev_low_approx:.5f}"
+            )
+            return False
+        if mark_now > s4_trigger:
+            return False  # price not yet in entry window
+        spike_base = find_spike_base(c["daily_df"])
+        if spike_base is not None:
+            clearance = (mark_now - spike_base) / mark_now
+            if clearance < config_s4.S4_MIN_SR_CLEARANCE:
+                logger.info(f"[S4][{symbol}] ⏸️ SHORT skipped — pre-pump base {spike_base:.5f} only {clearance*100:.1f}% away")
+                st.add_scan_log(f"[S4][{symbol}] ⛔ Pre-pump base {spike_base:.5f} too close ({clearance*100:.1f}%)", "WARN")
+                return False
+        if config.CLAUDE_FILTER_ENABLED:
+            _sr_str = f"{round((mark_now - spike_base) / mark_now * 100, 1)}%" if spike_base else "none found"
+            _cd = claude_approve("S4", symbol, {
+                "RSI peak": round(c["s4_rsi_peak"], 1), "RSI divergence": str(c["s4_div"]),
+                "S/R clearance (spike base)": _sr_str, "Sentiment": self.sentiment.direction,
+                "Entry": round(s4_trigger, 5), "SL": round(c["s4_sl"], 5),
+            })
+            if not _cd["approved"]:
+                logger.info(f"[S4][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
+                st.add_scan_log(f"[S4][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
+                return False
+        st.add_scan_log(
+            f"[S4][{symbol}] 🔴 SHORT | spike={c['s4_body_pct']*100:.0f}% RSI={c['s4_rsi']:.1f} | "
+            f"entry≤{s4_trigger:.5f} @ {mark_now:.5f} | rank=#{c['priority_rank']}",
+            "SIGNAL"
+        )
+        s4_sl_actual = mark_now * (1 + 0.50 / config_s4.S4_LEVERAGE)
+        trade = tr.open_short(symbol, sl_floor=s4_sl_actual, leverage=config_s4.S4_LEVERAGE,
+                              trade_size_pct=config_s4.S4_TRADE_SIZE_PCT * 0.5, use_s4_exits=True)
+        trade["strategy"]              = "S4"
+        trade["snap_rsi"]              = round(c["s4_rsi"], 1)
+        trade["snap_rsi_peak"]         = round(c["s4_rsi_peak"], 1)
+        trade["snap_spike_body_pct"]   = round(c["s4_body_pct"] * 100, 1)
+        trade["snap_rsi_div"]          = c["s4_div"]
+        trade["snap_rsi_div_str"]      = c["s4_div_str"]
+        trade["snap_sl"]               = round(s4_sl_actual, 8)
+        trade["snap_sentiment"]        = self.sentiment.direction
+        trade["snap_sr_clearance_pct"] = round((mark_now - spike_base) / mark_now * 100, 1) if spike_base else None
+        trade["trade_id"] = uuid.uuid4().hex[:8]
+        _log_trade("S4_SHORT", trade)
+        st.add_open_trade(trade)
+        if PAPER_MODE: tr.tag_strategy(symbol, "S4")
+        self.active_positions[symbol] = {
+            "side": "SHORT", "strategy": "S4",
+            "box_high": c["s4_sl"], "box_low": s4_trigger,
+            "scale_in_pending": True, "scale_in_after": time.time() + 3600,
+            "scale_in_trade_size_pct": config_s4.S4_TRADE_SIZE_PCT,
+            "s4_prev_low": prev_low_approx,
+            "trade_id": trade["trade_id"],
+        }
+        return True
+
+    def _execute_s5(self, symbol: str, s5_sig: str, s5_trigger: float, s5_sl: float,
+                    s5_tp: float, s5_ob_low: float, s5_ob_high: float,
+                    s5_reason: str, m15_df, balance: float) -> bool:
+        """Open an S5 LONG or SHORT trade. Returns True if the trade was opened."""
+        if symbol in self.active_positions:
+            return False
+        mark_now = tr.get_mark_price(symbol)
+
+        if s5_sig == "LONG":
+            if mark_now < s5_trigger:
+                logger.info(f"[S5][{symbol}] ⏸️ LONG signal stale — price {mark_now:.5f} fell back below entry {s5_trigger:.5f}")
+                return False
+            if mark_now > s5_trigger * (1 + config_s5.S5_MAX_ENTRY_BUFFER):
+                logger.info(f"[S5][{symbol}] ⏸️ LONG entry missed — price already >{config_s5.S5_MAX_ENTRY_BUFFER*100:.0f}% above trigger {s5_trigger:.5f}")
                 return False
             nearest_res = find_nearest_resistance(m15_df, mark_now, lookback=300) if m15_df is not None else None
             if nearest_res is not None:
                 clearance = (nearest_res - mark_now) / mark_now
-                if clearance < config_s3.S3_MIN_SR_CLEARANCE:
+                if clearance < config_s5.S5_MIN_SR_CLEARANCE:
                     logger.info(
-                        f"[S3][{symbol}] ⏸️ LONG skipped — 15m resistance {nearest_res:.5f} "
-                        f"only {clearance*100:.1f}% away (min {config_s3.S3_MIN_SR_CLEARANCE*100:.0f}%)"
+                        f"[S5][{symbol}] ⏸️ LONG skipped — 15m resistance {nearest_res:.5f} "
+                        f"only {clearance*100:.1f}% away (min {config_s5.S5_MIN_SR_CLEARANCE*100:.0f}%)"
                     )
-                    st.add_scan_log(f"[S3][{symbol}] ⛔ 15m resistance {nearest_res:.5f} too close ({clearance*100:.1f}%)", "WARN")
+                    st.add_scan_log(f"[S5][{symbol}] ⛔ 15m resistance {nearest_res:.5f} too close ({clearance*100:.1f}%)", "WARN")
                     return False
             if config.CLAUDE_FILTER_ENABLED:
-                _sr_str = f"{s3_sr_resistance_pct}%" if s3_sr_resistance_pct else "none found"
-                _cd = claude_approve("S3", symbol, {
-                    "ADX": round(s3_adx, 1) if s3_adx else "?",
+                _sr_str = f"{round((nearest_res - mark_now) / mark_now * 100, 1)}%" if nearest_res else "none found"
+                _cd = claude_approve("S5", symbol, {
+                    "OB zone": f"{s5_ob_low:.5f}–{s5_ob_high:.5f}",
                     "S/R clearance (15m)": _sr_str,
                     "Sentiment": self.sentiment.direction,
                     "Entry": round(mark_now, 5),
-                    "SL": round(s3_sl, 5),
+                    "SL": round(s5_sl, 5),
                 })
                 if not _cd["approved"]:
-                    logger.info(f"[S3][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
-                    st.add_scan_log(f"[S3][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
+                    logger.info(f"[S5][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
+                    st.add_scan_log(f"[S5][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
                     return False
-            st.add_scan_log(f"[S3][{symbol}] 🟢 LONG | {s3_reason}", "SIGNAL")
+            st.add_scan_log(f"[S5][{symbol}] 🟢 LONG | {s5_reason}", "SIGNAL")
             trade = tr.open_long(
                 symbol,
-                sl_floor        = s3_sl,
-                leverage        = config_s3.S3_LEVERAGE,
-                trade_size_pct  = config_s3.S3_TRADE_SIZE_PCT,
-                use_s2_exits    = True,
+                sl_floor       = s5_sl,
+                leverage       = config_s5.S5_LEVERAGE,
+                trade_size_pct = config_s5.S5_TRADE_SIZE_PCT,
+                use_s5_exits   = True,
+                tp_price_abs   = s5_tp,
             )
-            trade["strategy"] = "S3"
-            trade["snap_adx"]           = round(s3_adx, 1) if s3_adx else None
-            trade["snap_entry_trigger"] = round(s3_trigger, 8) if s3_trigger else None
-            trade["snap_sl"]            = round(s3_sl, 8) if s3_sl else None
-            trade["snap_rr"]            = round(
-                config_s3.S3_TRAILING_TRIGGER_PCT * s3_trigger / (s3_trigger - s3_sl), 2
-            ) if s3_trigger and s3_sl and s3_trigger > s3_sl else None
-            trade["snap_sentiment"]     = self.sentiment.direction
-            trade["snap_sr_clearance_pct"] = s3_sr_resistance_pct
+            trade["strategy"]            = "S5"
+            trade["snap_entry_trigger"]  = round(s5_trigger, 8)
+            trade["snap_sl"]             = round(s5_sl, 8)
+            trade["snap_rr"]             = round(
+                (s5_tp - s5_trigger) / (s5_trigger - s5_sl), 2
+            ) if s5_tp > s5_trigger > s5_sl > 0 else None
+            trade["snap_sentiment"]      = self.sentiment.direction
+            trade["snap_sr_clearance_pct"] = round((nearest_res - mark_now) / mark_now * 100, 1) if nearest_res else None
+            trade["snap_s5_ob_low"]      = round(s5_ob_low,  8) if s5_ob_low  else None
+            trade["snap_s5_ob_high"]     = round(s5_ob_high, 8) if s5_ob_high else None
+            trade["snap_s5_tp"]          = round(s5_tp, 8) if s5_tp else None
             trade["trade_id"] = uuid.uuid4().hex[:8]
-            _log_trade("S3_LONG", trade)
+            _log_trade("S5_LONG", trade)
             st.add_open_trade(trade)
-            if PAPER_MODE: tr.tag_strategy(symbol, "S3")
+            if PAPER_MODE: tr.tag_strategy(symbol, "S5")
             self.active_positions[symbol] = {
-                "side": "LONG", "strategy": "S3",
-                "box_high": s3_trigger, "box_low": s3_sl,
+                "side": "LONG", "strategy": "S5",
+                "box_high": s5_trigger, "box_low": s5_sl,
                 "trade_id": trade["trade_id"],
             }
             return True
 
-        # ── Execute S4 ────────────────────────────────────────────── #
-        if s4_sig == "SHORT" and s4_trigger > 0:
-            mark_now        = tr.get_mark_price(symbol)
-            prev_low_approx = s4_trigger / (1 - config_s4.S4_ENTRY_BUFFER)
-            too_far         = mark_now < prev_low_approx * (1 - config_s4.S4_MAX_ENTRY_BUFFER)
-            if too_far:
-                logger.info(
-                    f"[S4][{symbol}] ⏸️ SHORT setup valid but entry missed — "
-                    f"price {mark_now:.5f} already >{config_s4.S4_MAX_ENTRY_BUFFER*100:.0f}% "
-                    f"below prev_low {prev_low_approx:.5f} (window: {s4_trigger:.5f}–{prev_low_approx*(1-config_s4.S4_MAX_ENTRY_BUFFER):.5f})"
-                )
-            if mark_now <= s4_trigger and not too_far:
-                spike_base = find_spike_base(daily_df)
-                if spike_base is not None:
-                    clearance = (mark_now - spike_base) / mark_now
-                    if clearance < config_s4.S4_MIN_SR_CLEARANCE:
-                        logger.info(
-                            f"[S4][{symbol}] ⏸️ SHORT skipped — pre-pump base {spike_base:.5f} "
-                            f"only {clearance*100:.1f}% away (min {config_s4.S4_MIN_SR_CLEARANCE*100:.0f}%)"
-                        )
-                        st.add_scan_log(f"[S4][{symbol}] ⛔ Pre-pump base {spike_base:.5f} too close ({clearance*100:.1f}%)", "WARN")
-                        return False
-                if config.CLAUDE_FILTER_ENABLED:
-                    _sr_str = f"{round((mark_now - spike_base) / mark_now * 100, 1)}%" if spike_base else "none found"
-                    _cd = claude_approve("S4", symbol, {
-                        "RSI peak": round(s4_rsi_peak, 1),
-                        "RSI divergence": str(s4_div),
-                        "S/R clearance (spike base)": _sr_str,
-                        "Sentiment": self.sentiment.direction,
-                        "Entry": round(s4_trigger, 5),
-                        "SL": round(s4_sl, 5),
-                    })
-                    if not _cd["approved"]:
-                        logger.info(f"[S4][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
-                        st.add_scan_log(f"[S4][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
-                        return False
-                st.add_scan_log(
-                    f"[S4][{symbol}] 🔴 SHORT | spike={s4_body_pct*100:.0f}% RSI={s4_rsi:.1f} | "
-                    f"entry≤{s4_trigger:.5f} triggered @ {mark_now:.5f}",
-                    "SIGNAL"
-                )
-                # Recompute SL from actual entry (mark_now) to guarantee -50% P/L max.
-                # s4_sl from evaluate_s4 is based on entry_trigger, but mark_now can be
-                # lower (deeper into the window), making the trigger-based SL too wide.
-                s4_sl_actual = mark_now * (1 + 0.50 / config_s4.S4_LEVERAGE)
-                trade = tr.open_short(
-                    symbol,
-                    sl_floor       = s4_sl_actual,
-                    leverage       = config_s4.S4_LEVERAGE,
-                    trade_size_pct = config_s4.S4_TRADE_SIZE_PCT * 0.5,
-                    use_s4_exits   = True,
-                )
-                trade["strategy"]            = "S4"
-                trade["snap_rsi"]            = round(s4_rsi, 1)
-                trade["snap_rsi_peak"]       = round(s4_rsi_peak, 1)
-                trade["snap_spike_body_pct"] = round(s4_body_pct * 100, 1)
-                trade["snap_rsi_div"]        = s4_div
-                trade["snap_rsi_div_str"]    = s4_div_str
-                trade["snap_sl"]             = round(s4_sl_actual, 8)
-                trade["snap_sentiment"]      = self.sentiment.direction
-                trade["snap_sr_clearance_pct"] = round((mark_now - spike_base) / mark_now * 100, 1) if spike_base else None
-                trade["trade_id"] = uuid.uuid4().hex[:8]
-                _log_trade("S4_SHORT", trade)
-                st.add_open_trade(trade)
-                if PAPER_MODE: tr.tag_strategy(symbol, "S4")
-                self.active_positions[symbol] = {
-                    "side": "SHORT", "strategy": "S4",
-                    "box_high": s4_sl, "box_low": s4_trigger,
-                    "scale_in_pending": True,
-                    "scale_in_after": time.time() + 3600,
-                    "scale_in_trade_size_pct": config_s4.S4_TRADE_SIZE_PCT,
-                    "s4_prev_low": prev_low_approx,
-                    "trade_id": trade["trade_id"],
-                }
-                return True
-
-        # ── Execute S5 ────────────────────────────────────────────── #
-        if s5_sig in ("LONG", "SHORT") and s5_trigger > 0 and symbol not in self.active_positions:
-            mark_now = tr.get_mark_price(symbol)
-
-            if s5_sig == "LONG":
-                if mark_now < s5_trigger:
-                    logger.info(f"[S5][{symbol}] ⏸️ LONG signal stale — price {mark_now:.5f} fell back below entry {s5_trigger:.5f}")
+        else:  # SHORT
+            if mark_now > s5_trigger:
+                logger.info(f"[S5][{symbol}] ⏸️ SHORT signal stale — price {mark_now:.5f} bounced above entry {s5_trigger:.5f}")
+                return False
+            if mark_now < s5_trigger * (1 - config_s5.S5_MAX_ENTRY_BUFFER):
+                logger.info(f"[S5][{symbol}] ⏸️ SHORT entry missed — price already >{config_s5.S5_MAX_ENTRY_BUFFER*100:.0f}% below trigger {s5_trigger:.5f}")
+                return False
+            nearest_sup = find_nearest_support(m15_df, mark_now, lookback=300) if m15_df is not None else None
+            if nearest_sup is not None:
+                clearance = (mark_now - nearest_sup) / mark_now
+                if clearance < config_s5.S5_MIN_SR_CLEARANCE:
+                    logger.info(
+                        f"[S5][{symbol}] ⏸️ SHORT skipped — 15m support {nearest_sup:.5f} "
+                        f"only {clearance*100:.1f}% away (min {config_s5.S5_MIN_SR_CLEARANCE*100:.0f}%)"
+                    )
+                    st.add_scan_log(f"[S5][{symbol}] ⛔ 15m support {nearest_sup:.5f} too close ({clearance*100:.1f}%)", "WARN")
                     return False
-                if mark_now > s5_trigger * (1 + config_s5.S5_MAX_ENTRY_BUFFER):
-                    logger.info(f"[S5][{symbol}] ⏸️ LONG entry missed — price already >{config_s5.S5_MAX_ENTRY_BUFFER*100:.0f}% above trigger {s5_trigger:.5f}")
+            if config.CLAUDE_FILTER_ENABLED:
+                _sr_str = f"{round((mark_now - nearest_sup) / mark_now * 100, 1)}%" if nearest_sup else "none found"
+                _cd = claude_approve("S5", symbol, {
+                    "OB zone": f"{s5_ob_low:.5f}–{s5_ob_high:.5f}",
+                    "S/R clearance (15m)": _sr_str,
+                    "Sentiment": self.sentiment.direction,
+                    "Entry": round(mark_now, 5),
+                    "SL": round(s5_sl, 5),
+                })
+                if not _cd["approved"]:
+                    logger.info(f"[S5][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
+                    st.add_scan_log(f"[S5][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
                     return False
-                nearest_res = find_nearest_resistance(m15_df, mark_now, lookback=300) if m15_df is not None else None
-                if nearest_res is not None:
-                    clearance = (nearest_res - mark_now) / mark_now
-                    if clearance < config_s5.S5_MIN_SR_CLEARANCE:
-                        logger.info(
-                            f"[S5][{symbol}] ⏸️ LONG skipped — 15m resistance {nearest_res:.5f} "
-                            f"only {clearance*100:.1f}% away (min {config_s5.S5_MIN_SR_CLEARANCE*100:.0f}%)"
-                        )
-                        st.add_scan_log(f"[S5][{symbol}] ⛔ 15m resistance {nearest_res:.5f} too close ({clearance*100:.1f}%)", "WARN")
-                        return False
-                if config.CLAUDE_FILTER_ENABLED:
-                    _sr_str = f"{round((nearest_res - mark_now) / mark_now * 100, 1)}%" if nearest_res else "none found"
-                    _cd = claude_approve("S5", symbol, {
-                        "OB zone": f"{s5_ob_low:.5f}–{s5_ob_high:.5f}",
-                        "S/R clearance (15m)": _sr_str,
-                        "Sentiment": self.sentiment.direction,
-                        "Entry": round(mark_now, 5),
-                        "SL": round(s5_sl, 5),
-                    })
-                    if not _cd["approved"]:
-                        logger.info(f"[S5][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
-                        st.add_scan_log(f"[S5][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
-                        return False
-                st.add_scan_log(f"[S5][{symbol}] 🟢 LONG | {s5_reason}", "SIGNAL")
-                trade = tr.open_long(
-                    symbol,
-                    sl_floor       = s5_sl,
-                    leverage       = config_s5.S5_LEVERAGE,
-                    trade_size_pct = config_s5.S5_TRADE_SIZE_PCT,
-                    use_s5_exits   = True,
-                    tp_price_abs   = s5_tp,
-                )
-                trade["strategy"]            = "S5"
-                trade["snap_entry_trigger"]  = round(s5_trigger, 8)
-                trade["snap_sl"]             = round(s5_sl, 8)
-                trade["snap_rr"]             = round(
-                    (s5_tp - s5_trigger) / (s5_trigger - s5_sl), 2
-                ) if s5_tp > s5_trigger > s5_sl > 0 else None
-                trade["snap_sentiment"]      = self.sentiment.direction
-                trade["snap_sr_clearance_pct"] = round((nearest_res - mark_now) / mark_now * 100, 1) if nearest_res else None
-                trade["snap_s5_ob_low"]      = round(s5_ob_low,  8) if s5_ob_low  else None
-                trade["snap_s5_ob_high"]     = round(s5_ob_high, 8) if s5_ob_high else None
-                trade["snap_s5_tp"]          = round(s5_tp, 8) if s5_tp else None
-                trade["trade_id"] = uuid.uuid4().hex[:8]
-                _log_trade("S5_LONG", trade)
-                st.add_open_trade(trade)
-                if PAPER_MODE: tr.tag_strategy(symbol, "S5")
-                self.active_positions[symbol] = {
-                    "side": "LONG", "strategy": "S5",
-                    "box_high": s5_trigger, "box_low": s5_sl,
-                    "trade_id": trade["trade_id"],
-                }
-                return True
-
-            else:  # SHORT
-                if mark_now > s5_trigger:
-                    logger.info(f"[S5][{symbol}] ⏸️ SHORT signal stale — price {mark_now:.5f} bounced above entry {s5_trigger:.5f}")
-                    return False
-                if mark_now < s5_trigger * (1 - config_s5.S5_MAX_ENTRY_BUFFER):
-                    logger.info(f"[S5][{symbol}] ⏸️ SHORT entry missed — price already >{config_s5.S5_MAX_ENTRY_BUFFER*100:.0f}% below trigger {s5_trigger:.5f}")
-                    return False
-                nearest_sup = find_nearest_support(m15_df, mark_now, lookback=300) if m15_df is not None else None
-                if nearest_sup is not None:
-                    clearance = (mark_now - nearest_sup) / mark_now
-                    if clearance < config_s5.S5_MIN_SR_CLEARANCE:
-                        logger.info(
-                            f"[S5][{symbol}] ⏸️ SHORT skipped — 15m support {nearest_sup:.5f} "
-                            f"only {clearance*100:.1f}% away (min {config_s5.S5_MIN_SR_CLEARANCE*100:.0f}%)"
-                        )
-                        st.add_scan_log(f"[S5][{symbol}] ⛔ 15m support {nearest_sup:.5f} too close ({clearance*100:.1f}%)", "WARN")
-                        return False
-                if config.CLAUDE_FILTER_ENABLED:
-                    _sr_str = f"{round((mark_now - nearest_sup) / mark_now * 100, 1)}%" if nearest_sup else "none found"
-                    _cd = claude_approve("S5", symbol, {
-                        "OB zone": f"{s5_ob_low:.5f}–{s5_ob_high:.5f}",
-                        "S/R clearance (15m)": _sr_str,
-                        "Sentiment": self.sentiment.direction,
-                        "Entry": round(mark_now, 5),
-                        "SL": round(s5_sl, 5),
-                    })
-                    if not _cd["approved"]:
-                        logger.info(f"[S5][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
-                        st.add_scan_log(f"[S5][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
-                        return False
-                st.add_scan_log(
-                    f"[S5][{symbol}] 🔴 SHORT | OB {s5_ob_low:.5f}–{s5_ob_high:.5f} | "
-                    f"entry≤{s5_trigger:.5f} triggered @ {mark_now:.5f}",
-                    "SIGNAL"
-                )
-                trade = tr.open_short(
-                    symbol,
-                    sl_floor       = s5_sl,
-                    leverage       = config_s5.S5_LEVERAGE,
-                    trade_size_pct = config_s5.S5_TRADE_SIZE_PCT,
-                    use_s5_exits   = True,
-                    tp_price_abs   = s5_tp,
-                )
-                trade["strategy"]            = "S5"
-                trade["snap_entry_trigger"]  = round(s5_trigger, 8)
-                trade["snap_sl"]             = round(s5_sl, 8)
-                trade["snap_rr"]             = round(
-                    (s5_trigger - s5_tp) / (s5_sl - s5_trigger), 2
-                ) if 0 < s5_tp < s5_trigger < s5_sl else None
-                trade["snap_sentiment"]      = self.sentiment.direction
-                trade["snap_sr_clearance_pct"] = round((mark_now - nearest_sup) / mark_now * 100, 1) if nearest_sup else None
-                trade["snap_s5_ob_low"]      = round(s5_ob_low,  8) if s5_ob_low  else None
-                trade["snap_s5_ob_high"]     = round(s5_ob_high, 8) if s5_ob_high else None
-                trade["snap_s5_tp"]          = round(s5_tp, 8) if s5_tp else None
-                trade["trade_id"] = uuid.uuid4().hex[:8]
-                _log_trade("S5_SHORT", trade)
-                st.add_open_trade(trade)
-                if PAPER_MODE: tr.tag_strategy(symbol, "S5")
-                self.active_positions[symbol] = {
-                    "side": "SHORT", "strategy": "S5",
-                    "box_high": s5_sl, "box_low": s5_trigger,
-                    "trade_id": trade["trade_id"],
-                }
-                return True
-
-        return False
+            st.add_scan_log(
+                f"[S5][{symbol}] 🔴 SHORT | OB {s5_ob_low:.5f}–{s5_ob_high:.5f} | "
+                f"entry≤{s5_trigger:.5f} triggered @ {mark_now:.5f}",
+                "SIGNAL"
+            )
+            trade = tr.open_short(
+                symbol,
+                sl_floor       = s5_sl,
+                leverage       = config_s5.S5_LEVERAGE,
+                trade_size_pct = config_s5.S5_TRADE_SIZE_PCT,
+                use_s5_exits   = True,
+                tp_price_abs   = s5_tp,
+            )
+            trade["strategy"]            = "S5"
+            trade["snap_entry_trigger"]  = round(s5_trigger, 8)
+            trade["snap_sl"]             = round(s5_sl, 8)
+            trade["snap_rr"]             = round(
+                (s5_trigger - s5_tp) / (s5_sl - s5_trigger), 2
+            ) if 0 < s5_tp < s5_trigger < s5_sl else None
+            trade["snap_sentiment"]      = self.sentiment.direction
+            trade["snap_sr_clearance_pct"] = round((mark_now - nearest_sup) / mark_now * 100, 1) if nearest_sup else None
+            trade["snap_s5_ob_low"]      = round(s5_ob_low,  8) if s5_ob_low  else None
+            trade["snap_s5_ob_high"]     = round(s5_ob_high, 8) if s5_ob_high else None
+            trade["snap_s5_tp"]          = round(s5_tp, 8) if s5_tp else None
+            trade["trade_id"] = uuid.uuid4().hex[:8]
+            _log_trade("S5_SHORT", trade)
+            st.add_open_trade(trade)
+            if PAPER_MODE: tr.tag_strategy(symbol, "S5")
+            self.active_positions[symbol] = {
+                "side": "SHORT", "strategy": "S5",
+                "box_high": s5_sl, "box_low": s5_trigger,
+                "trade_id": trade["trade_id"],
+            }
+            return True
 
     # ── Entry Watcher ─────────────────────────────────────────────── #
 
     def _queue_s5_pending(self, symbol: str, sig: str, trigger: float, sl: float,
-                          tp: float, ob_low: float, ob_high: float, m15_df) -> None:
+                          tp: float, ob_low: float, ob_high: float, m15_df,
+                          priority_rank: int = 999, priority_score: float = 0.0) -> None:
         """Pre-validate an S5 PENDING signal (S/R + Claude) and add to pending_signals."""
         side = "LONG" if sig == "PENDING_LONG" else "SHORT"
         # S/R clearance check using already-fetched m15_df
@@ -1065,6 +1237,8 @@ class MTFBot:
             "rr": rr, "sr_clearance_pct": sr_pct,
             "sentiment": self.sentiment.direction if self.sentiment else "?",
             "expires": time.time() + 4 * 3600,
+            "priority_rank": priority_rank,
+            "priority_score": priority_score,
         }
         logger.info(
             f"[S5][{symbol}] 🕐 PENDING {side} queued | "
@@ -1093,8 +1267,12 @@ class MTFBot:
                 except Exception:
                     time.sleep(4)
                     continue
-                for symbol in list(self.pending_signals):
-                    sig = self.pending_signals.get(symbol)
+                # Process pending signals in priority rank order (best setup first)
+                ordered = sorted(
+                    self.pending_signals.items(),
+                    key=lambda kv: kv[1].get("priority_rank", 999),
+                )
+                for symbol, sig in ordered:
                     if not sig:
                         continue
                     # Expire stale signals
@@ -1130,7 +1308,8 @@ class MTFBot:
                                 self.pending_signals.pop(symbol, None)
                                 continue
                             if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
-                                continue
+                                # Slots full — stop processing lower-ranked signals this tick
+                                break
                             if st.is_pair_paused(symbol):
                                 continue
                             self._fire_pending(symbol, sig, mark, balance)

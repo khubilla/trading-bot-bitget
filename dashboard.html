@@ -342,6 +342,11 @@
   .pair-sig-badge.LONG  { color: var(--emerald); border: 1px solid rgba(0,214,143,0.4); background: rgba(0,214,143,0.08); }
   .pair-sig-badge.SHORT { color: var(--rose);    border: 1px solid rgba(255,77,106,0.4); background: rgba(255,77,106,0.08); }
   .pair-sig-badge.HOLD  { color: var(--muted);   border: 1px solid var(--border2); }
+  .pair-sig-badge.PENDING { color: var(--amber); border: 1px solid rgba(240,165,0,0.4); background: rgba(240,165,0,0.08); }
+  .s5-rank-badge { font-size: 8px; font-weight: 700; padding: 2px 5px; letter-spacing: 0.06em; }
+  .s5-rank-badge.rank-1 { color: var(--amber);  border: 1px solid rgba(240,165,0,0.5);  background: rgba(240,165,0,0.12); }
+  .s5-rank-badge.rank-2 { color: var(--blue);   border: 1px solid rgba(61,159,255,0.4); background: rgba(61,159,255,0.08); }
+  .s5-rank-badge.rank-3 { color: var(--muted);  border: 1px solid var(--border2); }
 
   /* RSI row */
   .pair-rsi-bar {
@@ -1452,7 +1457,7 @@ function signalScore(sym, ps, tab) {
     const bc      = ps.s2_big_candle;
     const rsiOk   = (ps.s2_daily_rsi || 0) > 70;
     const coiling = ps.s2_coiling;
-    const srClear = ps.sr_resistance_pct != null && ps.sr_resistance_pct >= 15;
+    const srClear = ps.s2_sr_resistance_pct != null && ps.s2_sr_resistance_pct >= 15;
     const active  = (ps.s2_signal || 'HOLD') !== 'HOLD';
     return (bc ? 1 : 0) + (bc && rsiOk ? 1 : 0) + (bc && rsiOk && coiling ? 1 : 0) + (srClear ? 1 : 0) + (active ? 10 : 0);
   }
@@ -1477,6 +1482,7 @@ function signalScore(sym, ps, tab) {
   if (tab === 's5') {
     const reason  = ps.s5_reason || '';
     const sig     = ps.s5_signal || 'HOLD';
+    const rank    = ps.s5_priority_rank;
     const chochStage = reason.includes('ChoCH') || reason.includes('R:R');
     const obStage    = chochStage || reason.includes('OB');
     const bosStage   = obStage   || reason.includes('BOS ✅');
@@ -1484,7 +1490,8 @@ function signalScore(sym, ps, tab) {
     const bosOk   = obStage   || reason.includes('BOS ✅') || sig !== 'HOLD';
     const obOk    = chochStage || ps.s5_ob_high > 0 || sig !== 'HOLD';
     const chochOk = reason.includes('ChoCH ✅') || sig !== 'HOLD';
-    return (emaOk ? 1 : 0) + (bosOk ? 1 : 0) + (obOk ? 1 : 0) + (chochOk ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
+    const rankBonus = rank === 1 ? 100 : rank === 2 ? 50 : rank != null ? 25 : 0;
+    return rankBonus + (emaOk ? 1 : 0) + (bosOk ? 1 : 0) + (obOk ? 1 : 0) + (chochOk ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
   }
   return 0;
 }
@@ -1520,7 +1527,7 @@ function s2CardHTML(sym, ps) {
   const bcClass  = bigCandle ? 'pass' : 'fail';
   const rsiClass = !bigCandle ? 'muted' : rsiOk ? 'pass' : 'fail';
   const coilClass= !bigCandle || !rsiOk ? 'muted' : coiling ? 'pass' : 'fail';
-  const srPct    = ps.sr_resistance_pct;
+  const srPct    = ps.s2_sr_resistance_pct;
   const srClass  = srPct == null ? 'muted' : srPct >= 15 ? 'pass' : srPct >= 10 ? 'warn' : 'fail';
   const srLabel  = srPct == null ? '—' : `${srPct.toFixed(1)}% away`;
   const reasonClass = sig !== 'HOLD' ? 'signal' : coiling ? 'active' : bigCandle ? 'active' : '';
@@ -1679,7 +1686,13 @@ function s5CardHTML(sym, ps) {
   const sig      = ps.s5_signal || 'HOLD';
   const reason   = ps.s5_reason || '—';
   const symShort = sym.replace('USDT', '');
+  const rank     = ps.s5_priority_rank;
+  const score    = ps.s5_priority_score;
   const cardClass = sig === 'LONG' ? 'signal-long' : sig === 'SHORT' ? 'signal-short' : '';
+  const rankBadge = rank != null
+    ? `<span class="s5-rank-badge rank-${Math.min(rank, 3)}">#${rank}</span>`
+    : '';
+  const scoreLabel = rank != null && score != null ? ` · score ${score.toFixed(1)}` : '';
   // Infer which stages passed by detecting how far the strategy got.
   // S5 is sequential: EMA → BOS → OB → ChoCH → R:R → signal.
   // If reason mentions ChoCH or R:R, all prior stages already passed.
@@ -1708,7 +1721,10 @@ function s5CardHTML(sym, ps) {
     <div class="pair-card ${cardClass}" data-symbol="${sym}">
       <div class="pair-top">
         <div class="pair-name" title="${sym}">${symShort}</div>
-        <span class="pair-sig-badge ${sig}">${sig}</span>
+        <div style="display:flex;gap:4px;align-items:center">
+          ${rankBadge}
+          <span class="pair-sig-badge ${sig}">${sig}</span>
+        </div>
       </div>
       <div class="pair-checks">
         <div class="pair-check">
@@ -1728,7 +1744,7 @@ function s5CardHTML(sym, ps) {
           <span class="check-val ${chochClass}">${!obOk ? '—' : chochOk ? 'Confirmed ✓' : 'Waiting…'}</span>
         </div>
       </div>
-      <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0,60)} · ${age}</div>
+      <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0,60)} · ${age}${scoreLabel}</div>
     </div>`;
 }
 

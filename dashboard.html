@@ -1384,18 +1384,21 @@ function render(s) {
   if (hist.length === 0) {
     $('trade-history').innerHTML = `<div class="empty-state"><div>◈</div>No closed trades yet</div>`;
   } else {
-    $('trade-history').innerHTML = hist.slice(0, 30).map(t => {
+    window._histTrades = hist.slice(0, 30);
+    $('trade-history').innerHTML = window._histTrades.map((t, i) => {
       const pnl = t.pnl || 0;
       const pnlClass = pnl >= 0 ? 'pos' : 'neg';
       const res = t.result || '—';
       const sym = (t.symbol || '').replace('USDT','');
+      const canChart = !!(t.entry && t.open_at && t.closed_at);
       return `
-        <div class="hist-row">
+        <div class="hist-row" ${canChart ? `style="cursor:pointer" onclick="openTradeChart(window._histTrades[${i}])"` : ''}>
           <span class="hist-sym">${sym}</span>
           <span class="side-tag ${(t.side||'').toLowerCase()}" style="font-size:8px;">${t.side||'?'}</span>
           <span class="hist-badge ${res}">${res}</span>
           <span class="hist-pnl ${pnlClass}">${fmtUSD(pnl)}</span>
           <span class="hist-time">${relTime(t.closed_at)}</span>
+          ${canChart ? '<span style="font-size:9px;color:var(--muted);margin-left:auto">↗</span>' : ''}
         </div>`;
     }).join('');
   }
@@ -1430,6 +1433,30 @@ setInterval(() => {
     // Handled by full re-render
   });
 }, 1000);
+
+// ── Trade History Chart ────────────────────────────────
+function isoToUnix(iso) {
+  return iso ? Math.floor(new Date(iso).getTime() / 1000) : null;
+}
+
+function openTradeChart(trade) {
+  if (!trade || !trade.entry || !trade.open_at) return;
+  const tabMap = { S1: 's1', S2: 's2', S3: 's3', S4: 's4', S5: 's5' };
+  chartActiveTab  = tabMap[trade.strategy] || 's1';
+  currentInterval = trade.interval || '15m';
+  window._tradeOverlay = {
+    closed:     true,
+    entry:      trade.entry,
+    exit_price: trade.exit_price,
+    sl:         trade.sl,
+    tp:         trade.tp,
+    side:       trade.side,
+    open_ts:    isoToUnix(trade.open_at),
+    close_ts:   isoToUnix(trade.closed_at),
+    events:     trade.events || [],
+  };
+  openChart(trade.symbol);
+}
 
 // ── Chart Modal ────────────────────────────────────────────
 let candleChart   = null;

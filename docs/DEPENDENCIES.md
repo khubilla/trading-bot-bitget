@@ -575,12 +575,12 @@ Two files with similar names but different purposes:
 | File | Size | Purpose | Used by | Mode |
 |------|------|---------|---------|------|
 | `state_paper.json` | 70K | Persistent Bitget bot state (balance, trades, pair analysis) | bot.py, state.py, dashboard.py | Paper trading only |
-| `paper_state.json` | 1.7K | Internal paper_trader.py simulation state (ephemeral position tracking) | paper_trader.py | Paper trading only |
+| `paper_state.json` | 1.7K | Internal paper_trader.py simulation state (position tracking, balance, history) | paper_trader.py | Paper trading only |
 
 **Why they exist:**
 
 - **state_paper.json** — Main state file for paper-trading mode. Contains strategy signals, pair analysis, trade history. This is what the dashboard reads.
-- **paper_state.json** — Transient simulation state used internally by the paper_trader.py module to track positions during the current trading session. Does NOT persist between restarts.
+- **paper_state.json** — Internal simulation state used by paper_trader.py module to track positions, balance, and trade history. Loaded on startup (paper_trader.py line 28-34), saved on every trade (line 44-45). Persists between restarts.
 
 **Common mistakes:**
 
@@ -589,10 +589,10 @@ Two files with similar names but different purposes:
    - Fix: Load `state_paper.json` instead; paper_state.json only has position data
    - Impact: Missing strategy context; may think no signals are being generated
 
-2. **Expecting paper_state.json to persist**
-   - Mistake: Assuming paper_state.json survives bot restart
-   - Fix: Use state_paper.json for anything that needs to outlive a restart
-   - Impact: Position data lost after bot restart
+2. **Expecting paper_state.json to contain strategy signals**
+   - Mistake: Reading paper_state.json to check S5 or other strategy signals
+   - Fix: Use state_paper.json for strategy analysis; paper_state.json only has position/balance data
+   - Impact: Missing strategy context; may think no signals are being generated
 
 3. **Confusing which file to back up**
    - Mistake: Only backing up paper_state.json before testing
@@ -627,8 +627,8 @@ Each strategy (S2, S3, S5) has its own minimum reward:risk ratio parameter, and 
 | Parameter | Strategy | Minimum RR | Applied where | Default |
 |-----------|----------|-----------|----------------|---------|
 | `S2_MIN_RR` | Not defined | — | Strategy S2 does not use MIN_RR | N/A |
-| `S3_MIN_RR` | S3 (Smart Money Confluence) | 2.0 | strategy.py line ~850 (partial TP vs SL comparison) | 2.0 |
-| `S5_MIN_RR` | S5 (SMC Order Block Pullback) | 2.0 | strategy.py line ~1090 (structural target vs SL comparison) | 2.0 |
+| `S3_MIN_RR` | S3 (Smart Money Confluence) | 2.0 | strategy.py line 739 (breakout R:R check) | 2.0 |
+| `S5_MIN_RR` | S5 (SMC Order Block Pullback) | 2.0 | strategy.py lines 1219, 1293 (ChoCH R:R checks) | 2.0 |
 
 **Why the confusion:**
 
@@ -680,32 +680,43 @@ grep -n "MIN_RR" strategy.py
 
 **Why it matters:**
 
-The IG bot patches `config_s5` module attributes at startup (ig_bot.py lines 25-37):
+The IG bot patches `config_s5` module attributes at startup (ig_bot.py lines 27-36):
 
 ```python
 # ig_bot.py: Patch config_s5 before calling evaluate_s5()
 import config_s5 as _cs5_orig
 import config_ig_s5 as _cs5_ig
+_base_attrs = {a for a in dir(_cs5_orig) if not a.startswith('_')}
 for _attr in [a for a in dir(_cs5_ig) if not a.startswith('_')]:
+    if _attr not in _base_attrs:
+        raise AttributeError(
+            f"config_ig_s5.{_attr} has no matching attribute in config_s5 — "
+            f"check for a typo in config_ig_s5.py"
+        )
     setattr(_cs5_orig, _attr, getattr(_cs5_ig, _attr))
+del _cs5_orig, _cs5_ig, _attr, _base_attrs
 ```
 
-If the import moved to module-level, the patching would fail:
+If the import moved to module-level, the patching would fail because the local binding would be cached:
 
 ```
 BAD (module-level import):
 ─────────────────────────
 strategy.py module loads
-  → imports config_s5 at line 1
-  → config_s5.S5_MIN_RR = 2.0 (Bitget default)
+  → executes: from config_s5 import S5_MIN_RR
+  → creates local binding: S5_MIN_RR = 2.0 (Bitget default)
 
 ig_bot.py starts
   → patches config_s5 module
   → config_s5.S5_MIN_RR = 1.5 (IG override)
 
 evaluate_s5() called
-  → uses already-cached Bitget value (2.0)
-  → IG override ignored!
+  → uses already-cached local binding (2.0)
+  → IG override ignored because the import created a local name binding
+
+Note: `import config_s5` (module reference) would work, but `from config_s5
+import X` (local binding) would fail. The issue is specifically with the
+local binding being cached before patching occurs.
 ```
 
 **Common mistakes:**
@@ -784,12 +795,13 @@ Lifecycle actions:
 
 **IG ig_trades.csv (ig_bot.py):**
 ```
-Lifecycle actions (S5 only):
-  S5_OPEN                 (entry logged separately? NO — uses S5_LONG/SHORT)
-  S5_PARTIAL              (partial TP hit)
-  S5_CLOSE                (full exit)
+Entry actions (S5 only):
+  S5_LONG                 (long entry, ig_bot.py line 482)
+  S5_SHORT                (short entry, ig_bot.py line 482)
 
-Opening action logged as: S5_{sig} where sig=LONG/SHORT
+Lifecycle actions:
+  S5_PARTIAL              (partial TP hit, ig_bot.py line 571)
+  S5_CLOSE                (full exit, ig_bot.py lines 641, 683)
 ```
 
 **Common mistakes:**

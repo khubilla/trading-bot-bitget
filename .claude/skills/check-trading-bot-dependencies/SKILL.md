@@ -1,17 +1,31 @@
 ---
 name: check-trading-bot-dependencies
-description: Use before planning or coding any change to the trading bot — reads PRE_CHANGE_CHECKLIST.md and DEPENDENCIES.md to identify what will break
+description: Use before planning or coding any change to the trading bot — reads PRE_CHANGE_CHECKLIST.md and DEPENDENCIES.md to identify what will break. Runs BEFORE superpowers brainstorming, writing-plans, or subagent-driven-development.
 ---
 
 # Check Trading Bot Dependencies
 
-**Run this before every plan and before every code change.**
+**This skill runs FIRST — before brainstorming, before planning, before any code.**
+
+## Workflow Position
+
+```
+check-trading-bot-dependencies   ← YOU ARE HERE (always first)
+        ↓
+brainstorming (if design needed) ← superpowers, informed by findings above
+        ↓
+writing-plans                    ← superpowers
+        ↓
+subagent-driven-development      ← superpowers
+```
+
+The dependency check findings feed directly into brainstorming context. If a brainstorm or plan would touch shared files, broken contracts, or cross-bot dependencies, those constraints must be in scope from the start — not discovered mid-implementation.
 
 ## When to Use
 
-- Before writing or proposing a plan for any change to this codebase
-- Before touching any file that could affect the other bot or the dashboard
-- When the user asks to add a feature, fix a bug, or refactor anything in the trading bot
+- Any time the user asks to change, add, fix, or refactor anything in this codebase
+- Before invoking brainstorming or writing-plans
+- Even for "small" changes — cross-bot breakage is usually invisible until runtime
 
 ## Steps
 
@@ -36,7 +50,7 @@ Using Step 3 of the checklist, read the relevant sections from `/Users/kevin/Dow
 
 **Step 4: Report findings before proceeding**
 
-Before writing any plan or code, output:
+Output this report, then proceed to brainstorming or coding:
 
 ```
 ## Dependency Check
@@ -53,10 +67,13 @@ Before writing any plan or code, output:
 
 **Both bots affected?** [Yes/No — explain which]
 
+**Constraints for brainstorm/plan:**
+- [anything the design or implementation must not break]
+
 **Safe to proceed?** [Yes / Yes with caution: X / No: must fix Y first]
 ```
 
-Only proceed to planning or coding after this report is written.
+The "Constraints for brainstorm/plan" section is carried forward as hard requirements into any superpowers brainstorming or plan that follows.
 
 ## Red Flags — STOP if you see these
 
@@ -70,5 +87,5 @@ Only proceed to planning or coding after this report is written.
 ## The Rule
 
 ```
-NO PLAN. NO CODE. UNTIL DEPENDENCY CHECK IS DONE.
+NO BRAINSTORM. NO PLAN. NO CODE. UNTIL DEPENDENCY CHECK IS DONE.
 ```

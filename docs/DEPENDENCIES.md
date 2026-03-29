@@ -241,7 +241,7 @@ sed -n '24,36p' ig_bot.py
 
 **pair_states structure:**
 
-Each key is a symbol (e.g., "BTCUSDT"). Value is a dict with 42 fields:
+Each key is a symbol (e.g., "BTCUSDT"). Value is a dict with 44 fields:
 
 ```python
 {
@@ -437,7 +437,7 @@ head -1 trades_paper.csv | tr ',' '\n' | wc -l
 - `optimize_ig.py` line 43: "Load completed trades from ig_trades.csv"
 - Sends closed trades to Claude API for S5 parameter optimization
 
-**Columns (16 fields):**
+**Columns (19 fields):**
 
 ```csv
 timestamp,trade_id,action,

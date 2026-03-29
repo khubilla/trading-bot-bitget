@@ -21,7 +21,7 @@ Sentiment formula
 import logging
 from dataclasses import dataclass
 import bitget_client as bc
-from config import MIN_VOLUME_USDT, PRODUCT_TYPE, SENTIMENT_THRESHOLD
+from config import MIN_VOLUME_USDT, MAX_PRICE_USDT, PRODUCT_TYPE, SENTIMENT_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ def get_qualified_pairs_and_sentiment() -> tuple[list[str], SentimentResult]:
         if vol_usdt < MIN_VOLUME_USDT:
             continue
 
-        if lastPr > 150:
+        if lastPr > MAX_PRICE_USDT:
             continue
 
         qualified.append(symbol)

@@ -3,7 +3,7 @@ state.py — Live State Broadcaster
 Bot writes here → dashboard.py reads state.json every 3 seconds.
 """
 
-import json, os, threading
+import json, os, threading, tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -59,8 +59,11 @@ def _read() -> dict:
 
 def _write(s: dict):
     with _lock:
-        with open(STATE_FILE, "w") as f:
-            json.dump(s, f, indent=2, default=str)
+        dir_ = os.path.dirname(os.path.abspath(STATE_FILE))
+        with tempfile.NamedTemporaryFile("w", dir=dir_, delete=False, suffix=".tmp") as tmp:
+            json.dump(s, tmp, indent=2, default=str)
+            tmp_path = tmp.name
+        os.replace(tmp_path, STATE_FILE)
 
 
 # ── Public API ────────────────────────────────────────────────────── #
@@ -195,6 +198,13 @@ def is_pair_paused(symbol: str) -> bool:
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     entry = s.get('daily_losses', {}).get(symbol, {'date': '', 'count': 0})
     return entry['date'] == today and entry['count'] >= 3
+
+def get_open_trade(symbol: str) -> dict | None:
+    """Return the open trade dict for a symbol, or None if not found."""
+    for t in _read()["open_trades"]:
+        if t["symbol"] == symbol:
+            return t
+    return None
 
 def add_scan_log(msg: str, level: str = "INFO"):
     s = _read()

@@ -369,11 +369,6 @@ def evaluate_s1(
     return "HOLD", 50.0, 0.0, 0.0, 0.0
 
 
-# Backwards-compatible alias used in bot.py
-def evaluate_pair(symbol, htf_df, ltf_df, daily_df, allowed_direction):
-    sig, rsi, bh, bl, adx = evaluate_s1(symbol, htf_df, ltf_df, daily_df, allowed_direction)
-    return sig, rsi, bh, bl
-
 
 # ════════════════════════════════════════════════════════════
 #  STRATEGY 2 — Daily Momentum + Daily Consolidation Breakout

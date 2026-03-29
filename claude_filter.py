@@ -35,18 +35,6 @@ def _load_history(n: int) -> list[dict]:
     return rows[-n:]
 
 
-def _pct(entry, close_price, side):
-    """Rough P/L % given open entry, close price, and side."""
-    try:
-        e, c = float(entry), float(close_price)
-        if not e:
-            return None
-        if side == "SHORT":
-            return round((e - c) / e * 100, 1)
-        return round((c - e) / e * 100, 1)
-    except Exception:
-        return None
-
 
 def _format_history(rows: list[dict]) -> str:
     """
@@ -63,10 +51,16 @@ def _format_history(rows: list[dict]) -> str:
         if "_CLOSE" in action:
             if sym in opens:
                 o = opens.pop(sym)
-                pnl = _pct(o.get("entry", 0), r.get("entry", 0), o.get("side", "LONG"))
+                # Use pre-computed pnl_pct from the close row; fall back to absolute pnl
+                try:
+                    raw = r.get("pnl_pct") or r.get("pnl")
+                    pnl = float(raw) if raw not in (None, "") else None
+                except (ValueError, TypeError):
+                    pnl = None
                 if pnl is None:
                     continue
-                result = f"+{pnl}% WIN" if pnl > 0 else f"{pnl}% LOSS"
+                unit = "%" if r.get("pnl_pct") else " USDT"
+                result = f"+{pnl:.1f}{unit} WIN" if pnl > 0 else f"{pnl:.1f}{unit} LOSS"
                 strat = o.get("strategy", "?")
                 rsi   = o.get("snap_daily_rsi") or o.get("snap_rsi") or "?"
                 sent  = o.get("snap_sentiment", "?")

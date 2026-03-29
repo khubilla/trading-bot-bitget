@@ -239,7 +239,10 @@ class MTFBot:
                         "pnl": pc["pnl"], "result": "WIN" if pc["pnl"] >= 0 else "LOSS",
                         "pnl_pct": pc["pnl_pct"], "exit_reason": "PARTIAL_TP",
                     })
-                    st.update_open_trade_margin(pc["symbol"], pc["margin"])
+                    # Update to REMAINING margin (exchange_positions has the updated value from paper_trader)
+                    remaining_margin = exchange_positions.get(pc["symbol"], {}).get("margin", 0)
+                    if remaining_margin:
+                        st.update_open_trade_margin(pc["symbol"], remaining_margin)
                     logger.info(f"[{pc['strategy']}][{pc['symbol']}] 📊 Partial logged: PnL={pc['pnl']:+.4f} ({pc['pnl_pct']:+.1f}%)")
 
             # Sync pnl + detect closed positions
@@ -270,11 +273,8 @@ class MTFBot:
                             side = ap["side"]
                             price_chg = (mark_now - entry_p) / entry_p if side == "LONG" else (entry_p - mark_now) / entry_p
                             # Margin for the closed half (approximate from stored trade margin)
-                            half_margin = 0.0
-                            for t in st._read()["open_trades"]:
-                                if t["symbol"] == sym:
-                                    half_margin = float(t.get("margin", 0)) * 0.5
-                                    break
+                            _ot = st.get_open_trade(sym)
+                            half_margin = float(_ot.get("margin", 0)) * 0.5 if _ot else 0.0
                             partial_pnl = price_chg * half_margin * ap.get("leverage", 10) if half_margin else 0.0
                             partial_pct = round(price_chg * ap.get("leverage", 10) * 100, 2)
                             ap["partial_logged"] = True
@@ -311,6 +311,11 @@ class MTFBot:
                                     "symbol": sym, "side": ap["side"],
                                     "entry": round(mark_now, 8),
                                 })
+                                # Sync updated margin to state.json for dashboard
+                                if PAPER_MODE:
+                                    updated_pos = tr.get_all_open_positions().get(sym, {})
+                                    if updated_pos.get("margin"):
+                                        st.update_open_trade_margin(sym, updated_pos["margin"])
                             else:
                                 logger.info(f"[{ap['strategy']}][{sym}] ⏸️ Scale-in skipped — price {mark_now:.5f} outside entry window")
                             ap["scale_in_pending"] = False
@@ -412,11 +417,8 @@ class MTFBot:
                 else:
                     # Position closed by SL/TP — grab last known PnL from state
                     ap       = self.active_positions[sym]
-                    last_pnl = 0.0
-                    for t in st._read()["open_trades"]:
-                        if t["symbol"] == sym:
-                            last_pnl = float(t.get("unrealised_pnl") or 0)
-                            break
+                    _ot      = st.get_open_trade(sym)
+                    last_pnl = float(_ot.get("unrealised_pnl") or 0) if _ot else 0.0
                     pnl_pct     = None
                     exit_reason = ""
                     if PAPER_MODE:

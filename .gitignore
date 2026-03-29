@@ -11,5 +11,9 @@ trades_paper.csv
 backtest_report.html
 /data/daily
 .claude
+!.claude/
+!.claude/skills/
+!.claude/skills/**
 settings.json
 ig_bot.log
+.superpowers

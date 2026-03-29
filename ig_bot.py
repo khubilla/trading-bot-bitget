@@ -26,9 +26,15 @@ import config_ig
 # or called, since evaluate_s5() does `from config_s5 import ...` at call time.
 import config_s5 as _cs5_orig
 import config_ig_s5 as _cs5_ig
+_base_attrs = {a for a in dir(_cs5_orig) if not a.startswith('_')}
 for _attr in [a for a in dir(_cs5_ig) if not a.startswith('_')]:
+    if _attr not in _base_attrs:
+        raise AttributeError(
+            f"config_ig_s5.{_attr} has no matching attribute in config_s5 — "
+            f"check for a typo in config_ig_s5.py"
+        )
     setattr(_cs5_orig, _attr, getattr(_cs5_ig, _attr))
-del _cs5_orig, _cs5_ig, _attr
+del _cs5_orig, _cs5_ig, _attr, _base_attrs
 
 from config_ig_s5 import (
     S5_DAILY_EMA_FAST, S5_DAILY_EMA_SLOW,

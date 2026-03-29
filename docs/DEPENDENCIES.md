@@ -869,4 +869,51 @@ head -20 ig_trades.csv | grep "S5_" | cut -d, -f1-3
 
 ## 11. Maintenance Guide
 
-[To be populated in Task 13]
+### When to Update This Document
+
+Update DEPENDENCIES.md immediately after any of these changes:
+
+- [ ] Add/remove a function that's called by multiple files
+- [ ] Change a function signature (params or return type)
+- [ ] Add/remove fields to state.json or CSV files
+- [ ] Change config parameter names
+- [ ] Create new shared files
+- [ ] Add new cross-bot dependencies
+- [ ] Rename files or functions
+
+### How to Verify Dependencies Are Accurate
+
+**After each update:**
+
+```bash
+# 1. Both bots import cleanly
+python -c "import bot; import ig_bot; print('Import OK')"
+
+# 2. Check actual line numbers match docs
+grep -n "evaluate_s5" bot.py ig_bot.py strategy.py
+
+# 3. Check field references in dashboard
+grep -n "s2_sr_resistance_pct" dashboard.py dashboard.html
+
+# 4. Run a quick integration test
+python bot.py --paper & sleep 10 && kill %1
+```
+
+**Quarterly audit:**
+
+```bash
+# Regenerate function call counts
+grep -r "evaluate_" *.py | wc -l
+
+# Check for new JSON files
+find . -name "*.json" -type f
+
+# Verify CSV column lists match actual files
+head -1 trades_paper.csv
+head -1 ig_trades.csv
+```
+
+### Document History
+
+- 2026-03-29: Initial creation
+- [Future updates logged here with date and what changed]

@@ -4,7 +4,6 @@ UI tests — API shape (via FastAPI TestClient) + HTML presence (text search).
 No browser required. No API keys needed. No running server needed.
 """
 import os
-import re
 
 import pytest
 
@@ -21,13 +20,14 @@ def _html() -> str:
 # ── API shape tests ───────────────────────────────────────────────────────── #
 
 class TestApiState:
+    """Tests for the 3 simple /api/state contracts that need no CSV fixture."""
+
     @pytest.fixture(autouse=True)
     def client(self, tmp_path, monkeypatch):
         """TestClient using the real FastAPI app, redirected to a tmp state file."""
         from starlette.testclient import TestClient
         import dashboard
 
-        # Point dashboard at a tmp directory so we don't depend on a live bot run
         monkeypatch.setattr(dashboard, "STATE_FILE", str(tmp_path / "state_paper.json"))
         self.client = TestClient(dashboard.app, raise_server_exceptions=False)
 
@@ -48,90 +48,85 @@ class TestApiState:
         data = resp.json()
         assert "status" in data, f"Missing 'status' key in response: {list(data.keys())}"
 
-    def test_trade_history_is_list_when_present(self, tmp_path, monkeypatch):
-        """If trade_history is returned, it must be a list (never a dict or None)."""
-        import json
-        import dashboard
 
-        # Write a minimal valid state file
-        state = {
-            "status": "RUNNING", "started_at": "", "last_tick": "",
-            "balance": 1000.0, "open_trades": {}, "trade_history": [],
-            "scan_log": [], "qualified_pairs": [], "pair_states": {}, "sentiment": "NEUTRAL",
-        }
-        state_file = tmp_path / "state_paper.json"
-        state_file.write_text(json.dumps(state))
-        monkeypatch.setattr(dashboard, "STATE_FILE", str(state_file))
+def test_trade_history_is_list_when_present(tmp_path, monkeypatch):
+    """If trade_history is returned, it must be a list (never a dict or None)."""
+    import json
+    import dashboard
+    from starlette.testclient import TestClient
 
-        from starlette.testclient import TestClient
-        resp = TestClient(dashboard.app).get("/api/state")
-        data = resp.json()
-        assert isinstance(data.get("trade_history"), list), (
-            f"trade_history must be a list, got {type(data.get('trade_history'))}"
-        )
+    state_file = tmp_path / "state_paper.json"
+    state_file.write_text(json.dumps({
+        "status": "RUNNING", "started_at": "", "last_tick": "",
+        "balance": 1000.0, "open_trades": {}, "trade_history": [],
+        "scan_log": [], "qualified_pairs": [], "pair_states": {}, "sentiment": "NEUTRAL",
+    }))
+    monkeypatch.setattr(dashboard, "STATE_FILE", str(state_file))
 
-    def test_trade_history_entry_has_chart_fields(self, tmp_path, monkeypatch):
-        """
-        When trade_history entries are present, each must have the chart replay fields:
-        entry, sl, tp, exit_price, open_at, interval, events.
-        These are populated by _load_csv_history (Task 3).
-        """
-        import csv, io, json
-        import dashboard
+    resp = TestClient(dashboard.app, raise_server_exceptions=False).get("/api/state")
+    data = resp.json()
+    assert isinstance(data.get("trade_history"), list), (
+        f"trade_history must be a list, got {type(data.get('trade_history'))}"
+    )
 
-        CHART_FIELDS = {"entry", "sl", "tp", "exit_price", "open_at", "interval", "events"}
 
-        # Build a minimal CSV with one OPEN + one CLOSE row
-        fields = [
-            "timestamp", "trade_id", "action", "symbol", "side", "qty", "entry", "sl", "tp",
-            "box_low", "box_high", "leverage", "margin", "tpsl_set", "strategy",
-            "snap_rsi", "snap_adx", "snap_htf", "snap_coil", "snap_box_range_pct", "snap_sentiment",
-            "snap_daily_rsi", "snap_entry_trigger", "snap_sl", "snap_rr",
-            "snap_rsi_peak", "snap_spike_body_pct", "snap_rsi_div", "snap_rsi_div_str",
-            "snap_s5_ob_low", "snap_s5_ob_high", "snap_s5_tp", "snap_sr_clearance_pct",
-            "result", "pnl", "pnl_pct", "exit_reason", "exit_price",
-        ]
-        buf = io.StringIO()
-        w = csv.DictWriter(buf, fieldnames=fields, restval="", extrasaction="ignore")
-        w.writeheader()
-        w.writerow({
-            "timestamp": "2026-03-29T10:00:00+00:00",
-            "trade_id": "t1", "action": "S5_LONG",
-            "symbol": "BTCUSDT", "side": "LONG",
-            "entry": "42000", "sl": "41500", "tp": "43000",
-        })
-        w.writerow({
-            "timestamp": "2026-03-29T12:00:00+00:00",
-            "trade_id": "t1", "action": "S5_CLOSE",
-            "symbol": "BTCUSDT", "side": "LONG",
-            "pnl": "4.0", "result": "WIN", "pnl_pct": "2.0",
-            "exit_reason": "TP", "exit_price": "43000",
-        })
+def test_trade_history_entry_has_chart_fields(tmp_path, monkeypatch):
+    """
+    When trade_history entries are present, each must have the chart replay fields:
+    entry, sl, tp, exit_price, open_at, interval, events.
+    These are populated by _load_csv_history (Task 3).
+    """
+    import csv, io, json
+    import dashboard
+    from starlette.testclient import TestClient
 
-        csv_file = tmp_path / "trades_paper.csv"
-        csv_file.write_text(buf.getvalue())
+    CHART_FIELDS = {"entry", "sl", "tp", "exit_price", "open_at", "interval", "events"}
 
-        state_file = tmp_path / "state_paper.json"
-        state_file.write_text(json.dumps({
-            "status": "RUNNING", "started_at": "", "last_tick": "",
-            "balance": 1000.0, "open_trades": {}, "trade_history": [],
-            "scan_log": [], "qualified_pairs": [], "pair_states": {}, "sentiment": "NEUTRAL",
-        }))
+    fields = [
+        "timestamp", "trade_id", "action", "symbol", "side", "qty", "entry", "sl", "tp",
+        "box_low", "box_high", "leverage", "margin", "tpsl_set", "strategy",
+        "snap_rsi", "snap_adx", "snap_htf", "snap_coil", "snap_box_range_pct", "snap_sentiment",
+        "snap_daily_rsi", "snap_entry_trigger", "snap_sl", "snap_rr",
+        "snap_rsi_peak", "snap_spike_body_pct", "snap_rsi_div", "snap_rsi_div_str",
+        "snap_s5_ob_low", "snap_s5_ob_high", "snap_s5_tp", "snap_sr_clearance_pct",
+        "result", "pnl", "pnl_pct", "exit_reason", "exit_price",
+    ]
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=fields, restval="", extrasaction="ignore")
+    w.writeheader()
+    w.writerow({
+        "timestamp": "2026-03-29T10:00:00+00:00",
+        "trade_id": "t1", "action": "S5_LONG",
+        "symbol": "BTCUSDT", "side": "LONG",
+        "entry": "42000", "sl": "41500", "tp": "43000",
+    })
+    w.writerow({
+        "timestamp": "2026-03-29T12:00:00+00:00",
+        "trade_id": "t1", "action": "S5_CLOSE",
+        "symbol": "BTCUSDT", "side": "LONG",
+        "pnl": "4.0", "result": "WIN", "pnl_pct": "2.0",
+        "exit_reason": "TP", "exit_price": "43000",
+    })
 
-        monkeypatch.setattr(dashboard, "STATE_FILE", str(state_file))
+    (tmp_path / "trades_paper.csv").write_text(buf.getvalue())
+    (tmp_path / "state_paper.json").write_text(json.dumps({
+        "status": "RUNNING", "started_at": "", "last_tick": "",
+        "balance": 1000.0, "open_trades": {}, "trade_history": [],
+        "scan_log": [], "qualified_pairs": [], "pair_states": {}, "sentiment": "NEUTRAL",
+    }))
+    monkeypatch.setattr(dashboard, "STATE_FILE", str(tmp_path / "state_paper.json"))
 
-        from starlette.testclient import TestClient
-        resp = TestClient(dashboard.app).get("/api/state")
-        data = resp.json()
+    resp = TestClient(dashboard.app, raise_server_exceptions=False).get("/api/state")
+    data = resp.json()
 
-        hist = data.get("trade_history", [])
-        assert len(hist) >= 1, "Expected at least 1 trade history entry"
+    hist = data.get("trade_history", [])
+    assert len(hist) >= 1, "Expected at least 1 trade history entry"
 
-        missing = CHART_FIELDS - set(hist[0].keys())
-        assert not missing, (
-            f"trade_history entry missing chart fields: {sorted(missing)}. "
-            "Check _load_csv_history in dashboard.py."
-        )
+    missing = CHART_FIELDS - set(hist[0].keys())
+    assert not missing, (
+        f"trade_history entry missing chart fields: {sorted(missing)}. "
+        "Check _load_csv_history in dashboard.py."
+    )
 
 
 # ── HTML presence tests ───────────────────────────────────────────────────── #
@@ -183,9 +178,8 @@ class TestDashboardHtml:
 
     def test_overlay_closed_branch(self):
         """loadChart must branch on ov.closed to dispatch _applyClosedTradeOverlay."""
-        html = _html()
-        assert "ov.closed" in html, \
-            "ov.closed branch missing from loadChart — closed trade overlay will never render"
+        assert "_applyClosedTradeOverlay" in _html(), \
+            "_applyClosedTradeOverlay call missing from loadChart overlay block"
 
     def test_closechart_clears_markers(self):
         """closeChart must call setMarkers([]) to clean up on close."""
@@ -195,5 +189,7 @@ class TestDashboardHtml:
     def test_closechart_removes_overlay_elements(self):
         """closeChart must remove .trade-stems-svg and .trade-shade elements."""
         html = _html()
-        assert "trade-stems-svg" in html and "trade-shade" in html, \
-            "Overlay element cleanup missing from closeChart"
+        assert "trade-stems-svg" in html, \
+            ".trade-stems-svg cleanup missing from closeChart"
+        assert "trade-shade" in html, \
+            ".trade-shade cleanup missing from closeChart"

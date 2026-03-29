@@ -773,8 +773,8 @@ Bitget bot and IG bot log trade actions with different naming conventions:
 
 | Bot | Action Format | Examples | Notes |
 |-----|---------------|----------|-------|
-| Bitget | `{STRATEGY}_{SIGNAL}` `{STRATEGY}_{LIFECYCLE}` | `S1_LONG` `S5_OPEN` `S5_PARTIAL` `S5_CLOSE` | Strategy-prefixed; mixed signal/lifecycle naming |
-| IG | `S5_{LIFECYCLE}` | `S5_OPEN` `S5_PARTIAL` `S5_CLOSE` | Only S5; cleaner lifecycle-focused naming |
+| Bitget | `{STRATEGY}_{SIGNAL}` `{STRATEGY}_{LIFECYCLE}` | `S1_LONG` `S5_LONG` `S5_PARTIAL` `S5_CLOSE` | Strategy-prefixed; mixed signal/lifecycle naming |
+| IG | `S5_{LIFECYCLE}` | `S5_LONG` `S5_PARTIAL` `S5_CLOSE` | Only S5; uses same entry names as Bitget |
 
 **Detailed breakdown:**
 

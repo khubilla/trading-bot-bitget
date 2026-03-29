@@ -73,6 +73,7 @@ def _load_csv_history(csv_path: str, limit: int = 50) -> list:
                     "tp":       _safe_float(r.get("tp")),
                     "open_at":  r.get("timestamp", ""),
                     "side":     r.get("side", ""),
+                    "strategy": strategy,
                     "symbol":   r.get("symbol", ""),
                     "interval": _STRATEGY_INTERVAL.get(strategy, "15m"),
                 }

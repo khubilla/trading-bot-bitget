@@ -1889,12 +1889,14 @@ function openChart(symbol) {
   currentSymbol = symbol;
   // For pair card opens (no overlay), capture the current pair grid tab as chart context
   if (!window._tradeOverlay) chartActiveTab = activeTab;
-  // Default interval per chart strategy context
-  if (chartActiveTab === 's3') currentInterval = '15m';
-  else if (chartActiveTab === 's5') currentInterval = '15m';
-  else if (chartActiveTab === 's2') currentInterval = '1D';
-  else if (chartActiveTab === 's4') currentInterval = '1D';
-  else currentInterval = '3m';
+  // Default interval per chart strategy context (skip when trade overlay sets it explicitly)
+  if (!window._tradeOverlay) {
+    if (chartActiveTab === 's3') currentInterval = '15m';
+    else if (chartActiveTab === 's5') currentInterval = '15m';
+    else if (chartActiveTab === 's2') currentInterval = '1D';
+    else if (chartActiveTab === 's4') currentInterval = '1D';
+    else currentInterval = '3m';
+  }
   $('chartOverlay').classList.add('open');
   $('chartSymbol').textContent = symbol.replace('USDT','');
 

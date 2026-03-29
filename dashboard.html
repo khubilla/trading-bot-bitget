@@ -2355,7 +2355,8 @@ async function loadChart(symbol, interval, fitOnLoad = false) {
       const ov = window._tradeOverlay;
       if (ov.closed) {
         // Closed trade: full chart replay (price lines + markers + stems + shading)
-        setTimeout(() => _applyClosedTradeOverlay(ov), 50);
+        const _chartRef = candleChart;  // capture to detect stale chart on callback
+        setTimeout(() => { if (candleChart === _chartRef) _applyClosedTradeOverlay(ov); }, 50);
       } else {
         // Live trade: entry / SL / TP lines only
         if (ov.entry) candlePriceLines.push(candleSeries.createPriceLine({
@@ -2465,6 +2466,8 @@ function _applyClosedTradeOverlay(ov) {
 
   // 4. Stems + shading — after chart has rendered the new range
   requestAnimationFrame(() => {
+    const el = $('chart-candles');
+    if (!el || !el.offsetWidth || !el.offsetHeight) return;  // layout not ready; ResizeObserver will retry
     _drawTradeShading(ov);
     _drawTradeStems(ov);
   });
@@ -2472,6 +2475,7 @@ function _applyClosedTradeOverlay(ov) {
 
 function _drawTradeStems(ov) {
   const chartEl = $('chart-candles');
+  if (!chartEl) return;
   chartEl.querySelectorAll('.trade-stems-svg').forEach(el => el.remove());
   if (!candleChart || !candleSeries) return;
 
@@ -2537,6 +2541,7 @@ function _drawTradeStems(ov) {
 
 function _drawTradeShading(ov) {
   const chartEl = $('chart-candles');
+  if (!chartEl) return;
   chartEl.querySelectorAll('.trade-shade').forEach(el => el.remove());
   if (!candleChart || !ov.open_ts || !ov.close_ts) return;
 

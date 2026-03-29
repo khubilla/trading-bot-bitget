@@ -23,7 +23,51 @@
 
 ## 1. Architecture Overview
 
-[To be populated in Task 3]
+### Two Independent Bots
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     BITGET BOT (bot.py)                     │
+│  Crypto USDT-margined futures · S1-S5 strategies           │
+│  Output: state.json, trades.csv (or _paper variants)       │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+                    ┌─────────────────┐
+                    │  strategy.py    │ ← SHARED
+                    │  config_s5.py   │ ← SHARED (patched by IG)
+                    │  paper_trader.py│ ← SHARED
+                    └─────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│                      IG BOT (ig_bot.py)                     │
+│  US30/Dow CFD · S5 only · 09:30-12:30 ET session          │
+│  Output: ig_state.json, ig_trades.csv                      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Shared Code Contract
+
+**Files shared between bots:**
+- `strategy.py` — all evaluate_s1 through evaluate_s5 functions
+- `config_s5.py` — S5 parameters (Bitget direct, IG patched with config_ig_s5)
+- `paper_trader.py` — simulation engine for both
+
+**Separation rules:**
+- Changes to shared files require testing BOTH bots
+- Bitget and IG must work independently (no cross-bot state)
+- config_s5 changes affect Bitget immediately; IG overrides via config_ig_s5
+
+### Data Flow
+
+```
+bot.py → StateManager → state_paper.json → dashboard.py → dashboard.html
+       → _log_trade  → trades_paper.csv  → optimize.py
+
+ig_bot.py → _log_trade → ig_trades.csv → optimize_ig.py
+          → (no StateManager, writes ig_state.json directly)
+
+paper_trader.py → paper_state.json (internal simulation state)
+```
 
 ---
 

@@ -896,14 +896,14 @@ grep -n "evaluate_s5" bot.py ig_bot.py strategy.py
 grep -n "s2_sr_resistance_pct" dashboard.py dashboard.html
 
 # 4. Run a quick integration test
-python bot.py --paper & sleep 10 && kill %1
+timeout 10 python bot.py --paper
 ```
 
 **Quarterly audit:**
 
 ```bash
 # Regenerate function call counts
-grep -r "evaluate_" *.py | wc -l
+grep "evaluate_" *.py | wc -l
 
 # Check for new JSON files
 find . -name "*.json" -type f

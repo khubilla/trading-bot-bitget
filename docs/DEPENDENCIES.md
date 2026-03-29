@@ -80,7 +80,7 @@ paper_trader.py → paper_state.json (internal simulation state)
 **Used by:**
 - `bot.py` (Bitget bot) — imports and calls evaluate_s1 through evaluate_s5
 - `ig_bot.py` (IG bot) — imports and calls evaluate_s5 only
-- `backtest.py` — historical strategy testing
+- `backtest.py` — historical strategy testing (uses evaluate_s1, s2, s3; does NOT use evaluate_s5)
 
 **Key function:** `evaluate_s5()`
 
@@ -142,7 +142,7 @@ def evaluate_s5(
 
 The `from config_s5 import ...` statement occurs at LINE 1085, INSIDE the function body. This is NOT a refactoring oversight — it's an intentional design that enables `ig_bot.py` to patch config_s5 parameters before evaluate_s5() reads them.
 
-**Patching mechanism in ig_bot.py (lines 24-36):**
+**Patching mechanism in ig_bot.py (lines 25-37):**
 
 ```python
 # Apply US30-specific S5 params — must happen before strategy.evaluate_s5() is imported
@@ -186,7 +186,7 @@ del _cs5_orig, _cs5_ig, _attr, _base_attrs
 grep -n "^def evaluate_s5" strategy.py
 
 # Find all callers
-grep -n "evaluate_s5" bot.py ig_bot.py backtest.py
+grep -n "evaluate_s5" bot.py ig_bot.py
 
 # Verify config import is inside function
 sed -n '1067,1095p' strategy.py | grep "from config_s5 import"

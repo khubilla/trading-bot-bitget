@@ -92,13 +92,17 @@ def _rebuild_stats_from_csv(csv_path: str):
         with open(csv_path, newline="") as f:
             for r in csv.DictReader(f):
                 action = r.get("action", "")
-                if "_CLOSE" not in action:
+                is_close   = "_CLOSE"   in action
+                is_partial = "_PARTIAL" in action
+                if not is_close and not is_partial:
                     continue
-                result = r.get("result", "")
-                if result == "WIN":
-                    wins += 1
-                elif result == "LOSS":
-                    losses += 1
+                # Win/loss count only for final closes, not partial TPs
+                if is_close:
+                    result = r.get("result", "")
+                    if result == "WIN":
+                        wins += 1
+                    elif result == "LOSS":
+                        losses += 1
                 try:
                     total_pnl += float(r.get("pnl") or 0)
                 except (ValueError, TypeError):

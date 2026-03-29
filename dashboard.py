@@ -28,32 +28,104 @@ app = FastAPI(title="MTF Bot Dashboard" + (" [PAPER]" if PAPER_MODE else ""))
 sys.path.insert(0, str(Path(__file__).parent))
 
 
+_STRATEGY_INTERVAL = {
+    "S1": "3m", "S2": "1D", "S3": "15m", "S4": "1D", "S5": "15m",
+}
+
+
+def _safe_float(val):
+    try:
+        return float(val) if val else None
+    except (ValueError, TypeError):
+        return None
+
+
 def _load_csv_history(csv_path: str, limit: int = 50) -> list:
-    """Load closed trades from trades CSV for dashboard trade history."""
+    """Load closed trades from CSV, enriched with open-row data for chart replay.
+
+    2-pass approach:
+      Pass 1 — collect OPEN, SCALE_IN, PARTIAL rows keyed by trade_id.
+      Pass 2 — for each CLOSE row, look up the matching OPEN row and emit enriched dict.
+    """
     if not os.path.exists(csv_path):
         return []
+
+    open_rows  = {}   # trade_id → {entry, sl, tp, open_at, side, strategy, symbol, interval}
+    event_rows = {}   # trade_id → [{type, price, ts}, ...]
     rows = []
+
     try:
         with open(csv_path, newline="") as f:
-            for r in csv.DictReader(f):
-                if "_CLOSE" in (r.get("action") or "") or "_PARTIAL" in (r.get("action") or ""):
-                    try:
-                        pnl = float(r["pnl"]) if r.get("pnl") else 0.0
-                    except (ValueError, TypeError):
-                        pnl = 0.0
-                    rows.append({
-                        "symbol":    r.get("symbol", ""),
-                        "side":      r.get("side", ""),
-                        "pnl":       round(pnl, 4),
-                        "pnl_pct":   r.get("pnl_pct", ""),
-                        "result":    r.get("result", ""),
-                        "exit_reason": r.get("exit_reason", ""),
-                        "strategy":  (r.get("action") or "").split("_")[0],
-                        "closed_at": r.get("timestamp", ""),
-                    })
+            all_rows = list(csv.DictReader(f))
+
+        # ── Pass 1: index OPEN / SCALE_IN / PARTIAL rows ─────────────── #
+        for r in all_rows:
+            action = r.get("action") or ""
+            tid    = r.get("trade_id") or ""
+            if not tid:
+                continue
+
+            if any(action.endswith(sfx) for sfx in ("_LONG", "_SHORT")):
+                strategy = action.split("_")[0]
+                open_rows[tid] = {
+                    "entry":    _safe_float(r.get("entry")),
+                    "sl":       _safe_float(r.get("sl")),
+                    "tp":       _safe_float(r.get("tp")),
+                    "open_at":  r.get("timestamp", ""),
+                    "side":     r.get("side", ""),
+                    "symbol":   r.get("symbol", ""),
+                    "interval": _STRATEGY_INTERVAL.get(strategy, "15m"),
+                }
+                continue
+
+            if "_SCALE_IN" in action:
+                event_rows.setdefault(tid, []).append({
+                    "type":  "scale_in",
+                    "price": _safe_float(r.get("entry")),
+                    "ts":    r.get("timestamp", ""),
+                })
+                continue
+
+            if "_PARTIAL" in action:
+                event_rows.setdefault(tid, []).append({
+                    "type":  "partial",
+                    "price": _safe_float(r.get("exit_price")),
+                    "ts":    r.get("timestamp", ""),
+                })
+
+        # ── Pass 2: enrich CLOSE rows ────────────────────────────────── #
+        for r in all_rows:
+            action = r.get("action") or ""
+            if "_CLOSE" not in action:
+                continue
+
+            tid      = r.get("trade_id") or ""
+            pnl      = _safe_float(r.get("pnl")) or 0.0
+            open_row = open_rows.get(tid, {})
+
+            rows.append({
+                # existing fields (unchanged contract for dashboard rendering)
+                "symbol":      r.get("symbol") or open_row.get("symbol", ""),
+                "side":        r.get("side") or open_row.get("side", ""),
+                "pnl":         round(pnl, 4),
+                "pnl_pct":     r.get("pnl_pct", ""),
+                "result":      r.get("result", ""),
+                "exit_reason": r.get("exit_reason", ""),
+                "strategy":    action.split("_")[0],
+                "closed_at":   r.get("timestamp", ""),
+                # new fields for chart replay
+                "entry":       open_row.get("entry"),
+                "sl":          open_row.get("sl"),
+                "tp":          open_row.get("tp"),
+                "exit_price":  _safe_float(r.get("exit_price")),
+                "open_at":     open_row.get("open_at"),
+                "interval":    open_row.get("interval"),
+                "events":      event_rows.get(tid, []),
+            })
+
     except Exception:
         pass
-    # newest first, capped at limit
+
     return list(reversed(rows))[:limit]
 
 

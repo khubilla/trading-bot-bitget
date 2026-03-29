@@ -562,7 +562,296 @@ grep -n "ig_state.json" dashboard.py
 
 ## 10. Confusing Names & Common Pitfalls
 
-[To be populated in Task 12]
+This section documents naming patterns that frequently cause bugs, especially for developers unfamiliar with the codebase.
+
+### 10.1 File Name Confusions
+
+#### state_paper.json vs paper_state.json
+
+**The Problem:**
+
+Two files with similar names but different purposes:
+
+| File | Size | Purpose | Used by | Mode |
+|------|------|---------|---------|------|
+| `state_paper.json` | 70K | Persistent Bitget bot state (balance, trades, pair analysis) | bot.py, state.py, dashboard.py | Paper trading only |
+| `paper_state.json` | 1.7K | Internal paper_trader.py simulation state (ephemeral position tracking) | paper_trader.py | Paper trading only |
+
+**Why they exist:**
+
+- **state_paper.json** — Main state file for paper-trading mode. Contains strategy signals, pair analysis, trade history. This is what the dashboard reads.
+- **paper_state.json** — Transient simulation state used internally by the paper_trader.py module to track positions during the current trading session. Does NOT persist between restarts.
+
+**Common mistakes:**
+
+1. **Reading the wrong file for strategy signals**
+   - Mistake: Loading `paper_state.json` to check S5 signals
+   - Fix: Load `state_paper.json` instead; paper_state.json only has position data
+   - Impact: Missing strategy context; may think no signals are being generated
+
+2. **Expecting paper_state.json to persist**
+   - Mistake: Assuming paper_state.json survives bot restart
+   - Fix: Use state_paper.json for anything that needs to outlive a restart
+   - Impact: Position data lost after bot restart
+
+3. **Confusing which file to back up**
+   - Mistake: Only backing up paper_state.json before testing
+   - Fix: Backup state_paper.json to preserve trading history
+   - Impact: Lose trade history, statistics, pair analysis
+
+**Verification:**
+
+```bash
+# Check which files exist
+ls -lh state_paper.json paper_state.json 2>/dev/null | awk '{print $5, $9}'
+
+# Expected output (Bitget paper mode):
+# 70K /Users/kevin/Downloads/bitget_mtf_bot/state_paper.json
+# 1.7K /Users/kevin/Downloads/bitget_mtf_bot/paper_state.json
+
+# Read state_paper.json to check pair signals
+python -c "import json; s=json.load(open('state_paper.json')); print(list(s['pair_states'].keys())[:3])"
+
+# IG bot only has ig_state.json (no state_paper.json equivalent)
+ls -lh ig_state.json 2>/dev/null || echo "IG state file not found (normal if bot hasn't run)"
+```
+
+### 10.2 Similar Parameter Names Across Strategies
+
+#### S2_MIN_RR vs S3_MIN_RR vs S5_MIN_RR
+
+**The Problem:**
+
+Each strategy (S2, S3, S5) has its own minimum reward:risk ratio parameter, and they apply at different points in the logic:
+
+| Parameter | Strategy | Minimum RR | Applied where | Default |
+|-----------|----------|-----------|----------------|---------|
+| `S2_MIN_RR` | Not defined | — | Strategy S2 does not use MIN_RR | N/A |
+| `S3_MIN_RR` | S3 (Smart Money Confluence) | 2.0 | strategy.py line ~850 (partial TP vs SL comparison) | 2.0 |
+| `S5_MIN_RR` | S5 (SMC Order Block Pullback) | 2.0 | strategy.py line ~1090 (structural target vs SL comparison) | 2.0 |
+
+**Why the confusion:**
+
+1. Parameter naming follows `S{N}_MIN_RR` pattern, but S1/S4 don't have this parameter
+2. S2 has NO MIN_RR check (uses fixed TP/SL multipliers instead)
+3. Similar names mask different implementations
+
+**Common mistakes:**
+
+1. **Adding S2_MIN_RR to config_s5.py**
+   - Mistake: Thinking "all strategies should have MIN_RR"
+   - Fix: Check strategy.py to see which strategies actually use it
+   - Impact: Unused parameter clutters config; wastes time troubleshooting
+
+2. **Tuning the wrong parameter**
+   - Mistake: Changing S5_MIN_RR expecting it to affect S3 entries
+   - Fix: Understand that S3 and S5 are independent (edit config_s3.py for S3)
+   - Impact: Changes don't take effect; performance doesn't improve
+
+3. **Forgetting to sync between config_s5.py and config_ig_s5.py**
+   - Mistake: Updating S5_MIN_RR in config_s5.py but not config_ig_s5.py
+   - Fix: If changing S5_MIN_RR, update BOTH files if IG override is intended
+   - Impact: Bitget bot uses new value; IG bot uses old default (or vice versa)
+
+**Verification:**
+
+```bash
+# Find all MIN_RR definitions
+grep "MIN_RR" config_*.py
+
+# Expected:
+# config_s3.py:S3_MIN_RR = 2.0
+# config_s5.py:S5_MIN_RR = 2.0
+
+# Verify S2 has no MIN_RR
+grep "S2_MIN_RR\|MIN_RR" config_s*.py | grep -c S2 || echo "S2 has no MIN_RR (correct)"
+
+# Find where MIN_RR is used in strategy.py
+grep -n "MIN_RR" strategy.py
+```
+
+### 10.3 Import Timing Traps
+
+#### Module-Level vs Function-Level Config Imports
+
+**The Problem:**
+
+`strategy.py`'s `evaluate_s5()` function imports config_s5 INSIDE the function body (line 1085), not at module load time. This is intentional but fragile.
+
+**Why it matters:**
+
+The IG bot patches `config_s5` module attributes at startup (ig_bot.py lines 25-37):
+
+```python
+# ig_bot.py: Patch config_s5 before calling evaluate_s5()
+import config_s5 as _cs5_orig
+import config_ig_s5 as _cs5_ig
+for _attr in [a for a in dir(_cs5_ig) if not a.startswith('_')]:
+    setattr(_cs5_orig, _attr, getattr(_cs5_ig, _attr))
+```
+
+If the import moved to module-level, the patching would fail:
+
+```
+BAD (module-level import):
+─────────────────────────
+strategy.py module loads
+  → imports config_s5 at line 1
+  → config_s5.S5_MIN_RR = 2.0 (Bitget default)
+
+ig_bot.py starts
+  → patches config_s5 module
+  → config_s5.S5_MIN_RR = 1.5 (IG override)
+
+evaluate_s5() called
+  → uses already-cached Bitget value (2.0)
+  → IG override ignored!
+```
+
+**Common mistakes:**
+
+1. **"Refactoring" the import to module-level**
+   - Mistake: Moving `from config_s5 import ...` outside the function
+   - Impact: IG bot stops using IG parameters; uses Bitget defaults instead
+   - Why hard to debug: Both bots run without errors, but IG trades fail silently
+
+2. **Calling evaluate_s5() before patching (IG bot only)**
+   - Mistake: Importing `from strategy import evaluate_s5` before ig_bot.py patches
+   - Impact: IG bot sees Bitget parameters on first call
+   - Why hard to debug: Works fine on second call (after patching); fails intermittently
+
+3. **Forgetting the patching mechanism exists**
+   - Mistake: Wondering why IG config_ig_s5.py seems ignored
+   - Fix: Check ig_bot.py lines 25-37 to see patching in action
+   - Why hard to debug: Parameter changes in config_ig_s5.py mysteriously don't take effect
+
+**Control flow (correct):**
+
+```
+ig_bot.py startup:
+  1. import config_s5 as _cs5_orig
+  2. import config_ig_s5 as _cs5_ig
+  3. Loop: setattr(config_s5, attr, config_ig_s5_value)
+  4. from strategy import evaluate_s5
+  5. Call evaluate_s5(...)
+     → evaluate_s5() executes: from config_s5 import ...
+     → Reads PATCHED values
+```
+
+**Verification:**
+
+```bash
+# Confirm evaluate_s5 has function-level import
+sed -n '1067,1095p' strategy.py | grep -A 20 "def evaluate_s5"
+
+# Expected: line 1085 should show "from config_s5 import"
+
+# Verify IG bot patching happens first
+sed -n '1,50p' ig_bot.py | grep -A 15 "import config_s5 as"
+
+# Expected: ig_bot patching at lines 25-37, import evaluate_s5 at line 39+
+```
+
+### 10.4 CSV Action Name Inconsistency
+
+#### Bitget vs IG CSV Action Formats
+
+**The Problem:**
+
+Bitget bot and IG bot log trade actions with different naming conventions:
+
+| Bot | Action Format | Examples | Notes |
+|-----|---------------|----------|-------|
+| Bitget | `{STRATEGY}_{SIGNAL}` `{STRATEGY}_{LIFECYCLE}` | `S1_LONG` `S5_OPEN` `S5_PARTIAL` `S5_CLOSE` | Strategy-prefixed; mixed signal/lifecycle naming |
+| IG | `S5_{LIFECYCLE}` | `S5_OPEN` `S5_PARTIAL` `S5_CLOSE` | Only S5; cleaner lifecycle-focused naming |
+
+**Detailed breakdown:**
+
+**Bitget trades.csv (bot.py):**
+```
+Entry actions:
+  S1_LONG, S1_SHORT       (S1 entry signal)
+  S2_LONG, S2_SHORT       (S2 entry signal)
+  S3_LONG, S3_SHORT       (S3 entry signal)
+  S4_LONG, S4_SHORT       (S4 entry signal)
+  S5_LONG, S5_SHORT       (S5 entry signal)
+
+Lifecycle actions:
+  S1_PARTIAL, S2_PARTIAL, ... (partial TP hit)
+  S1_SCALE_IN, S2_SCALE_IN, ... (manual scale-in)
+  S1_CLOSE, S2_CLOSE, ... (full exit)
+```
+
+**IG ig_trades.csv (ig_bot.py):**
+```
+Lifecycle actions (S5 only):
+  S5_OPEN                 (entry logged separately? NO — uses S5_LONG/SHORT)
+  S5_PARTIAL              (partial TP hit)
+  S5_CLOSE                (full exit)
+
+Opening action logged as: S5_{sig} where sig=LONG/SHORT
+```
+
+**Common mistakes:**
+
+1. **Using optimize.py to analyze ig_trades.csv**
+   - Mistake: Running `optimize.py` and passing ig_trades.csv as input
+   - Impact: optimize.py expects Bitget CSV format (different action names, columns)
+   - Fix: Use `optimize_ig.py` instead for IG trades
+   - Verification: Check optimize.py line ~128 for action name parsing
+
+2. **Action name parsing in optimize.py vs optimize_ig.py**
+   - Mistake: Assuming both tools parse actions the same way
+   - Action check in optimize.py (line ~128): `if "_CLOSE" in action:`
+   - Action check in optimize_ig.py (line ~66): `elif action == "S5_PARTIAL":`
+   - Impact: Different trade filtering logic; optimize_ig works only on S5
+   - Fix: Understand each tool is strategy-specific
+
+3. **Mixing Bitget and IG CSV columns**
+   - Mistake: Copying ig_trades.csv columns into trades_paper.csv
+   - Bitget has 37 columns; IG has 19 columns
+   - Impact: CSV parser crashes or silent data loss
+   - Fix: Keep CSV formats separate; never merge them
+
+**Which tool to use:**
+
+```bash
+# For Bitget trades (any strategy, all columns)
+python optimize.py
+
+# For IG trades (S5 only, minimal columns)
+python optimize_ig.py
+```
+
+**Verification:**
+
+```bash
+# Check Bitget CSV column count
+head -1 trades_paper.csv | tr ',' '\n' | wc -l
+# Expected: 37 columns
+
+# Check IG CSV column count
+head -1 ig_trades.csv | tr ',' '\n' | wc -l
+# Expected: 19 columns
+
+# Verify action names are different
+head -20 trades_paper.csv | grep "action" | cut -d, -f1-3
+# Expected: S1_LONG, S2_LONG, S3_LONG, S5_PARTIAL, S5_CLOSE, etc.
+
+head -20 ig_trades.csv | grep "S5_" | cut -d, -f1-3
+# Expected: S5_LONG, S5_SHORT, S5_PARTIAL, S5_CLOSE, etc.
+```
+
+---
+
+## Quick Reference: Common Pitfall Quick Fixes
+
+| Pitfall | Symptom | Fix | Verification |
+|---------|---------|-----|--------------|
+| Confusing state files | Dashboard shows no signals | Check `state_paper.json`, not `paper_state.json` | `python -c "import json; print(json.load(open('state_paper.json'))['pair_states'])"` |
+| Tuning wrong MIN_RR | Parameter changes don't help | Update correct config file (S3 vs S5) | `grep MIN_RR config_*.py` |
+| Evaluate_s5 import moved | IG bot ignores config_ig_s5 | Keep import inside function | `sed -n '1085p' strategy.py` |
+| Wrong CSV tool | optimize.py crashes on ig_trades.csv | Use optimize_ig.py for IG | `ls -lh optimize.py optimize_ig.py` |
 
 ---
 

@@ -84,9 +84,10 @@ def get_last_close(symbol: str) -> dict | None:
     for entry in reversed(history):
         if entry.get("symbol") == symbol:
             return {
-                "pnl":     entry.get("pnl", 0),
-                "pnl_pct": entry.get("pnl_pct"),
-                "reason":  entry.get("reason", ""),
+                "pnl":        entry.get("pnl", 0),
+                "pnl_pct":    entry.get("pnl_pct"),
+                "reason":     entry.get("reason", ""),
+                "exit_price": entry.get("exit", 0),
             }
     return None
 

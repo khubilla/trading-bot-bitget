@@ -50,7 +50,7 @@
 **Files shared between bots:**
 - `strategy.py` — all evaluate_s1 through evaluate_s5 functions
 - `config_s5.py` — S5 parameters (Bitget direct, IG patched with config_ig_s5)
-- `paper_trader.py` — simulation engine for both
+- `paper_trader.py` — simulation engine (used by Bitget bot only in paper mode)
 
 **Separation rules:**
 - Changes to shared files require testing BOTH bots
@@ -60,11 +60,11 @@
 ### Data Flow
 
 ```
-bot.py → StateManager → state_paper.json → dashboard.py → dashboard.html
+bot.py → state.py → state_paper.json → dashboard.py → dashboard.html
        → _log_trade  → trades_paper.csv  → optimize.py
 
 ig_bot.py → _log_trade → ig_trades.csv → optimize_ig.py
-          → (no StateManager, writes ig_state.json directly)
+          → _save_state → ig_state.json (position persistence, no state.py module)
 
 paper_trader.py → paper_state.json (internal simulation state)
 ```

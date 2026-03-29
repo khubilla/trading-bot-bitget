@@ -31,7 +31,7 @@ The dependency check findings feed directly into brainstorming context. If a bra
 
 **Step 1: Read the checklist**
 
-Read `/Users/kevin/Downloads/bitget_mtf_bot/docs/PRE_CHANGE_CHECKLIST.md` in full.
+Read `./docs/PRE_CHANGE_CHECKLIST.md` in full.
 
 **Step 2: Classify the change**
 
@@ -41,7 +41,7 @@ Using Steps 1–2 of the checklist, identify:
 
 **Step 3: Look up relevant sections**
 
-Using Step 3 of the checklist, read the relevant sections from `/Users/kevin/Downloads/bitget_mtf_bot/docs/DEPENDENCIES.md`:
+Using Step 3 of the checklist, read the relevant sections from `./docs/DEPENDENCIES.md`:
 - **Shared file change** → Section 2 (Shared Files)
 - **State/JSON change** → Section 4 (Data Contracts)
 - **Config change** → Section 5 (Config Dependencies)

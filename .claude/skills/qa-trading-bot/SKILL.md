@@ -24,7 +24,7 @@ git commit + push
 **Step 1: Run pytest**
 
 ```bash
-cd /Users/kevin/Downloads/bitget_mtf_bot && pytest tests/ -v --tb=short
+pytest tests/ -v --tb=short
 ```
 
 **Step 2: If all pass**

@@ -68,7 +68,7 @@ _TRADE_FIELDS = [
     # S/R clearance at entry (S2/S3/S4/S5)
     "snap_sr_clearance_pct",
     # Close fields
-    "result", "pnl", "pnl_pct", "exit_reason",
+    "result", "pnl", "pnl_pct", "exit_reason", "exit_price",
 ]
 
 def _log_trade(action: str, details: dict):
@@ -242,6 +242,7 @@ class MTFBot:
                         "symbol": pc["symbol"], "side": pc["side"],
                         "pnl": pc["pnl"], "result": "WIN" if pc["pnl"] >= 0 else "LOSS",
                         "pnl_pct": pc["pnl_pct"], "exit_reason": "PARTIAL_TP",
+                        "exit_price": pc.get("exit"),
                     })
                     # Update to REMAINING margin (exchange_positions has the updated value from paper_trader)
                     remaining_margin = exchange_positions.get(pc["symbol"], {}).get("margin", 0)
@@ -287,6 +288,7 @@ class MTFBot:
                                 "trade_id": ap.get("trade_id", ""),
                                 "symbol": sym, "side": side,
                                 "pnl": round(partial_pnl, 4),
+                                "exit_price": round(mark_now, 8),
                                 "result": "WIN" if partial_pnl >= 0 else "LOSS",
                                 "pnl_pct": partial_pct, "exit_reason": "PARTIAL_TP",
                             })
@@ -425,6 +427,7 @@ class MTFBot:
                     last_pnl = float(_ot.get("unrealised_pnl") or 0) if _ot else 0.0
                     pnl_pct     = None
                     exit_reason = ""
+                    _lc         = None
                     if PAPER_MODE:
                         _lc = tr.get_last_close(sym)
                         if _lc:
@@ -450,11 +453,16 @@ class MTFBot:
                     st.add_scan_log(
                         f"[{ap['strategy']}][{sym}] Closed {result} | PnL={last_pnl:+.4f} USDT", "INFO"
                     )
+                    try:
+                        _exit_price = _lc.get("exit_price") if (PAPER_MODE and _lc) else tr.get_mark_price(sym)
+                    except Exception:
+                        _exit_price = None
                     _log_trade(f"{ap['strategy']}_CLOSE", {
                         "trade_id": ap.get("trade_id", ""),
                         "symbol": sym, "side": ap["side"],
                         "pnl": round(last_pnl, 4), "result": result,
                         "pnl_pct": pnl_pct, "exit_reason": exit_reason,
+                        "exit_price": _exit_price,
                     })
                     del self.active_positions[sym]
 

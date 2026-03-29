@@ -1921,6 +1921,8 @@ function closeChart(e) {
   clearInterval(chartRefreshTimer);
   currentSymbol = null;
   window._tradeOverlay = null;
+  if (candleSeries) try { candleSeries.setMarkers([]); } catch(_) {}
+  document.querySelectorAll('.trade-stems-svg, .trade-shade').forEach(el => el.remove());
 }
 
 function switchInterval(interval) {
@@ -2348,22 +2350,27 @@ async function loadChart(symbol, interval, fitOnLoad = false) {
       }));
     }
 
-    // ── Active trade overlay lines (entry / SL / TP) ──
+    // ── Trade overlay lines ──
     if (window._tradeOverlay) {
-      const ov   = window._tradeOverlay;
-      const isLong = (ov.side || '').toUpperCase() === 'LONG';
-      if (ov.entry) candlePriceLines.push(candleSeries.createPriceLine({
-        price: ov.entry, color: '#e2e8f0', lineWidth: 1, lineStyle: 0,
-        axisLabelVisible: true, title: 'Entry',
-      }));
-      if (ov.sl) candlePriceLines.push(candleSeries.createPriceLine({
-        price: ov.sl, color: '#f43f5e', lineWidth: 1, lineStyle: 0,
-        axisLabelVisible: true, title: 'SL',
-      }));
-      if (ov.tp) candlePriceLines.push(candleSeries.createPriceLine({
-        price: ov.tp, color: '#10b981', lineWidth: 1, lineStyle: 0,
-        axisLabelVisible: true, title: 'TP',
-      }));
+      const ov = window._tradeOverlay;
+      if (ov.closed) {
+        // Closed trade: full chart replay (price lines + markers + stems + shading)
+        setTimeout(() => _applyClosedTradeOverlay(ov), 50);
+      } else {
+        // Live trade: entry / SL / TP lines only
+        if (ov.entry) candlePriceLines.push(candleSeries.createPriceLine({
+          price: ov.entry, color: '#e2e8f0', lineWidth: 1, lineStyle: 0,
+          axisLabelVisible: true, title: 'Entry',
+        }));
+        if (ov.sl) candlePriceLines.push(candleSeries.createPriceLine({
+          price: ov.sl, color: '#f43f5e', lineWidth: 1, lineStyle: 0,
+          axisLabelVisible: true, title: 'SL',
+        }));
+        if (ov.tp) candlePriceLines.push(candleSeries.createPriceLine({
+          price: ov.tp, color: '#10b981', lineWidth: 1, lineStyle: 0,
+          axisLabelVisible: true, title: 'TP',
+        }));
+      }
     }
 
     // ── Common ──
@@ -2382,6 +2389,173 @@ async function loadChart(symbol, interval, fitOnLoad = false) {
     ageEl.textContent = 'Fetch error: ' + err.message;
     console.error('Chart error:', err);
   }
+}
+
+// ── Closed trade chart overlay ─────────────────────────
+function _applyClosedTradeOverlay(ov) {
+  if (!ov.open_ts || !ov.close_ts) return;
+  const isLong = (ov.side || '').toUpperCase() === 'LONG';
+
+  // 1. Navigate: show full trade span with 20% padding on each side
+  const pad = Math.max(Math.round((ov.close_ts - ov.open_ts) * 0.2), 3600);
+  try {
+    candleChart.timeScale().setVisibleRange({
+      from: ov.open_ts - pad,
+      to:   ov.close_ts + pad,
+    });
+  } catch (_) {}
+
+  // 2. Price lines
+  if (ov.entry) candlePriceLines.push(candleSeries.createPriceLine({
+    price: ov.entry, color: '#4a90d9', lineWidth: 1, lineStyle: 2,
+    axisLabelVisible: true, title: 'Entry',
+  }));
+  if (ov.sl) candlePriceLines.push(candleSeries.createPriceLine({
+    price: ov.sl, color: '#ff4d6a', lineWidth: 1, lineStyle: 2,
+    axisLabelVisible: true, title: 'SL',
+  }));
+  if (ov.tp) candlePriceLines.push(candleSeries.createPriceLine({
+    price: ov.tp, color: '#00d68f', lineWidth: 1, lineStyle: 2,
+    axisLabelVisible: true, title: 'TP',
+  }));
+  if (ov.exit_price) candlePriceLines.push(candleSeries.createPriceLine({
+    price: ov.exit_price, color: '#f0a500', lineWidth: 1, lineStyle: 2,
+    axisLabelVisible: true, title: 'Exit',
+  }));
+
+  // 3. Markers
+  const markers = [];
+  if (ov.entry) markers.push({
+    time:     ov.open_ts,
+    position: isLong ? 'belowBar' : 'aboveBar',
+    color:    '#00d68f',
+    shape:    isLong ? 'arrowUp' : 'arrowDown',
+    text:     'Entry' + (ov.entry ? ' $' + fmtPrice(ov.entry) : ''),
+  });
+  for (const ev of (ov.events || []).filter(e => e.type === 'scale_in')) {
+    const ts = isoToUnix(ev.ts);
+    if (ts) markers.push({
+      time:     ts,
+      position: isLong ? 'belowBar' : 'aboveBar',
+      color:    '#4a90d9',
+      shape:    isLong ? 'arrowUp' : 'arrowDown',
+      text:     'Scale-in' + (ev.price ? ' $' + fmtPrice(ev.price) : ''),
+      size:     0.8,
+    });
+  }
+  for (const ev of (ov.events || []).filter(e => e.type === 'partial')) {
+    const ts = isoToUnix(ev.ts);
+    if (ts) markers.push({
+      time:     ts,
+      position: isLong ? 'aboveBar' : 'belowBar',
+      color:    '#f0a500',
+      shape:    'circle',
+      text:     'Partial' + (ev.price ? ' $' + fmtPrice(ev.price) : ''),
+    });
+  }
+  if (ov.exit_price) markers.push({
+    time:     ov.close_ts,
+    position: isLong ? 'aboveBar' : 'belowBar',
+    color:    '#f0a500',
+    shape:    'square',
+    text:     'Exit' + (ov.exit_price ? ' $' + fmtPrice(ov.exit_price) : ''),
+  });
+  markers.sort((a, b) => a.time - b.time);
+  candleSeries.setMarkers(markers);
+
+  // 4. Stems + shading — after chart has rendered the new range
+  requestAnimationFrame(() => {
+    _drawTradeShading(ov);
+    _drawTradeStems(ov);
+  });
+}
+
+function _drawTradeStems(ov) {
+  const chartEl = $('chart-candles');
+  chartEl.querySelectorAll('.trade-stems-svg').forEach(el => el.remove());
+  if (!candleChart || !candleSeries) return;
+
+  const isLong = (ov.side || '').toUpperCase() === 'LONG';
+  const ts  = candleChart.timeScale();
+  const ps  = candleSeries;
+  const w   = chartEl.offsetWidth;
+  const h   = chartEl.offsetHeight;
+
+  // Points that get a stem: entry, scale-ins, partials, exit
+  const pts = [];
+  if (ov.open_ts && ov.entry)
+    pts.push({ time: ov.open_ts,  price: ov.entry,      color: '#00d68f', dir: isLong ? 'below' : 'above' });
+  for (const ev of (ov.events || []).filter(e => e.type === 'scale_in')) {
+    const t = isoToUnix(ev.ts);
+    if (t && ev.price) pts.push({ time: t, price: ev.price, color: '#4a90d9', dir: isLong ? 'below' : 'above' });
+  }
+  for (const ev of (ov.events || []).filter(e => e.type === 'partial')) {
+    const t = isoToUnix(ev.ts);
+    if (t && ev.price) pts.push({ time: t, price: ev.price, color: '#f0a500', dir: isLong ? 'above' : 'below' });
+  }
+  if (ov.close_ts && ov.exit_price)
+    pts.push({ time: ov.close_ts, price: ov.exit_price, color: '#f0a500', dir: isLong ? 'above' : 'below' });
+
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.classList.add('trade-stems-svg');
+  svg.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:2;overflow:visible;';
+  svg.setAttribute('width', w);
+  svg.setAttribute('height', h);
+
+  for (const pt of pts) {
+    const x = ts.timeToCoordinate(pt.time);
+    const y = ps.priceToCoordinate(pt.price);
+    if (x == null || y == null) continue;
+
+    const stemLen = 16;
+    const tickLen = 7;
+    const y2 = pt.dir === 'below' ? y + stemLen : y - stemLen;
+
+    // Vertical stem
+    const line = document.createElementNS(svgNS, 'line');
+    line.setAttribute('x1', x);  line.setAttribute('y1', y);
+    line.setAttribute('x2', x);  line.setAttribute('y2', y2);
+    line.setAttribute('stroke', pt.color);
+    line.setAttribute('stroke-width', '1.5');
+    svg.appendChild(line);
+
+    // Horizontal price tick (dashed, centred on x)
+    const tick = document.createElementNS(svgNS, 'line');
+    tick.setAttribute('x1', x - tickLen); tick.setAttribute('y1', y);
+    tick.setAttribute('x2', x + tickLen); tick.setAttribute('y2', y);
+    tick.setAttribute('stroke', pt.color);
+    tick.setAttribute('stroke-width', '1.5');
+    tick.setAttribute('stroke-dasharray', '2,2');
+    tick.setAttribute('opacity', '0.85');
+    svg.appendChild(tick);
+  }
+
+  chartEl.style.position = 'relative';
+  chartEl.appendChild(svg);
+}
+
+function _drawTradeShading(ov) {
+  const chartEl = $('chart-candles');
+  chartEl.querySelectorAll('.trade-shade').forEach(el => el.remove());
+  if (!candleChart || !ov.open_ts || !ov.close_ts) return;
+
+  const ts = candleChart.timeScale();
+  const x1 = ts.timeToCoordinate(ov.open_ts);
+  const x2 = ts.timeToCoordinate(ov.close_ts);
+  if (x1 == null || x2 == null) return;
+
+  const shade = document.createElement('div');
+  shade.className = 'trade-shade';
+  shade.style.cssText = `
+    position:absolute; top:0; bottom:0; pointer-events:none; z-index:1;
+    left:${Math.min(x1, x2)}px; width:${Math.abs(x2 - x1)}px;
+    background:rgba(74,144,217,0.07);
+    border-left:1px solid rgba(0,214,143,0.35);
+    border-right:1px solid rgba(240,165,0,0.35);
+  `;
+  chartEl.style.position = 'relative';
+  chartEl.appendChild(shade);
 }
 
 // Make pair cards clickable
@@ -2413,6 +2587,19 @@ function attachCardClicks() {
     };
   });
 }
+
+// Redraw trade overlay stems/shading when chart container resizes
+(function() {
+  const chartEl = $('chart-candles');
+  if (!chartEl || !window.ResizeObserver) return;
+  new ResizeObserver(() => {
+    const ov = window._tradeOverlay;
+    if (ov && ov.closed) {
+      _drawTradeShading(ov);
+      _drawTradeStems(ov);
+    }
+  }).observe(chartEl);
+})();
 
 // Close on Escape key
 document.addEventListener('keydown', e => {

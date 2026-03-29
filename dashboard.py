@@ -35,7 +35,7 @@ _STRATEGY_INTERVAL = {
 
 def _safe_float(val):
     try:
-        return float(val) if val else None
+        return float(val) if val is not None and val != "" else None
     except (ValueError, TypeError):
         return None
 

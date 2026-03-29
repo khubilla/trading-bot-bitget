@@ -1,4 +1,4 @@
-import sys, os, csv, io, types
+import sys, os, csv, io
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 def test_get_last_close_returns_exit_price(tmp_path, monkeypatch):
@@ -116,3 +116,33 @@ def test_load_csv_history_includes_scale_in_and_partial_events(tmp_path):
     assert evts[0]["price"] == 3050.0
     assert evts[1]["type"] == "partial"
     assert evts[1]["price"] == 3200.0
+
+
+def test_load_csv_history_graceful_no_open_row(tmp_path):
+    """CLOSE row with no matching OPEN row must still emit with None chart fields."""
+    import dashboard
+    csv_rows = [
+        {
+            "timestamp": "2026-03-29T16:05:00+00:00",
+            "trade_id": "orphan", "action": "S5_CLOSE",
+            "symbol": "BTCUSDT", "side": "LONG",
+            "pnl": "2.0", "result": "WIN", "pnl_pct": "1.0",
+            "exit_reason": "TP", "exit_price": "43000.0",
+        },
+    ]
+    csv_file = tmp_path / "trades.csv"
+    csv_file.write_text(_make_csv(csv_rows))
+
+    hist = dashboard._load_csv_history(str(csv_file), limit=10)
+    assert len(hist) == 1
+    t = hist[0]
+    assert t["entry"] is None,      f"entry should be None, got {t['entry']}"
+    assert t["sl"] is None,         f"sl should be None, got {t['sl']}"
+    assert t["tp"] is None,         f"tp should be None, got {t['tp']}"
+    assert t["open_at"] is None,    f"open_at should be None, got {t['open_at']}"
+    assert t["interval"] is None,   f"interval should be None, got {t['interval']}"
+    assert t["events"] == [],       f"events should be [], got {t['events']}"
+    # existing fields must still be present
+    assert t["symbol"] == "BTCUSDT"
+    assert t["result"] == "WIN"
+    assert t["exit_price"] == 43000.0

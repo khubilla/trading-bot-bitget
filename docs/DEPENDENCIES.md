@@ -207,7 +207,326 @@ sed -n '24,36p' ig_bot.py
 
 ## 4. Data Contracts
 
-[To be populated in Task 5]
+### 4.1 state.json / state_paper.json
+
+**Purpose:** Persistent bot state containing balance, open trades, strategy signals, and per-pair analysis data.
+
+**Write chain:**
+- `bot.py` line 638: `st.update_pair_state(symbol, {...})` — writes strategy signals and analysis data for each pair
+- `state.py`: Manages in-memory state and atomic writes to JSON file
+- Output: `state.json` (live mode) or `state_paper.json` (paper mode)
+
+**Read chain:**
+- `dashboard.py` line 66: `state = json.load(f)` — loads entire state for dashboard display
+- `dashboard.py` line 68: CSV history injected into state["trade_history"] (CSV is authoritative)
+- `dashboard.html` line 1766: `const pairStates = s.pair_states || {}` — JavaScript consumes pair_states
+- `dashboard.html` lines 1475, 1531: `ps.s2_signal` — individual strategy signals displayed
+- `dashboard.html` lines 1499, 1703: `ps.s5_priority_rank` — S5 priority sorting
+
+**Top-level fields:**
+```python
+{
+  "status": str,              # "RUNNING" | "STOPPED"
+  "started_at": str,          # ISO timestamp
+  "last_tick": str,           # ISO timestamp of last scan cycle
+  "balance": float,           # Current account balance (USDT)
+  "open_trades": list[dict],  # Active positions
+  "trade_history": list[dict],# Recently closed trades (runtime only; dashboard replaces with CSV)
+  "scan_log": list[str],      # Recent scan activity log entries
+  "qualified_pairs": list[str],# Pairs that passed S/R and volatility filters
+  "pair_states": dict,        # Per-pair strategy analysis (see below)
+  "sentiment": dict,          # Global sentiment state
+}
+```
+
+**pair_states structure:**
+
+Each key is a symbol (e.g., "BTCUSDT"). Value is a dict with 42 fields:
+
+```python
+{
+  # Price and HTF trend
+  "price": float,
+  "htf_bull": bool,           # Higher timeframe bullish structure
+  "htf_bear": bool,           # Higher timeframe bearish structure
+
+  # S1 fields
+  "rsi": float,
+  "adx": float,
+  "rsi_ok": bool,
+  "trend_ok": bool,
+  "consolidating": bool,      # Coiling pattern detected
+  "box_high": float | None,   # Consolidation box upper boundary
+  "box_low": float | None,    # Consolidation box lower boundary
+  "s1_signal": str,           # "LONG" | "SHORT" | "HOLD"
+  "reason": str,              # S1 decision explanation
+
+  # S2 fields
+  "s2_signal": str,           # "LONG" | "SHORT" | "HOLD"
+  "s2_reason": str,
+  "s2_daily_rsi": float | None,
+  "s2_big_candle": bool,
+  "s2_coiling": bool,
+  "s2_box_low": float | None,
+  "s2_box_high": float | None,
+  "s2_sr_resistance_pct": float | None,
+  "s2_sr_resistance_price": float | None,
+
+  # S3 fields
+  "s3_signal": str,           # "LONG" | "SHORT" | "HOLD"
+  "s3_reason": str,
+  "s3_adx": float | None,
+  "s3_sr_resistance_pct": float | None,
+  "s3_sr_resistance_price": float | None,
+
+  # S4 fields
+  "s4_signal": str,           # "LONG" | "SHORT" | "HOLD"
+  "s4_reason": str,
+  "s4_sr_support_pct": float | None,
+
+  # S5 fields
+  "s5_signal": str,           # "LONG" | "SHORT" | "HOLD" | "PENDING"
+  "s5_reason": str,
+  "s5_ob_low": float | None,  # Order block lower boundary
+  "s5_ob_high": float | None, # Order block upper boundary
+  "s5_entry_trigger": float | None,
+  "s5_sl": float | None,      # Stop loss price
+  "s5_tp": float | None,      # Take profit price
+  "s5_sr_pct": float | None,  # S/R clearance percentage
+  "s5_priority_rank": int | None,    # Rank (1=best) set by _execute_best_s5_candidate
+  "s5_priority_score": float | None, # Scoring metric for ranking
+
+  # Shared S/R fields
+  "sr_resistance_pct": float | None,
+  "sr_support_pct": float | None,
+
+  # Metadata
+  "signal": str,              # Aggregate signal (first non-HOLD from S1-S5)
+  "strategy": str,            # "S1" | "S2" | "S3" | "S4" | "S5"
+  "updated_at": str,          # ISO timestamp
+}
+```
+
+**Breaking scenarios:**
+
+1. **Renaming pair_states fields** → Dashboard crashes with "undefined" errors
+   - Example: Renaming `s5_priority_rank` breaks lines 1499, 1703 in dashboard.html
+   - Fix: Update all dashboard.html references + dashboard.py parsing
+
+2. **Changing top-level keys** → Dashboard API fails
+   - Example: Renaming "pair_states" to "pairs" breaks line 1766
+   - Fix: Update dashboard.py and dashboard.html
+
+3. **Changing signal values** → Dashboard filters break
+   - Example: Using "BUY" instead of "LONG" breaks line 1475 comparisons
+   - Fix: Update all signal comparisons in dashboard.html
+
+4. **Removing fields** → TypeError in dashboard rendering
+   - Example: Removing `s2_signal` breaks strategy tabs
+   - Fix: Add null checks in dashboard.html OR maintain field in state.py
+
+**Verification commands:**
+
+```bash
+# Check state write location
+grep -n "update_pair_state" bot.py
+
+# Check dashboard read locations
+grep -n "pair_states\|s2_signal\|s5_priority_rank" dashboard.html
+
+# Validate state structure
+python -c "import json; s=json.load(open('state_paper.json')); print(list(s.keys()))"
+
+# Check pair_states fields
+python -c "import json; s=json.load(open('state_paper.json')); ps=s['pair_states']; print(list(ps[list(ps.keys())[0]].keys()) if ps else [])"
+```
+
+---
+
+### 4.2 trades.csv / trades_paper.csv
+
+**Purpose:** Append-only log of all trade entries and exits (Bitget bot only).
+
+**Write chain:**
+- `bot.py` line 74: `def _log_trade(action, details)` — appends row to CSV
+- `bot.py` line 79: Uses `_TRADE_FIELDS` (defined at line 55) for column order
+- Output: `trades.csv` (live mode) or `trades_paper.csv` (paper mode)
+
+**Read chain:**
+- `dashboard.py` line 68: `csv_path = STATE_FILE.replace(..., "trades.csv")`
+- `dashboard.py` line 69: `csv_history = _load_csv_history(csv_path)` — loads recent trades
+- `dashboard.py` line 71: Injects CSV history into state (CSV is authoritative source)
+- `optimize.py` line 229: `csv_path.replace("trades.csv", "trades_paper.csv")` — parameter analysis
+
+**Columns (37 fields):**
+
+```csv
+timestamp,trade_id,action,symbol,side,qty,entry,sl,tp,
+box_low,box_high,leverage,margin,tpsl_set,strategy,
+snap_rsi,snap_adx,snap_htf,snap_coil,snap_box_range_pct,snap_sentiment,
+snap_daily_rsi,
+snap_entry_trigger,snap_sl,snap_rr,
+snap_rsi_peak,snap_spike_body_pct,snap_rsi_div,snap_rsi_div_str,
+snap_s5_ob_low,snap_s5_ob_high,snap_s5_tp,
+snap_sr_clearance_pct,
+result,pnl,pnl_pct,exit_reason
+```
+
+**Field categories:**
+- **Core trade data:** timestamp, trade_id, action, symbol, side, qty, entry, sl, tp
+- **Position metadata:** box_low, box_high, leverage, margin, tpsl_set, strategy
+- **S1 snapshot:** snap_rsi, snap_adx, snap_htf, snap_coil, snap_box_range_pct, snap_sentiment
+- **S2 snapshot:** snap_daily_rsi
+- **S3 snapshot:** snap_entry_trigger, snap_sl, snap_rr
+- **S4 snapshot:** snap_rsi_peak, snap_spike_body_pct, snap_rsi_div, snap_rsi_div_str
+- **S5 snapshot:** snap_s5_ob_low, snap_s5_ob_high, snap_s5_tp
+- **S/R snapshot:** snap_sr_clearance_pct
+- **Close data:** result, pnl, pnl_pct, exit_reason
+
+**Breaking scenarios:**
+
+1. **Changing column order in _TRADE_FIELDS** → CSV header misaligns with data
+   - Example: Moving "symbol" after "action" breaks DictWriter column mapping
+   - Fix: Update _TRADE_FIELDS definition at bot.py line 55
+
+2. **Renaming columns** → optimize.py fails to parse CSV
+   - Example: Renaming "snap_rsi" to "entry_rsi" breaks parameter analysis
+   - Fix: Update optimize.py CSV parsing logic
+
+3. **Removing columns** → DictWriter writes empty strings (restval="")
+   - Example: Removing "snap_s5_ob_low" leaves empty column in CSV
+   - Fix: Update _TRADE_FIELDS and all _log_trade calls
+
+4. **Adding columns** → New field must be added to _TRADE_FIELDS
+   - Example: Adding "snap_s5_sr_support_pct" without updating _TRADE_FIELDS
+   - Fix: Add field to _TRADE_FIELDS at bot.py line 55
+
+**Readers:**
+- `dashboard.py` — displays recent trade history
+- `optimize.py` — parameter optimization and backtest analysis
+- `bot.py` line 85: `_rebuild_stats_from_csv()` — restores win/loss stats after bot restart
+
+**Verification commands:**
+
+```bash
+# Check CSV header
+head -1 trades_paper.csv
+
+# Find _log_trade callers
+grep -n "_log_trade" bot.py
+
+# Verify column definition
+sed -n '55,72p' bot.py
+
+# Count columns
+head -1 trades_paper.csv | tr ',' '\n' | wc -l
+```
+
+---
+
+### 4.3 ig_trades.csv
+
+**Purpose:** Append-only log of all IG bot trades (US30 CFD).
+
+**Write chain:**
+- `ig_bot.py` line 75: `def _log_trade(action, details, paper)` — appends row to CSV
+- `ig_bot.py` line 85: Uses `_TRADE_FIELDS` (defined at line 65) for column order
+- Output: `ig_trades.csv` (single file for both live and paper trades)
+
+**Read chain:**
+- `optimize_ig.py` line 43: "Load completed trades from ig_trades.csv"
+- Sends closed trades to Claude API for S5 parameter optimization
+
+**Columns (16 fields):**
+
+```csv
+timestamp,trade_id,action,
+side,qty,entry,sl,tp,
+snap_entry_trigger,snap_sl,snap_rr,
+snap_s5_ob_low,snap_s5_ob_high,snap_s5_tp,
+result,pnl,exit_reason,
+session_date,mode
+```
+
+**Key differences from Bitget CSV:**
+- **Fewer columns:** IG only uses S5 strategy, so S1-S4 snapshot fields are omitted
+- **Additional fields:** `session_date` (YYYY-MM-DD), `mode` (PAPER | LIVE)
+- **No symbol column:** IG bot only trades US30 (single instrument)
+- **No leverage/margin:** IG uses fixed position sizing via config_ig
+
+**Breaking scenarios:**
+
+1. **Changing _TRADE_FIELDS order** → CSV header misaligns
+   - Fix: Update _TRADE_FIELDS at ig_bot.py line 65
+
+2. **Removing mode or session_date** → optimize_ig.py fails to filter trades
+   - Fix: Update _TRADE_FIELDS and all _log_trade calls in ig_bot.py
+
+3. **Renaming columns** → Claude API optimization prompts break
+   - Fix: Update optimize_ig.py prompt template
+
+**Reader:**
+- `optimize_ig.py` — sends completed trades to Claude API for parameter tuning
+
+**Verification commands:**
+
+```bash
+# Check IG CSV exists (may not exist if bot never ran)
+ls -lh ig_trades.csv 2>/dev/null || echo "IG CSV not yet created"
+
+# Check column definition
+sed -n '65,72p' ig_bot.py
+
+# Find _log_trade callers in IG bot
+grep -n "_log_trade" ig_bot.py
+```
+
+---
+
+### 4.4 ig_state.json
+
+**Purpose:** Minimal state file for IG bot position persistence (no state.py module).
+
+**Write chain:**
+- `ig_bot.py`: Direct JSON writes (no state.py abstraction)
+- IG bot manages state manually due to single-instrument simplicity
+
+**Read chain:**
+- `dashboard.py` line 494: `position = json.load(f).get("position")` — loads current US30 position
+- `ig_bot.py`: Loads position on startup to resume after restart
+
+**Structure:**
+```python
+{
+  "position": {
+    "trade_id": str,
+    "side": "LONG" | "SHORT",
+    "qty": float,
+    "entry": float,
+    "sl": float,
+    "tp": float,
+    "opened_at": str,  # ISO timestamp
+  } | None
+}
+```
+
+**Breaking scenarios:**
+
+1. **Renaming "position" key** → Dashboard IG panel crashes
+   - Fix: Update dashboard.py line 494
+
+2. **Changing position field names** → IG bot fails to resume position after restart
+   - Fix: Update all ig_bot.py position reads/writes
+
+**Verification commands:**
+
+```bash
+# Check IG state structure
+python -c "import json; print(json.load(open('ig_state.json')))"
+
+# Find dashboard reads
+grep -n "ig_state.json" dashboard.py
+```
 
 ---
 

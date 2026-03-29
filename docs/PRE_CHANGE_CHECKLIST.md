@@ -29,10 +29,10 @@ What am I changing?
 For each box checked in Step 1, read the corresponding section in DEPENDENCIES.md:
 
 - **Shared files** → § 2. Shared Files (Cross-Bot)
-- **Config files** → § 5. Config Dependencies
+- **Config files** → § 5. Config Dependencies *(Sections marked "deferred" are being added incrementally — check what exists)*
 - **Data structures** → § 4. Data Contracts
-- **Function changes** → § 6. Function Call Graph
-- **Strategy logic** → § 7. Strategy Implementations
+- **Function changes** → § 6. Function Call Graph *(Sections marked "deferred" are being added incrementally — check what exists)*
+- **Strategy logic** → § 7. Strategy Implementations *(Sections marked "deferred" are being added incrementally — check what exists)*
 
 ## Step 4: Verify Both Bots
 
@@ -45,10 +45,10 @@ python -c "import ig_bot; print('IG OK')"
 ## Step 5: Verify Data Consumers
 
 If you touched state.json or CSV formats:
-- [ ] Check dashboard.py lines 60-75, 310-350 for field references
+- [ ] Check dashboard.py lines 60-87 (state.json field reads in get_state endpoint)
 - [ ] Check dashboard.html lines 1224-2400 for field consumption
-- [ ] Check optimize.py lines 82-94 (STRATEGY_COLUMNS) for CSV dependencies
-- [ ] Check optimize_ig.py lines 95-103 for CSV dependencies
+- [ ] Check optimize.py lines 81-94 (STRATEGY_COLUMNS) for CSV dependencies
+- [ ] Check optimize_ig.py lines 101-105 (_COLS definition) for CSV dependencies
 - [ ] Check backtest.py for field dependencies
 
 ## Step 6: Document Changes

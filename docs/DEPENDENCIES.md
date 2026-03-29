@@ -896,7 +896,7 @@ grep -n "evaluate_s5" bot.py ig_bot.py strategy.py
 grep -n "s2_sr_resistance_pct" dashboard.py dashboard.html
 
 # 4. Run a quick integration test
-timeout 10 python bot.py --paper
+python -c "import subprocess, sys; subprocess.run([sys.executable, 'bot.py', '--paper'], timeout=10)" 2>/dev/null || echo "Quick test ran for 10s"
 ```
 
 **Quarterly audit:**

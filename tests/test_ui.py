@@ -129,6 +129,64 @@ def test_trade_history_entry_has_chart_fields(tmp_path, monkeypatch):
     )
 
 
+def test_trade_history_snap_fields_forwarded(tmp_path, monkeypatch):
+    """
+    Snap fields from the OPEN row must appear in trade_history entries so
+    claude_analyst.build_system_prompt() receives actual indicator values.
+    """
+    import csv, io, json
+    import dashboard
+    from starlette.testclient import TestClient
+
+    fields = [
+        "timestamp", "trade_id", "action", "symbol", "side", "qty", "entry", "sl", "tp",
+        "box_low", "box_high", "leverage", "margin", "tpsl_set", "strategy",
+        "snap_rsi", "snap_adx", "snap_htf", "snap_coil", "snap_box_range_pct", "snap_sentiment",
+        "snap_daily_rsi", "snap_entry_trigger", "snap_sl", "snap_rr",
+        "snap_rsi_peak", "snap_spike_body_pct", "snap_rsi_div", "snap_rsi_div_str",
+        "snap_s5_ob_low", "snap_s5_ob_high", "snap_s5_tp", "snap_sr_clearance_pct",
+        "result", "pnl", "pnl_pct", "exit_reason", "exit_price",
+    ]
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=fields, restval="", extrasaction="ignore")
+    w.writeheader()
+    w.writerow({
+        "timestamp": "2026-03-30T08:00:00+00:00",
+        "trade_id": "snap1", "action": "S3_LONG",
+        "symbol": "ONTUSDT", "side": "LONG",
+        "entry": "0.07458", "sl": "0.07132", "tp": "0.08204",
+        "snap_adx": "62.5", "snap_daily_rsi": "73.8", "snap_rr": "2.95",
+        "snap_sentiment": "BULLISH",
+    })
+    w.writerow({
+        "timestamp": "2026-03-30T09:00:00+00:00",
+        "trade_id": "snap1", "action": "S3_CLOSE",
+        "symbol": "ONTUSDT", "side": "LONG",
+        "pnl": "-2.84", "result": "LOSS", "pnl_pct": "-43.44",
+        "exit_reason": "SL", "exit_price": "0.07134",
+    })
+
+    (tmp_path / "trades_paper.csv").write_text(buf.getvalue())
+    (tmp_path / "state_paper.json").write_text(json.dumps({
+        "status": "RUNNING", "started_at": "", "last_tick": "",
+        "balance": 1000.0, "open_trades": {}, "trade_history": [],
+        "scan_log": [], "qualified_pairs": [], "pair_states": {}, "sentiment": "NEUTRAL",
+    }))
+    monkeypatch.setattr(dashboard, "STATE_FILE", str(tmp_path / "state_paper.json"))
+
+    resp = TestClient(dashboard.app, raise_server_exceptions=False).get("/api/state")
+    data = resp.json()
+
+    hist = data.get("trade_history", [])
+    assert len(hist) >= 1, "Expected at least 1 trade history entry"
+
+    entry = hist[0]
+    assert entry.get("snap_adx") == "62.5", f"snap_adx not forwarded, got {entry.get('snap_adx')!r}"
+    assert entry.get("snap_daily_rsi") == "73.8", f"snap_daily_rsi not forwarded"
+    assert entry.get("snap_rr") == "2.95", f"snap_rr not forwarded"
+    assert entry.get("snap_sentiment") == "BULLISH", f"snap_sentiment not forwarded"
+
+
 # ── HTML presence tests ───────────────────────────────────────────────────── #
 
 class TestDashboardHtml:

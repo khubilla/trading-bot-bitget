@@ -76,6 +76,14 @@ def _load_csv_history(csv_path: str, limit: int = 50) -> list:
                     "strategy": strategy,
                     "symbol":   r.get("symbol", ""),
                     "interval": _STRATEGY_INTERVAL.get(strategy, "15m"),
+                    **{k: r.get(k, "") for k in (
+                        "snap_rsi", "snap_adx", "snap_htf", "snap_coil",
+                        "snap_box_range_pct", "snap_sentiment", "snap_daily_rsi",
+                        "snap_entry_trigger", "snap_sl", "snap_rr", "snap_rsi_peak",
+                        "snap_spike_body_pct", "snap_rsi_div", "snap_rsi_div_str",
+                        "snap_s5_ob_low", "snap_s5_ob_high", "snap_s5_tp",
+                        "snap_sr_clearance_pct",
+                    )},
                 }
                 continue
 
@@ -122,6 +130,14 @@ def _load_csv_history(csv_path: str, limit: int = 50) -> list:
                 "open_at":     open_row.get("open_at"),
                 "interval":    open_row.get("interval"),
                 "events":      event_rows.get(tid, []),
+                **{k: open_row.get(k, "") for k in (
+                    "snap_rsi", "snap_adx", "snap_htf", "snap_coil",
+                    "snap_box_range_pct", "snap_sentiment", "snap_daily_rsi",
+                    "snap_entry_trigger", "snap_sl", "snap_rr", "snap_rsi_peak",
+                    "snap_spike_body_pct", "snap_rsi_div", "snap_rsi_div_str",
+                    "snap_s5_ob_low", "snap_s5_ob_high", "snap_s5_tp",
+                    "snap_sr_clearance_pct",
+                )},
             })
 
     except Exception:

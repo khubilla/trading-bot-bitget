@@ -1515,8 +1515,7 @@ async function openEntryChart(trade) {
     const data = await resp.json();
 
     if (data.error) {
-      document.getElementById('entryChartLegend').innerHTML =
-        `<span style="color:var(--rose)">Error: ${data.error}</span>`;
+      { const s = document.createElement('span'); s.style.color='var(--rose)'; s.textContent=`Error: ${data.error}`; const el=document.getElementById('entryChartLegend'); el.innerHTML=''; el.appendChild(s); }
       return;
     }
 
@@ -1542,8 +1541,7 @@ async function openEntryChart(trade) {
     });
 
   } catch (err) {
-    document.getElementById('entryChartLegend').innerHTML =
-      `<span style="color:var(--rose)">Failed to load chart: ${err.message}</span>`;
+    { const s = document.createElement('span'); s.style.color='var(--rose)'; s.textContent=`Failed to load chart: ${err.message}`; const el=document.getElementById('entryChartLegend'); el.innerHTML=''; el.appendChild(s); }
   }
 }
 
@@ -1565,7 +1563,7 @@ function _drawEntryChart(canvas, opts) {
   const ctx = canvas.getContext('2d');
   ctx.scale(dpr, dpr);
 
-  const PAD_L = 8, PAD_R = 74, PAD_T = 18, PAD_B = 44, VOL_H = 35;
+  const PAD_L = 8, PAD_R = 74, PAD_T = 18, PAD_B = 58, VOL_H = 35;
   const chartH = H - PAD_T - PAD_B - VOL_H - 6;
 
   // Price range — include all price lines
@@ -1677,9 +1675,9 @@ function _drawEntryChart(canvas, opts) {
       ctx.strokeRect(PAD_L + i*candleW + gap, bTop, bodyW, bH);
     }
 
-    // Labels below candle
+    // Labels below candle (below the volume bar zone)
     ctx.font = 'bold 8px monospace'; ctx.textAlign = 'center';
-    const lY = PAD_T + chartH + 12;
+    const lY = PAD_T + chartH + VOL_H + 16;
     if (isLastRed) { ctx.fillStyle='#ff6b6b'; ctx.fillText('LAST RED', x, lY); }
     if (isUptick)  { ctx.fillStyle='#e3b341'; ctx.fillText('UPTICK',   x, lY); }
     if (isEntry)   { ctx.fillStyle='#58a6ff'; ctx.fillText('▲ ENTRY',  x, lY); }

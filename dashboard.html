@@ -1587,8 +1587,15 @@ async function sendChat() {
       }
     }
   } catch (e) {
-    accumulated += ` ⚠ Connection lost`;
-    textNode.nodeValue = accumulated;
+    if (e && e.name === 'AbortError') {
+      // Panel was closed/switched — silently discard
+    } else {
+      const msg = accumulated === '' && (String(e).includes('API key') || String(e).includes('401'))
+        ? '⚠ Claude API key not configured. Set ANTHROPIC_API_KEY and restart dashboard.'
+        : accumulated + ' ⚠ Connection lost';
+      textNode.nodeValue = msg;
+      accumulated = msg;
+    }
   }
 
   cursorSpan.remove();

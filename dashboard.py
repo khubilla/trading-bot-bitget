@@ -9,8 +9,8 @@ Run in a separate terminal alongside bot.py:
 import csv, json, os, sys, time, zoneinfo
 from pathlib import Path
 from datetime import datetime
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import uvicorn
 
 import os as _os
@@ -76,6 +76,14 @@ def _load_csv_history(csv_path: str, limit: int = 50) -> list:
                     "strategy": strategy,
                     "symbol":   r.get("symbol", ""),
                     "interval": _STRATEGY_INTERVAL.get(strategy, "15m"),
+                    **{k: r.get(k, "") for k in (
+                        "snap_rsi", "snap_adx", "snap_htf", "snap_coil",
+                        "snap_box_range_pct", "snap_sentiment", "snap_daily_rsi",
+                        "snap_entry_trigger", "snap_sl", "snap_rr", "snap_rsi_peak",
+                        "snap_spike_body_pct", "snap_rsi_div", "snap_rsi_div_str",
+                        "snap_s5_ob_low", "snap_s5_ob_high", "snap_s5_tp",
+                        "snap_sr_clearance_pct",
+                    )},
                 }
                 continue
 
@@ -122,6 +130,14 @@ def _load_csv_history(csv_path: str, limit: int = 50) -> list:
                 "open_at":     open_row.get("open_at"),
                 "interval":    open_row.get("interval"),
                 "events":      event_rows.get(tid, []),
+                **{k: open_row.get(k, "") for k in (
+                    "snap_rsi", "snap_adx", "snap_htf", "snap_coil",
+                    "snap_box_range_pct", "snap_sentiment", "snap_daily_rsi",
+                    "snap_entry_trigger", "snap_sl", "snap_rr", "snap_rsi_peak",
+                    "snap_spike_body_pct", "snap_rsi_div", "snap_rsi_div_str",
+                    "snap_s5_ob_low", "snap_s5_ob_high", "snap_s5_tp",
+                    "snap_sr_clearance_pct",
+                )},
             })
 
     except Exception:
@@ -158,6 +174,27 @@ def get_state():
         return JSONResponse(state)
     except Exception as e:
         return JSONResponse({"status": "ERROR", "error": str(e)})
+
+
+@app.post("/api/chat")
+async def chat(request: Request):
+    """Stream a Claude trade analysis response via SSE."""
+    import claude_analyst
+    body      = await request.json()
+    trade     = body.get("trade", {})
+    messages  = body.get("messages", [])
+
+    def generate():
+        try:
+            system = claude_analyst.build_system_prompt(trade)
+            for token in claude_analyst.stream_response(system, messages):
+                import json as _json
+                yield f"data: {_json.dumps(token)}\n\n"
+        except Exception as e:
+            yield f"data: ⚠ Error: {e}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 @app.get("/api/candles/{symbol}")

@@ -1487,10 +1487,13 @@ function render(s) {
 }
 
 // ── Entry Chart Modal ──────────────────────────────────
+const _ENTRY_CHART_INTERVAL = {S1:'3m', S2:'1D', S3:'15m', S4:'1D', S5:'15m'};
+
 async function openEntryChart(trade) {
   if (!trade || !trade.entry || !trade.open_at) return;
+  const interval = _ENTRY_CHART_INTERVAL[trade.strategy] || '15m';
   document.getElementById('entryChartTitle').textContent =
-    `${trade.symbol} · ${trade.strategy || '?'} · ${trade.interval || '15m'} · ${trade.open_at.slice(0,16).replace('T',' ')} UTC`;
+    `${trade.symbol} · ${trade.strategy || '?'} · ${interval} · ${trade.open_at.slice(0,16).replace('T',' ')} UTC`;
   document.getElementById('entryChartLegend').innerHTML =
     '<span style="color:var(--muted)">Loading…</span>';
   document.getElementById('entryChartOverlay').classList.add('open');

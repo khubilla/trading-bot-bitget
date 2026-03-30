@@ -1224,6 +1224,23 @@
   </div>
 </div>
 
+<!-- ── ENTRY CHART MODAL ── -->
+<div class="chart-modal-overlay" id="entryChartOverlay" onclick="closeEntryChart(event)">
+  <div class="chart-modal" id="entryChartModal" style="max-width:880px">
+    <div class="chart-modal-header">
+      <div class="chart-modal-title">
+        <span id="entryChartTitle" style="font-size:13px">—</span>
+      </div>
+      <button class="chart-close-btn" onclick="closeEntryChart()">✕</button>
+    </div>
+    <div id="entryChartLegend"
+         style="display:flex;flex-wrap:wrap;gap:12px;padding:4px 14px 0;font-size:10px"></div>
+    <div style="padding:10px 12px 10px">
+      <canvas id="entryChartCanvas" style="width:100%;height:320px;display:block"></canvas>
+    </div>
+  </div>
+</div>
+
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <script>
 // ── Helpers ────────────────────────────────────────────────
@@ -1453,18 +1470,44 @@ function render(s) {
       const sym = (t.symbol || '').replace('USDT','');
       const canChart = !!(t.entry && t.open_at && t.closed_at);
       return `
-        <div class="hist-row" style="cursor:pointer"
-             onclick="if(event.detail===1)openChat(window._histTrades[${i}])"
-             ondblclick="${canChart ? `openTradeChart(window._histTrades[${i}])` : ''}">
+        <div class="hist-row">
           <span class="hist-sym">${sym}</span>
           <span class="side-tag ${(t.side||'').toLowerCase()}" style="font-size:8px;">${t.side||'?'}</span>
           <span class="hist-badge ${res}">${res}</span>
           <span class="hist-pnl ${pnlClass}">${fmtUSD(pnl)}</span>
           <span class="hist-time">${relTime(t.closed_at)}</span>
-          <span style="font-size:9px;color:var(--muted);margin-left:auto">💬${canChart ? ' ↗' : ''}</span>
+          <span style="font-size:9px;color:var(--muted);margin-left:auto;display:flex;gap:7px;align-items:center">
+            ${canChart ? `<span onclick="openEntryChart(window._histTrades[${i}])" title="Entry chart" style="cursor:pointer">📊</span>` : ''}
+            <span onclick="openChat(window._histTrades[${i}])" title="AI analysis" style="cursor:pointer">💬</span>
+            ${canChart ? `<span onclick="openTradeChart(window._histTrades[${i}])" title="Full chart" style="cursor:pointer">↗</span>` : ''}
+          </span>
         </div>`;
     }).join('');
   }
+}
+
+// ── Entry Chart Modal ──────────────────────────────────
+async function openEntryChart(trade) {
+  if (!trade || !trade.entry || !trade.open_at) return;
+  document.getElementById('entryChartTitle').textContent =
+    `${trade.symbol} · ${trade.strategy || '?'} · ${trade.interval || '15m'} · ${trade.open_at.slice(0,16).replace('T',' ')} UTC`;
+  document.getElementById('entryChartLegend').innerHTML =
+    '<span style="color:var(--muted)">Loading…</span>';
+  document.getElementById('entryChartOverlay').classList.add('open');
+  // Full implementation in Task 4
+}
+
+function closeEntryChart(e) {
+  if (e && e.target !== document.getElementById('entryChartOverlay')) return;
+  document.getElementById('entryChartOverlay').classList.remove('open');
+}
+
+function _drawEntryChart(canvas, opts) {
+  // Full implementation in Task 4
+}
+
+function _renderEntryLegend(el, strategy, highlights) {
+  // Full implementation in Task 4
 }
 
 // ── Trade Chat ────────────────────────────────────────
@@ -1705,13 +1748,14 @@ function signalScore(sym, ps, tab) {
     return (bc ? 1 : 0) + (bc && rsiOk ? 1 : 0) + (bc && rsiOk && coiling ? 1 : 0) + (srClear ? 1 : 0) + (active ? 10 : 0);
   }
   if (tab === 's3') {
-    const reason  = ps.s3_reason || '';
-    const sig     = ps.s3_signal || 'HOLD';
-    const emaOk   = reason.includes('EMA aligned') || reason.includes('EMA10>20>50>200') || sig === 'LONG';
-    const stochOs = reason.includes('Stoch oversold') || sig === 'LONG';
-    const uptick  = reason.includes('Uptick breakout') || reason.includes('uptick') || sig === 'LONG';
-    const srClear = ps.s3_sr_resistance_pct != null && ps.s3_sr_resistance_pct >= 15;
-    return (emaOk ? 1 : 0) + (stochOs ? 1 : 0) + (uptick ? 1 : 0) + (srClear ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
+    const reason       = ps.s3_reason || '';
+    const sig          = ps.s3_signal || 'HOLD';
+    const emaOk        = reason.includes('EMA aligned') || reason.includes('EMA10>20>50>200') || sig === 'LONG';
+    const dailyGainOk  = ps.s3_daily_gain_pct != null && ps.s3_daily_gain_pct >= 10;
+    const stochOs      = reason.includes('Stoch oversold') || sig === 'LONG';
+    const uptick       = reason.includes('Uptick breakout') || reason.includes('uptick') || sig === 'LONG';
+    const srClear      = ps.s3_sr_resistance_pct != null && ps.s3_sr_resistance_pct >= 15;
+    return (emaOk ? 1 : 0) + (dailyGainOk ? 1 : 0) + (stochOs ? 1 : 0) + (uptick ? 1 : 0) + (srClear ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
   }
   if (tab === 's4') {
     const reason  = ps.s4_reason || '';
@@ -1824,13 +1868,17 @@ function s3CardHTML(sym, ps) {
   const adxPct   = Math.min(100, adx * 2);  // ADX 50 → 100%
   const adxOk    = adx >= 30;
   const adxColor = adxOk ? 'var(--emerald)' : 'var(--rose)';
-  const emaOk    = reason.includes('EMA aligned') || reason.includes('EMA10>20>50>200') || sig === 'LONG';
-  const stochOs  = reason.includes('Stoch oversold') || sig === 'LONG';
-  const uptickOk = reason.includes('Uptick breakout') || reason.includes('uptick') || sig === 'LONG';
-  const emaClass   = emaOk ? 'pass' : 'fail';
-  const adxClass   = !emaOk ? 'muted' : adxOk ? 'pass' : 'fail';
-  const stochClass = !emaOk || !adxOk ? 'muted' : stochOs ? 'pass' : 'fail';
-  const uptickClass= !stochOs ? 'muted' : uptickOk ? 'pass' : 'warn';
+  const emaOk        = reason.includes('EMA aligned') || reason.includes('EMA10>20>50>200') || sig === 'LONG';
+  const dailyGainPct = ps.s3_daily_gain_pct != null ? ps.s3_daily_gain_pct : null;
+  const dailyGainOk  = dailyGainPct != null && dailyGainPct >= 10;
+  const stochOs      = reason.includes('Stoch oversold') || sig === 'LONG';
+  const uptickOk     = reason.includes('Uptick breakout') || reason.includes('uptick') || sig === 'LONG';
+  const emaClass        = emaOk ? 'pass' : 'fail';
+  const adxClass        = !emaOk ? 'muted' : adxOk ? 'pass' : 'fail';
+  const dailyGainClass  = dailyGainPct == null ? 'muted' : dailyGainOk ? 'pass' : 'fail';
+  const dailyGainLabel  = dailyGainPct == null ? '—' : `${dailyGainPct >= 0 ? '+' : ''}${dailyGainPct.toFixed(1)}%${dailyGainOk ? ' ✓' : ' ✗'}`;
+  const stochClass      = !emaOk || !adxOk || !dailyGainOk ? 'muted' : stochOs ? 'pass' : 'fail';
+  const uptickClass     = !stochOs ? 'muted' : uptickOk ? 'pass' : 'warn';
   const srPct      = ps.s3_sr_resistance_pct;
   const srClass    = srPct == null ? 'muted' : srPct >= 15 ? 'pass' : srPct >= 10 ? 'warn' : 'fail';
   const srLabel    = srPct == null ? '—' : `${srPct.toFixed(1)}% away`;
@@ -1860,8 +1908,12 @@ function s3CardHTML(sym, ps) {
           <span class="check-val ${emaClass}">${emaOk ? '10>20>50>200 ✓' : 'Not aligned'}</span>
         </div>
         <div class="pair-check">
+          <span class="check-label">Daily +10%</span>
+          <span class="check-val ${dailyGainClass}">${dailyGainLabel}</span>
+        </div>
+        <div class="pair-check">
           <span class="check-label">Stoch OS</span>
-          <span class="check-val ${stochClass}">${!emaOk || !adxOk ? '—' : stochOs ? 'Oversold ✓' : 'No pullback'}</span>
+          <span class="check-val ${stochClass}">${!emaOk || !adxOk || !dailyGainOk ? '—' : stochOs ? 'Oversold ✓' : 'No pullback'}</span>
         </div>
         <div class="pair-check">
           <span class="check-label">Uptick break</span>

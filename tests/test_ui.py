@@ -300,6 +300,31 @@ class TestDashboardHtml:
         assert "trade-shade" in html, \
             ".trade-shade cleanup missing from closeChart"
 
+    def test_entry_chart_modal_exists(self):
+        """#entryChartOverlay must exist in dashboard.html."""
+        assert 'id="entryChartOverlay"' in _html(), \
+            '#entryChartOverlay element missing from dashboard.html'
+
+    def test_openEntryChart_defined(self):
+        """openEntryChart() function must be defined in dashboard.html."""
+        assert "function openEntryChart(" in _html(), \
+            "openEntryChart() missing from dashboard.html"
+
+    def test_closeEntryChart_defined(self):
+        """closeEntryChart() function must be defined in dashboard.html."""
+        assert "function closeEntryChart(" in _html(), \
+            "closeEntryChart() missing from dashboard.html"
+
+    def test_drawEntryChart_defined(self):
+        """_drawEntryChart() canvas renderer must be defined in dashboard.html."""
+        assert "function _drawEntryChart(" in _html(), \
+            "_drawEntryChart() missing from dashboard.html"
+
+    def test_entry_chart_icon_in_hist_row(self):
+        """openEntryChart must be called from the hist-row template."""
+        assert "openEntryChart" in _html(), \
+            "openEntryChart call missing from hist-row template"
+
 
 # ── Chat endpoint tests ───────────────────────────────────────────────────── #
 

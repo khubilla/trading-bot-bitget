@@ -1236,7 +1236,7 @@
     <div id="entryChartLegend"
          style="display:flex;flex-wrap:wrap;gap:12px;padding:4px 14px 0;font-size:10px"></div>
     <div style="padding:10px 12px 10px">
-      <canvas id="entryChartCanvas" style="width:100%;height:320px;display:block"></canvas>
+      <canvas id="entryChartCanvas" style="width:100%;height:420px;display:block"></canvas>
     </div>
   </div>
 </div>
@@ -1524,7 +1524,7 @@ async function openEntryChart(trade) {
 
     const canvas = document.getElementById('entryChartCanvas');
     canvas.style.width  = '100%';
-    canvas.style.height = '320px';
+    canvas.style.height = '420px';
 
     requestAnimationFrame(() => {
       _drawEntryChart(canvas, {

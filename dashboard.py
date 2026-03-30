@@ -704,14 +704,17 @@ def get_entry_chart(
                                     break
 
         elif strategy in ("S2", "S4"):
-            # Spike = largest body candle in last 30 candles before entry
+            # Spike = most recent qualifying big candle (body >= 20%) before entry
+            # Matches strategy logic: any candle >= S2_BIG_CANDLE_BODY_PCT in last 30 days
+            BIG_BODY_THRESH = 0.20
             lookback = df.iloc[max(0, entry_idx - 30): entry_idx]
-            best, spike_ts = 0.0, None
-            for _, row in lookback.iterrows():
+            spike_ts = None
+            for _, row in lookback.iloc[::-1].iterrows():  # newest first
                 o = float(row["open"])
                 body = abs(float(row["close"]) - o) / o if o > 0 else 0.0
-                if body > best:
-                    best, spike_ts = body, int(row["ts"])
+                if body >= BIG_BODY_THRESH:
+                    spike_ts = int(row["ts"])
+                    break
             if spike_ts:
                 highlights["spike_ts"] = spike_ts
             if strategy == "S2":

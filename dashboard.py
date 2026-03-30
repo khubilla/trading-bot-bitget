@@ -32,6 +32,11 @@ _STRATEGY_INTERVAL = {
     "S1": "3m", "S2": "1D", "S3": "15m", "S4": "1D", "S5": "15m",
 }
 
+try:
+    from trader import PRODUCT_TYPE
+except Exception:
+    PRODUCT_TYPE = "USDT-FUTURES"
+
 
 def _safe_float(val):
     try:
@@ -582,6 +587,157 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
     except Exception as e:
         import traceback
         return JSONResponse({"error": str(e), "trace": traceback.format_exc()})
+
+
+@app.get("/api/entry-chart")
+def get_entry_chart(
+    symbol:             str,
+    open_at:            str,
+    strategy:           str   = "S3",
+    entry:              float = 0.0,
+    sl:                 float = 0.0,
+    snap_sl:            str   = "",
+    tp:                 float = 0.0,
+    snap_entry_trigger: str   = "",
+    box_low:            str   = "",
+    box_high:           str   = "",
+    snap_s5_ob_low:     str   = "",
+    snap_s5_ob_high:    str   = "",
+):
+    """
+    Returns 25 candles centred around entry (20 before + 5 after) plus
+    strategy-specific highlight timestamps / zone levels.
+    """
+    try:
+        import numpy as np
+        import pandas as pd
+        import bitget_client as bc
+        from datetime import datetime
+        from strategy import calculate_stoch
+
+        interval = _STRATEGY_INTERVAL.get(strategy, "15m")
+        interval_ms = {"3m": 180_000, "15m": 900_000, "1D": 86_400_000}.get(interval, 900_000)
+
+        # Parse open_at ISO → ms
+        open_ts_ms = int(datetime.fromisoformat(open_at).timestamp() * 1000)
+        end_ts_ms  = open_ts_ms + 10 * interval_ms
+
+        fetch_limit = 300 if interval != "1D" else 60
+        granularity = "1Dutc" if interval == "1D" else interval
+
+        raw = bc.get_public(
+            "/api/v2/mix/market/candles",
+            params={
+                "symbol":      symbol,
+                "productType": PRODUCT_TYPE,
+                "granularity": granularity,
+                "limit":       str(fetch_limit),
+                "endTime":     str(end_ts_ms),
+            },
+        )
+        rows = raw.get("data", [])
+        if not rows:
+            return JSONResponse({"error": "No candle data returned from exchange"})
+
+        df = pd.DataFrame(rows, columns=["ts","open","high","low","close","vol","qvol"])
+        df = df.astype({"ts": int, "open": float, "high": float,
+                        "low": float, "close": float, "vol": float})
+        df = df.sort_values("ts").reset_index(drop=True)
+
+        # Find index of entry candle (first candle whose ts >= open_at)
+        entry_idx = len(df) - 1
+        for i, row in df.iterrows():
+            if int(row["ts"]) >= open_ts_ms:
+                entry_idx = i
+                break
+
+        # Trim to 25-candle window: 20 before + entry + 4 after
+        start = max(0, entry_idx - 20)
+        end   = min(len(df), entry_idx + 5)
+        view  = df.iloc[start:end].reset_index(drop=True)
+
+        candles = [
+            {"t": int(r["ts"]), "o": r["open"], "h": r["high"],
+             "l": r["low"],  "c": r["close"], "v": r["vol"]}
+            for _, r in view.iterrows()
+        ]
+        entry_ts = int(df.iloc[entry_idx]["ts"])
+
+        # ── Highlights ────────────────────────────────────────── #
+        highlights: dict = {}
+
+        if strategy == "S3":
+            work = df.iloc[: entry_idx + 1].reset_index(drop=True)
+            if len(work) >= 10:
+                slow_k, _ = calculate_stoch(work, 5, 3)
+                lookback8 = slow_k.iloc[-9:-1]
+                os_pos = [i for i, v in enumerate(lookback8)
+                          if not np.isnan(v) and v < 30]
+                if os_pos:
+                    last_os  = -(8 + 1) + os_pos[-1]
+                    first_os = -(8 + 1) + os_pos[0]
+                    after_os = work.iloc[last_os + 1: -1].reset_index(drop=True)
+                    last_green = None
+                    lg_idx = None
+                    for j, (_, row) in enumerate(after_os.iloc[::-1].iterrows()):
+                        if float(row["close"]) > float(row["open"]):
+                            last_green = row
+                            lg_idx = len(after_os) - 1 - j
+                            break
+                    if last_green is not None:
+                        highlights["last_green_ts"] = int(last_green["ts"])
+                        # Last red candle before the uptick
+                        found_red = False
+                        if lg_idx is not None:
+                            for j in range(lg_idx - 1, -1, -1):
+                                r2 = after_os.iloc[j]
+                                if float(r2["close"]) < float(r2["open"]):
+                                    highlights["last_red_ts"] = int(r2["ts"])
+                                    found_red = True
+                                    break
+                        if not found_red:
+                            # Fallback: last red in oversold period
+                            os_period = work.iloc[first_os: last_os + 1]
+                            for _, r2 in os_period.iloc[::-1].iterrows():
+                                if float(r2["close"]) < float(r2["open"]):
+                                    highlights["last_red_ts"] = int(r2["ts"])
+                                    break
+
+        elif strategy in ("S2", "S4"):
+            # Spike = largest body candle in last 30 candles before entry
+            lookback = df.iloc[max(0, entry_idx - 30): entry_idx]
+            best, spike_ts = 0.0, None
+            for _, row in lookback.iterrows():
+                o = float(row["open"])
+                body = abs(float(row["close"]) - o) / o if o > 0 else 0.0
+                if body > best:
+                    best, spike_ts = body, int(row["ts"])
+            if spike_ts:
+                highlights["spike_ts"] = spike_ts
+            if strategy == "S2":
+                bl, bh = _safe_float(box_low), _safe_float(box_high)
+                if bl:  highlights["box_low"]  = bl
+                if bh:  highlights["box_high"] = bh
+
+        elif strategy == "S5":
+            ol, oh = _safe_float(snap_s5_ob_low), _safe_float(snap_s5_ob_high)
+            if ol: highlights["ob_low"]  = ol
+            if oh: highlights["ob_high"] = oh
+
+        elif strategy == "S1":
+            bl, bh = _safe_float(box_low), _safe_float(box_high)
+            if bl: highlights["box_low"]  = bl
+            if bh: highlights["box_high"] = bh
+
+        return JSONResponse({
+            "candles":   candles,
+            "entry_ts":  entry_ts,
+            "highlights": highlights,
+        })
+
+    except Exception as exc:
+        import traceback
+        return JSONResponse({"error": str(exc), "detail": traceback.format_exc()}, status_code=200)
 
 
 @app.get("/api/ig/state")

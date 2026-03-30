@@ -349,3 +349,121 @@ def test_chat_endpoint_missing_api_key(monkeypatch):
         assert "error" in resp.text.lower() or "⚠" in resp.text
     finally:
         _ca.stream_response = original
+
+
+# ── Entry chart endpoint tests ─────────────────────────────────────────────── #
+
+class TestApiEntryChart:
+    """Tests for GET /api/entry-chart."""
+
+    # 35 mock candle rows (oldest first)
+    # Timestamp base: 1774856700000 = 2026-03-30 07:45 UTC, step 900_000 ms (15m)
+    MOCK_CANDLES = [
+        [str(1774856700000 + i * 900_000), "3.477", "3.534", "3.477", "3.534", "1000.0", "0"]
+        for i in range(35)
+    ]
+
+    @pytest.fixture(autouse=True)
+    def mock_bc(self, monkeypatch):
+        import bitget_client as bc
+        def _mock(path, params=None):
+            if "/candles" in path:
+                return {"data": self.MOCK_CANDLES}
+            return {"data": []}
+        monkeypatch.setattr(bc, "get_public", _mock)
+
+    def test_returns_200(self):
+        """/api/entry-chart returns HTTP 200."""
+        resp = client.get("/api/entry-chart", params={
+            "symbol": "UNIUSDT",
+            "open_at": "2026-03-30T08:00:00+00:00",
+            "strategy": "S3",
+            "entry": "3.54",
+            "sl": "3.462",
+            "snap_sl": "3.452",
+            "tp": "3.894",
+            "snap_entry_trigger": "3.537",
+        })
+        assert resp.status_code == 200
+
+    def test_response_shape(self):
+        """Response has candles list, entry_ts int, highlights dict."""
+        resp = client.get("/api/entry-chart", params={
+            "symbol": "UNIUSDT",
+            "open_at": "2026-03-30T08:00:00+00:00",
+            "strategy": "S3",
+            "entry": "3.54",
+            "sl": "3.462",
+            "snap_sl": "3.452",
+            "tp": "3.894",
+            "snap_entry_trigger": "3.537",
+        })
+        data = resp.json()
+        assert "candles" in data, f"missing 'candles': {list(data.keys())}"
+        assert "entry_ts" in data, f"missing 'entry_ts': {list(data.keys())}"
+        assert "highlights" in data, f"missing 'highlights': {list(data.keys())}"
+        assert isinstance(data["candles"], list)
+        assert isinstance(data["highlights"], dict)
+        assert len(data["candles"]) <= 25, f"expected ≤25 candles, got {len(data['candles'])}"
+
+    def test_candle_ohlcv_fields(self):
+        """Each candle has t, o, h, l, c, v fields."""
+        resp = client.get("/api/entry-chart", params={
+            "symbol": "UNIUSDT",
+            "open_at": "2026-03-30T08:00:00+00:00",
+            "strategy": "S3",
+        })
+        data = resp.json()
+        assert data["candles"], "candles list is empty"
+        c = data["candles"][0]
+        for field in ("t", "o", "h", "l", "c", "v"):
+            assert field in c, f"candle missing field '{field}': {list(c.keys())}"
+
+    def test_s5_uses_ob_params(self):
+        """S5 highlights come directly from snap_s5_ob_low/ob_high params."""
+        resp = client.get("/api/entry-chart", params={
+            "symbol": "WLDUSDT",
+            "open_at": "2026-03-30T08:00:00+00:00",
+            "strategy": "S5",
+            "entry": "0.2849",
+            "sl": "0.2817",
+            "tp": "0.3134",
+            "snap_s5_ob_low":  "0.2723",
+            "snap_s5_ob_high": "0.2741",
+        })
+        data = resp.json()
+        h = data.get("highlights", {})
+        assert h.get("ob_low")  == 0.2723, f"ob_low wrong: {h.get('ob_low')}"
+        assert h.get("ob_high") == 0.2741, f"ob_high wrong: {h.get('ob_high')}"
+
+    def test_s1_uses_box_params(self):
+        """S1 highlights come directly from box_low/box_high params."""
+        resp = client.get("/api/entry-chart", params={
+            "symbol": "BTCUSDT",
+            "open_at": "2026-03-30T08:00:00+00:00",
+            "strategy": "S1",
+            "entry": "85000",
+            "box_low": "84000",
+            "box_high": "85500",
+        })
+        data = resp.json()
+        h = data.get("highlights", {})
+        assert h.get("box_low")  == 84000.0
+        assert h.get("box_high") == 85500.0
+
+    def test_missing_symbol_returns_error(self):
+        """/api/entry-chart with no candle data returns JSON with error key."""
+        import bitget_client as bc
+        # Override to return empty for this one test
+        original = bc.get_public
+        bc.get_public = lambda path, params=None: {"data": []}
+        try:
+            resp = client.get("/api/entry-chart", params={
+                "symbol": "FAKECOIN",
+                "open_at": "2026-03-30T08:00:00+00:00",
+                "strategy": "S3",
+            })
+            assert resp.status_code == 200
+            assert "error" in resp.json()
+        finally:
+            bc.get_public = original

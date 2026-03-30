@@ -187,6 +187,54 @@ def test_trade_history_snap_fields_forwarded(tmp_path, monkeypatch):
     assert entry.get("snap_sentiment") == "BULLISH", f"snap_sentiment not forwarded"
 
 
+def test_trade_history_includes_box_levels(tmp_path, monkeypatch):
+    """box_low and box_high from the OPEN CSV row must appear in trade_history entries."""
+    import csv, io, json
+    import dashboard
+    from starlette.testclient import TestClient
+
+    fields = [
+        "timestamp", "trade_id", "action", "symbol", "side", "qty", "entry", "sl", "tp",
+        "box_low", "box_high", "leverage", "margin", "tpsl_set", "strategy",
+        "snap_rsi", "snap_adx", "snap_htf", "snap_coil", "snap_box_range_pct", "snap_sentiment",
+        "snap_daily_rsi", "snap_entry_trigger", "snap_sl", "snap_rr",
+        "snap_rsi_peak", "snap_spike_body_pct", "snap_rsi_div", "snap_rsi_div_str",
+        "snap_s5_ob_low", "snap_s5_ob_high", "snap_s5_tp", "snap_sr_clearance_pct",
+        "result", "pnl", "pnl_pct", "exit_reason", "exit_price",
+    ]
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=fields, restval="", extrasaction="ignore")
+    w.writeheader()
+    w.writerow({
+        "timestamp": "2026-03-30T08:00:00+00:00",
+        "trade_id": "box1", "action": "S2_LONG",
+        "symbol": "ARIAUSDT", "side": "LONG",
+        "entry": "0.35713", "sl": "0.3392", "tp": "0.39284",
+        "box_low": "0.3200", "box_high": "0.3550",
+    })
+    w.writerow({
+        "timestamp": "2026-03-30T09:00:00+00:00",
+        "trade_id": "box1", "action": "S2_CLOSE",
+        "symbol": "ARIAUSDT", "pnl": "3.0", "result": "WIN",
+        "pnl_pct": "12.0", "exit_reason": "TP", "exit_price": "0.39284",
+    })
+
+    (tmp_path / "trades_paper.csv").write_text(buf.getvalue())
+    (tmp_path / "state_paper.json").write_text(json.dumps({
+        "status": "RUNNING", "started_at": "", "last_tick": "",
+        "balance": 1000.0, "open_trades": {}, "trade_history": [],
+        "scan_log": [], "qualified_pairs": [], "pair_states": {}, "sentiment": "NEUTRAL",
+    }))
+    monkeypatch.setattr(dashboard, "STATE_FILE", str(tmp_path / "state_paper.json"))
+
+    resp = TestClient(dashboard.app, raise_server_exceptions=False).get("/api/state")
+    hist = resp.json().get("trade_history", [])
+    assert len(hist) >= 1
+    entry = hist[0]
+    assert entry.get("box_low") == 0.32, f"box_low not in trade record, got {entry.get('box_low')!r}"
+    assert entry.get("box_high") == 0.355, f"box_high not in trade record, got {entry.get('box_high')!r}"
+
+
 # ── HTML presence tests ───────────────────────────────────────────────────── #
 
 class TestDashboardHtml:

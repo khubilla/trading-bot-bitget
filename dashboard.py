@@ -71,6 +71,8 @@ def _load_csv_history(csv_path: str, limit: int = 50) -> list:
                     "entry":    _safe_float(r.get("entry")),
                     "sl":       _safe_float(r.get("sl")),
                     "tp":       _safe_float(r.get("tp")),
+                    "box_low":  _safe_float(r.get("box_low")),
+                    "box_high": _safe_float(r.get("box_high")),
                     "open_at":  r.get("timestamp", ""),
                     "side":     r.get("side", ""),
                     "strategy": strategy,
@@ -126,6 +128,8 @@ def _load_csv_history(csv_path: str, limit: int = 50) -> list:
                 "entry":       open_row.get("entry"),
                 "sl":          open_row.get("sl"),
                 "tp":          open_row.get("tp"),
+                "box_low":     open_row.get("box_low"),
+                "box_high":    open_row.get("box_high"),
                 "exit_price":  _safe_float(r.get("exit_price")),
                 "open_at":     open_row.get("open_at"),
                 "interval":    open_row.get("interval"),
@@ -585,10 +589,11 @@ def get_ig_state():
     _ET = zoneinfo.ZoneInfo("America/New_York")
     now_et = datetime.now(_ET)
     h, m = now_et.hour, now_et.minute
+    import config_ig as _cfg_ig
     session_active = (
         now_et.weekday() < 5 and
-        (h, m) >= (9, 30) and
-        (h, m) < (12, 30)
+        (h, m) >= _cfg_ig.SESSION_START and
+        (h, m) < _cfg_ig.SESSION_END
     )
 
     # Bot running: state file touched within last 120s

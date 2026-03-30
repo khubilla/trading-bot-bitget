@@ -9,8 +9,8 @@ Run in a separate terminal alongside bot.py:
 import csv, json, os, sys, time, zoneinfo
 from pathlib import Path
 from datetime import datetime
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import uvicorn
 
 import os as _os
@@ -158,6 +158,26 @@ def get_state():
         return JSONResponse(state)
     except Exception as e:
         return JSONResponse({"status": "ERROR", "error": str(e)})
+
+
+@app.post("/api/chat")
+async def chat(request: Request):
+    """Stream a Claude trade analysis response via SSE."""
+    import claude_analyst
+    body      = await request.json()
+    trade     = body.get("trade", {})
+    messages  = body.get("messages", [])
+
+    def generate():
+        try:
+            system = claude_analyst.build_system_prompt(trade)
+            for token in claude_analyst.stream_response(system, messages):
+                yield f"data: {token}\n\n"
+        except Exception as e:
+            yield f"data: ⚠ Error: {e}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 @app.get("/api/candles/{symbol}")

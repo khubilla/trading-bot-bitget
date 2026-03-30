@@ -193,3 +193,53 @@ class TestDashboardHtml:
             ".trade-stems-svg cleanup missing from closeChart"
         assert "trade-shade" in html, \
             ".trade-shade cleanup missing from closeChart"
+
+
+# ── Chat endpoint tests ───────────────────────────────────────────────────── #
+
+import dashboard as _dashboard
+from starlette.testclient import TestClient
+client = TestClient(_dashboard.app, raise_server_exceptions=False)
+
+
+def test_chat_endpoint_exists():
+    """POST /api/chat must exist and return SSE content-type."""
+    import claude_analyst as _ca
+    original = _ca.stream_response
+    _ca.stream_response = lambda system, messages: iter(["Hello", " world"])
+    try:
+        resp = client.post("/api/chat", json={
+            "trade": {
+                "symbol": "ONTUSDT", "side": "LONG", "strategy": "S3",
+                "entry": "0.07458", "sl": "0.07132", "tp": "0.08204",
+                "exit_price": "0.07134", "result": "LOSS",
+                "pnl": "-2.8391", "pnl_pct": "-43.44", "exit_reason": "SL",
+            },
+            "messages": [{"role": "user", "content": "Was this entry valid?"}],
+        })
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers["content-type"]
+        body = resp.text
+        assert "data: Hello" in body
+        assert "data: [DONE]" in body
+    finally:
+        _ca.stream_response = original
+
+
+def test_chat_endpoint_missing_api_key(monkeypatch):
+    """Missing ANTHROPIC_API_KEY returns 200 SSE with error message."""
+    import claude_analyst as _ca
+    def _raise(system, messages):
+        raise Exception("No API key")
+        yield
+    original = _ca.stream_response
+    _ca.stream_response = _raise
+    try:
+        resp = client.post("/api/chat", json={
+            "trade": {"symbol": "X", "strategy": "S3"},
+            "messages": [{"role": "user", "content": "hi"}],
+        })
+        assert resp.status_code == 200
+        assert "error" in resp.text.lower() or "⚠" in resp.text
+    finally:
+        _ca.stream_response = original

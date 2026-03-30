@@ -615,6 +615,7 @@ def calculate_macd(
 def evaluate_s3(
     symbol: str,
     m15_df: pd.DataFrame,
+    d1_df: pd.DataFrame,
 ) -> tuple[Signal, float, float, float, str]:
     """
     Strategy 3 — 15m Swing Pullback (Long-only). All indicators on 15m.
@@ -627,7 +628,7 @@ def evaluate_s3(
         S3_STOCH_K_PERIOD, S3_STOCH_D_SMOOTH, S3_STOCH_OVERSOLD, S3_STOCH_LOOKBACK,
         S3_MACD_FAST, S3_MACD_SLOW, S3_MACD_SIGNAL,
         S3_ENTRY_BUFFER_PCT, S3_SL_BUFFER_PCT, S3_MIN_RR, S3_TRAILING_TRIGGER_PCT,
-        S3_MIN_SR_CLEARANCE,
+        S3_MIN_SR_CLEARANCE, S3_DAILY_GAIN_MIN,
     )
 
     if not S3_ENABLED:
@@ -652,6 +653,16 @@ def evaluate_s3(
     if adx_val < S3_ADX_MIN:
         return "HOLD", adx_val, 0.0, 0.0, (
             f"15m ADX={adx_val:.1f} < {S3_ADX_MIN} (not trending)"
+        )
+
+    # Daily momentum gate: price must be ≥10% above today's daily open
+    current_close = float(m15_df["close"].iloc[-1])
+    daily_open    = float(d1_df["open"].iloc[-1])
+    daily_gain    = (current_close - daily_open) / daily_open
+    if daily_gain < S3_DAILY_GAIN_MIN:
+        return "HOLD", adx_val, 0.0, 0.0, (
+            f"S3: daily gain {daily_gain * 100:.1f}% < {S3_DAILY_GAIN_MIN * 100:.0f}% "
+            f"(need ≥10% above daily open {daily_open:.5f})"
         )
 
     # Slow Stochastics and MACD
@@ -691,21 +702,18 @@ def evaluate_s3(
             f"Waiting for first green uptick candle | MACD={'✅' if macd_ok else '❌'}"
         )
 
-    # First green candle after last oversold
-    first_green = None
-    for _, row in after_os_df.iterrows():
-        if float(row["close"]) > float(row["open"]):
-            first_green = row
-            break
-
-    if first_green is None:
+    # Uptick adjacency rule: the immediately completed candle must be the green uptick.
+    # [last oversold candle] → [green uptick = m15_df.iloc[-2]] → [current forming candle]
+    uptick_candle = m15_df.iloc[-2]
+    if float(uptick_candle["close"]) <= float(uptick_candle["open"]):
         return "HOLD", adx_val, 0.0, sl_price, (
             f"15m ✅ ADX={adx_val:.1f} | "
-            f"Stoch oversold ✅ | No green uptick yet | MACD={'✅' if macd_ok else '❌'}"
+            f"Stoch oversold ✅ | Last candle not green — uptick must be immediately before entry | "
+            f"MACD={'✅' if macd_ok else '❌'}"
         )
+    last_green = uptick_candle
 
-    entry_trigger = float(first_green["high"]) * (1 + S3_ENTRY_BUFFER_PCT)
-    current_close = float(m15_df["close"].iloc[-1])
+    entry_trigger = float(last_green["high"]) * (1 + S3_ENTRY_BUFFER_PCT)
 
     # Resistance clearance: skip if resistance is too close above entry trigger.
     # S3 is designed to enter on a breakout — if resistance is right above the

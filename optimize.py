@@ -49,6 +49,7 @@ CURRENT_PARAMS = {
         "S3_MIN_SR_CLEARANCE":      "15%",
         "S3_TRAILING_TRIGGER_PCT":  "10%",
         "S3_TRAILING_RANGE_PCT":    "10%",
+        "S3_DAILY_GAIN_MIN":        "10%",
     },
     "S4": {
         "S4_RSI_PEAK_THRESH":       75,

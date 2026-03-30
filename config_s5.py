@@ -50,7 +50,7 @@ S5_SMC_FVG_LOOKBACK = 20     # 15m candles to search for the FVG
 
 # ── Risk Management ───────────────────────────────────────── #
 S5_LEVERAGE         = 10
-S5_TRADE_SIZE_PCT   = 0.05   # 5% of total portfolio as margin
+S5_TRADE_SIZE_PCT   = 0.04   # 2% of total portfolio as margin
 S5_MIN_RR           = 2.0    # minimum reward:risk ratio (structural target vs SL)
 S5_TRAIL_RANGE_PCT  = 5      # fallback trailing callback % after partial close
 S5_USE_CANDLE_STOPS = True   # after partial close, trail SL to prev completed 15m candle low/high

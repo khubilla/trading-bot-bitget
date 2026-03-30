@@ -255,6 +255,12 @@ class MTFBot:
                 if sym in exchange_positions:
                     pos = exchange_positions[sym]
                     st.update_open_trade_pnl(sym, pos["unrealised_pnl"])
+                    # Backfill margin/leverage for positions resumed at startup
+                    _ot_live = st.get_open_trade(sym)
+                    if _ot_live and not _ot_live.get("margin") and pos.get("margin"):
+                        st.update_open_trade_margin(sym, pos["margin"])
+                    if _ot_live and not _ot_live.get("leverage") and pos.get("leverage"):
+                        st.update_open_trade_leverage(sym, pos["leverage"])
                     if PAPER_MODE and pos.get("sl"):
                         st.update_open_trade_sl(sym, pos["sl"])
                     ap = self.active_positions[sym]
@@ -457,6 +463,12 @@ class MTFBot:
                         _exit_price = _lc.get("exit_price") if (PAPER_MODE and _lc) else tr.get_mark_price(sym)
                     except Exception:
                         _exit_price = None
+                    if not PAPER_MODE and pnl_pct is None and _exit_price and _ot:
+                        _entry = float(_ot.get("entry") or 0)
+                        _lev   = float(_ot.get("leverage") or 1)
+                        if _entry:
+                            _chg = (_exit_price - _entry) / _entry if ap["side"] == "LONG" else (_entry - _exit_price) / _entry
+                            pnl_pct = round(_chg * _lev * 100, 2)
                     _log_trade(f"{ap['strategy']}_CLOSE", {
                         "trade_id": ap.get("trade_id", ""),
                         "symbol": sym, "side": ap["side"],
@@ -580,8 +592,10 @@ class MTFBot:
         s3_sig, s3_adx, s3_trigger, s3_sl, s3_reason = "HOLD", 0.0, 0.0, 0.0, ""
         s3_sr_resistance_pct   = None
         s3_sr_resistance_price = None
+        _d_open = float(daily_df["open"].iloc[-1]) if daily_df is not None and not daily_df.empty else None
+        s3_daily_gain_pct = round((close - _d_open) / _d_open * 100, 1) if _d_open else None
         if config_s3.S3_ENABLED and self.sentiment.direction != "BEARISH" and m15_df is not None:
-            s3_sig, s3_adx, s3_trigger, s3_sl, s3_reason = evaluate_s3(symbol, m15_df)
+            s3_sig, s3_adx, s3_trigger, s3_sl, s3_reason = evaluate_s3(symbol, m15_df, daily_df)
             logger.info(f"[S3][{symbol}] {s3_reason}")
             # Skip the pre-pullback peak (highest high in last 50 15m candles) —
             # same logic as _execute_s3 resistance check.
@@ -660,6 +674,7 @@ class MTFBot:
             "s3_reason": s3_reason,
             "s3_signal": s3_sig,
             "s3_adx": round(s3_adx, 1) if s3_adx else None,
+            "s3_daily_gain_pct": s3_daily_gain_pct,
             "s4_reason": s4_reason,
             "s4_signal": s4_sig,
             "s5_reason": s5_reason,

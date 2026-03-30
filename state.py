@@ -148,6 +148,14 @@ def update_open_trade_margin(symbol: str, new_margin: float):
             break
     _write(s)
 
+def update_open_trade_leverage(symbol: str, leverage: int):
+    s = _read()
+    for t in s["open_trades"]:
+        if t["symbol"] == symbol:
+            t["leverage"] = leverage
+            break
+    _write(s)
+
 def update_open_trade_sl(symbol: str, new_sl: float):
     s = _read()
     for t in s["open_trades"]:

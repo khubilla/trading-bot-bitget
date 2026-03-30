@@ -27,7 +27,7 @@ S4_TRAILING_RANGE_PCT   = 10     # trailing callback % on remaining 50%
 S4_USE_SWING_TRAIL      = False  # S4 uses exchange-side % trailing stop instead
 S4_SWING_LOOKBACK       = 30     # daily candles to scan for structural swing high
 S4_LEVERAGE             = 10
-S4_TRADE_SIZE_PCT       = 0.05   # 5% of total portfolio as margin
+S4_TRADE_SIZE_PCT       = 0.04   # 4% of total portfolio as margin
 
 # ── S/R Clearance ─────────────────────────────────────── #
 S4_MIN_SR_CLEARANCE = 0.15       # Skip SHORT if support < 15% below entry

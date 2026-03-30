@@ -19,6 +19,7 @@ import uuid
 import zoneinfo
 from datetime import datetime, timezone
 
+import pandas as pd
 import ig_client as ig
 import config_ig
 
@@ -45,7 +46,7 @@ from strategy import evaluate_s5, find_swing_low_target, find_swing_high_target,
 
 # ── Logging ──────────────────────────────────────────────────── #
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s  %(levelname)-8s %(message)s",
     handlers=[
         logging.FileHandler(config_ig.LOG_FILE),
@@ -351,8 +352,12 @@ class IGBot:
 
     def _clear_state(self) -> None:
         self.position = None
-        if os.path.exists(config_ig.STATE_FILE):
-            os.remove(config_ig.STATE_FILE)
+        self._save_state()  # write {"position": null} so dashboard heartbeat stays fresh
+
+    def _heartbeat(self) -> None:
+        """Touch state file every tick so dashboard knows the bot is alive."""
+        if not os.path.exists(config_ig.STATE_FILE) or not self.position:
+            self._save_state()
 
     def run(self) -> None:
         signal.signal(signal.SIGINT,  self.stop)
@@ -372,6 +377,7 @@ class IGBot:
     # ── Main tick ─────────────────────────────────────────────── #
 
     def _tick(self) -> None:
+        self._heartbeat()
         now = _now_et()
 
         # 1. Session-end force close

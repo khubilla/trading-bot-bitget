@@ -159,9 +159,8 @@ def get_candles(epic: str, interval: str, limit: int = 100) -> pd.DataFrame:
     resolution = _RESOLUTION.get(interval, interval)
     try:
         data = _get_session().get(
-            f"/prices/{epic}",
-            params={"resolution": resolution, "numPoints": limit},
-            version="2",
+            f"/prices/{epic}/{resolution}/{limit}",
+            version="1",
         )
     except Exception as e:
         logger.error(f"get_candles({epic},{interval}): {e}")
@@ -171,6 +170,7 @@ def get_candles(epic: str, interval: str, limit: int = 100) -> pd.DataFrame:
     if not prices:
         logger.warning(f"get_candles({epic},{interval}): empty response")
         return pd.DataFrame()
+    logger.debug(f"get_candles({epic},{interval}): {len(prices)} rows, first ts raw={prices[0].get('snapshotTimeUTC') or prices[0].get('snapshotTime')}")
 
     rows = []
     for p in prices:
@@ -186,12 +186,11 @@ def get_candles(epic: str, interval: str, limit: int = 100) -> pd.DataFrame:
                 return float(last)
             return 0.0
 
-        # Parse timestamp: "2024/03/15 14:30:00:000"
+        # Parse timestamp: "2025:08:10-01:00:00" (IG v1 snapshotTime format)
         raw_ts = p.get("snapshotTimeUTC") or p.get("snapshotTime", "")
         try:
             from datetime import datetime, timezone
-            dt = datetime.strptime(raw_ts.replace(":", "/", 2).replace("/", "-", 2),
-                                   "%Y-%m-%d %H-%M-%S-%f")
+            dt = datetime.strptime(raw_ts, "%Y:%m:%d-%H:%M:%S")
             ts = int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
         except Exception:
             ts = 0

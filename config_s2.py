@@ -27,7 +27,7 @@ S2_MAX_ENTRY_BUFFER = 0.04       # Skip entry if price already >4% above breakou
 
 # ── Risk Management ──────────────────────────────────────── #
 S2_LEVERAGE         = 10
-S2_TRADE_SIZE_PCT   = 0.05       # 5% of total portfolio as margin
+S2_TRADE_SIZE_PCT   = 0.04       # 4% of total portfolio as margin
 S2_TAKE_PROFIT_PCT  = 0.10       # 10% price move = +100% margin at 10x
 S2_STOP_LOSS_PCT    = 0.05       # 5% price move = -50% margin at 10x (via box_low SL)
 

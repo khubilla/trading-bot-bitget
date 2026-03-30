@@ -145,6 +145,8 @@ def get_all_open_positions() -> dict[str, dict]:
             "entry_price":    float(p.get("openPriceAvg", 0)),
             "qty":            total,
             "unrealised_pnl": float(p.get("unrealizedPL", 0)),
+            "margin":         float(p.get("marginSize", 0)),
+            "leverage":       int(float(p.get("leverage", 0) or 0)),
         }
     return result
 
@@ -533,7 +535,8 @@ def get_realized_pnl(symbol: str) -> float | None:
                       params={"productType": PRODUCT_TYPE, "symbol": symbol, "limit": "1"})
         records = data.get("data", {}).get("list") or data.get("data", [])
         if records:
-            return float(records[0].get("achievedProfits", 0) or 0)
+            profits = float(records[0].get("achievedProfits", 0) or 0)
+            return profits if profits != 0 else None  # 0 likely means API hasn't settled yet
     except Exception as e:
         logger.warning(f"[{symbol}] get_realized_pnl error: {e}")
     return None

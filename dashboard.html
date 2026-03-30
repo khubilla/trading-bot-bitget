@@ -1494,7 +1494,57 @@ async function openEntryChart(trade) {
   document.getElementById('entryChartLegend').innerHTML =
     '<span style="color:var(--muted)">Loading…</span>';
   document.getElementById('entryChartOverlay').classList.add('open');
-  // Full implementation in Task 4
+
+  const params = new URLSearchParams({
+    symbol:             trade.symbol             || '',
+    open_at:            trade.open_at            || '',
+    strategy:           trade.strategy           || '',
+    entry:              trade.entry              || 0,
+    sl:                 trade.sl                 || 0,
+    snap_sl:            trade.snap_sl            || '',
+    tp:                 trade.tp                 || 0,
+    snap_entry_trigger: trade.snap_entry_trigger || '',
+    box_low:            trade.box_low            || '',
+    box_high:           trade.box_high           || '',
+    snap_s5_ob_low:     trade.snap_s5_ob_low     || '',
+    snap_s5_ob_high:    trade.snap_s5_ob_high    || '',
+  });
+
+  try {
+    const resp = await fetch(`/api/entry-chart?${params}`);
+    const data = await resp.json();
+
+    if (data.error) {
+      document.getElementById('entryChartLegend').innerHTML =
+        `<span style="color:var(--rose)">Error: ${data.error}</span>`;
+      return;
+    }
+
+    const canvas = document.getElementById('entryChartCanvas');
+    canvas.style.width  = '100%';
+    canvas.style.height = '320px';
+
+    requestAnimationFrame(() => {
+      _drawEntryChart(canvas, {
+        ...data,
+        entry:    trade.entry,
+        sl:       trade.sl,
+        snap_sl:  parseFloat(trade.snap_sl) || 0,
+        tp:       trade.tp,
+        trigger:  parseFloat(trade.snap_entry_trigger) || 0,
+        strategy: trade.strategy,
+      });
+      _renderEntryLegend(
+        document.getElementById('entryChartLegend'),
+        trade.strategy,
+        data.highlights || {},
+      );
+    });
+
+  } catch (err) {
+    document.getElementById('entryChartLegend').innerHTML =
+      `<span style="color:var(--rose)">Failed to load chart: ${err.message}</span>`;
+  }
 }
 
 function closeEntryChart(e) {
@@ -1503,11 +1553,191 @@ function closeEntryChart(e) {
 }
 
 function _drawEntryChart(canvas, opts) {
-  // Full implementation in Task 4
+  const { candles, entry_ts, highlights = {}, entry = 0, sl = 0,
+          snap_sl = 0, tp = 0, trigger = 0, strategy = '' } = opts;
+  if (!candles || !candles.length) return;
+
+  const dpr   = window.devicePixelRatio || 1;
+  const W     = canvas.clientWidth;
+  const H     = canvas.clientHeight;
+  canvas.width  = W * dpr;
+  canvas.height = H * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const PAD_L = 8, PAD_R = 74, PAD_T = 18, PAD_B = 44, VOL_H = 35;
+  const chartH = H - PAD_T - PAD_B - VOL_H - 6;
+
+  // Price range — include all price lines
+  const prices = [
+    ...candles.map(c => c.l), ...candles.map(c => c.h),
+    entry, sl, snap_sl, tp, trigger,
+    highlights.ob_low, highlights.ob_high,
+    highlights.box_low, highlights.box_high,
+  ].filter(p => p && p > 0);
+  let minP = Math.min(...prices);
+  let maxP = Math.max(...prices);
+  const padP = (maxP - minP) * 0.06;
+  minP -= padP; maxP += padP;
+
+  const priceToY = p => PAD_T + chartH * (1 - (p - minP) / (maxP - minP));
+  const n       = candles.length;
+  const candleW = Math.max(5, Math.floor((W - PAD_L - PAD_R) / n));
+  const gap     = Math.max(1, Math.round(candleW * 0.15));
+  const bodyW   = candleW - gap * 2;
+  const idxToX  = i => PAD_L + i * candleW + Math.floor(candleW / 2);
+
+  // Background
+  ctx.fillStyle = '#0d1117';
+  ctx.fillRect(0, 0, W, H);
+
+  // Grid lines + price labels
+  for (let gi = 0; gi <= 5; gi++) {
+    const gy = PAD_T + gi * chartH / 5;
+    const gp = maxP - gi * (maxP - minP) / 5;
+    ctx.strokeStyle = '#21262d'; ctx.lineWidth = 0.5; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(PAD_L, gy); ctx.lineTo(W - PAD_R, gy); ctx.stroke();
+    ctx.fillStyle = '#484f58'; ctx.font = '9px monospace'; ctx.textAlign = 'left';
+    ctx.fillText(_fmtEntryPrice(gp), W - PAD_R + 4, gy + 3);
+  }
+
+  // Zone shading (S1/S2 box or S5 OB)
+  const zLow  = highlights.ob_low  || highlights.box_low;
+  const zHigh = highlights.ob_high || highlights.box_high;
+  if (zLow && zHigh) {
+    const isOB    = !!highlights.ob_low;
+    const yZHigh  = priceToY(zHigh);
+    const yZLow   = priceToY(zLow);
+    ctx.fillStyle   = isOB ? 'rgba(57,197,207,0.10)' : 'rgba(88,166,255,0.07)';
+    ctx.fillRect(PAD_L, yZHigh, W - PAD_L - PAD_R, yZLow - yZHigh);
+    ctx.strokeStyle = isOB ? 'rgba(57,197,207,0.5)' : 'rgba(88,166,255,0.35)';
+    ctx.lineWidth   = 1; ctx.setLineDash(isOB ? [] : [4,3]);
+    ctx.beginPath(); ctx.moveTo(PAD_L, yZHigh); ctx.lineTo(W - PAD_R, yZHigh); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(PAD_L, yZLow);  ctx.lineTo(W - PAD_R, yZLow);  ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Dashed price lines helper
+  const hLine = (price, color, label) => {
+    if (!price || price <= 0) return;
+    const hy = priceToY(price);
+    if (hy < PAD_T - 5 || hy > PAD_T + chartH + 5) return;
+    ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash([4,3]);
+    ctx.beginPath(); ctx.moveTo(PAD_L, hy); ctx.lineTo(W - PAD_R, hy); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = color; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'left';
+    ctx.fillText(`${label} ${_fmtEntryPrice(price)}`, W - PAD_R + 4, hy - 2);
+  };
+  hLine(snap_sl,  '#7d3535', 'SL₀');
+  hLine(sl,       '#f85149', 'SL');
+  hLine(trigger,  '#e3b341', 'TRG');
+  hLine(entry,    '#58a6ff', 'ENT');
+  hLine(tp,       '#3fb950', 'TP');
+
+  // Candles + labels
+  const volMax = Math.max(...candles.map(c => c.v));
+  candles.forEach((c, i) => {
+    const x         = idxToX(i);
+    const isEntry   = c.t === entry_ts;
+    const isLastRed = c.t === highlights.last_red_ts;
+    const isUptick  = c.t === highlights.last_green_ts;
+    const isSpike   = c.t === highlights.spike_ts;
+    const bull      = c.c >= c.o;
+
+    // Background tint
+    if (isEntry)   { ctx.fillStyle='rgba(88,166,255,0.09)';  ctx.fillRect(PAD_L+i*candleW,PAD_T,candleW,chartH); }
+    if (isLastRed) { ctx.fillStyle='rgba(248,81,73,0.10)';   ctx.fillRect(PAD_L+i*candleW,PAD_T,candleW,chartH); }
+    if (isUptick)  { ctx.fillStyle='rgba(227,179,65,0.10)';  ctx.fillRect(PAD_L+i*candleW,PAD_T,candleW,chartH); }
+    if (isSpike)   {
+      ctx.fillStyle = strategy==='S4' ? 'rgba(163,113,247,0.12)' : 'rgba(227,179,65,0.12)';
+      ctx.fillRect(PAD_L+i*candleW,PAD_T,candleW,chartH);
+    }
+
+    const bodyColor = isEntry   ? '#f0f6fc'
+                    : isUptick  ? '#f0c060'
+                    : isLastRed ? '#ff6b6b'
+                    : isSpike   ? (strategy==='S4' ? '#a371f7' : '#e3b341')
+                    : bull      ? '#3fb950' : '#f85149';
+    const wickColor = isEntry   ? '#c9d1d9'
+                    : isUptick  ? '#c9a030'
+                    : isLastRed ? '#cc4444'
+                    : isSpike   ? (strategy==='S4' ? '#8b5cf6' : '#c9a030')
+                    : bull      ? '#2ea043' : '#da3633';
+
+    ctx.strokeStyle = wickColor; ctx.lineWidth = 1; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(x, priceToY(c.h)); ctx.lineTo(x, priceToY(c.l)); ctx.stroke();
+
+    const yO = priceToY(c.o), yC = priceToY(c.c);
+    const bTop = Math.min(yO, yC);
+    const bH   = Math.max(Math.abs(yC - yO), 1);
+    ctx.fillStyle = bodyColor;
+    ctx.fillRect(PAD_L + i*candleW + gap, bTop, bodyW, bH);
+    if (!bull && !isEntry && !isLastRed && !isUptick && !isSpike) {
+      ctx.strokeStyle='#da3633'; ctx.lineWidth=0.5;
+      ctx.strokeRect(PAD_L + i*candleW + gap, bTop, bodyW, bH);
+    }
+
+    // Labels below candle
+    ctx.font = 'bold 8px monospace'; ctx.textAlign = 'center';
+    const lY = PAD_T + chartH + 12;
+    if (isLastRed) { ctx.fillStyle='#ff6b6b'; ctx.fillText('LAST RED', x, lY); }
+    if (isUptick)  { ctx.fillStyle='#e3b341'; ctx.fillText('UPTICK',   x, lY); }
+    if (isEntry)   { ctx.fillStyle='#58a6ff'; ctx.fillText('▲ ENTRY',  x, lY); }
+    if (isSpike)   { ctx.fillStyle = strategy==='S4' ? '#a371f7' : '#e3b341'; ctx.fillText('SPIKE', x, lY); }
+
+    // Volume bar
+    const vBase = H - PAD_B;
+    const vh    = Math.max(1, (c.v / volMax) * VOL_H);
+    ctx.fillStyle = isEntry ? 'rgba(88,166,255,0.5)'
+                  : bull    ? 'rgba(62,175,84,0.3)' : 'rgba(248,81,73,0.3)';
+    ctx.fillRect(PAD_L + i*candleW + gap, vBase - vh, bodyW, vh);
+  });
+
+  // X-axis time labels (every 4 candles)
+  ctx.fillStyle='#6e7681'; ctx.font='9px monospace'; ctx.textAlign='center';
+  candles.forEach((c, i) => {
+    if (i % 4 === 0) {
+      ctx.fillText(new Date(c.t).toISOString().slice(11,16), idxToX(i), H - 4);
+    }
+  });
+}
+
+function _fmtEntryPrice(p) {
+  if (!p) return '0';
+  if (p < 0.001) return p.toFixed(8);
+  if (p < 0.01)  return p.toFixed(6);
+  if (p < 1)     return p.toFixed(5);
+  if (p < 10)    return p.toFixed(4);
+  if (p < 1000)  return p.toFixed(3);
+  return p.toFixed(2);
 }
 
 function _renderEntryLegend(el, strategy, highlights) {
-  // Full implementation in Task 4
+  const items = [
+    ['#58a6ff', 'Entry'],
+    ['#e3b341', 'Trigger'],
+    ['#f85149', 'SL'],
+    ['#7d3535', 'SL₀'],
+    ['#3fb950', 'TP'],
+  ];
+  if (strategy === 'S3') {
+    items.push(['#ff6b6b', 'Last red'], ['#f0c060', 'Uptick']);
+  } else if (strategy === 'S2') {
+    items.push(['#e3b341', 'Spike candle']);
+    if (highlights.box_low) items.push(['rgba(88,166,255,0.5)', 'Box zone']);
+  } else if (strategy === 'S4') {
+    items.push(['#a371f7', 'Pump candle']);
+  } else if (strategy === 'S5') {
+    if (highlights.ob_low) items.push(['#39c5cf', 'OB zone']);
+  } else if (strategy === 'S1') {
+    if (highlights.box_low) items.push(['rgba(88,166,255,0.5)', 'Box zone']);
+  }
+  el.innerHTML = items.map(([color, label]) =>
+    `<span style="display:flex;align-items:center;gap:4px">
+       <span style="display:inline-block;width:14px;height:2px;background:${color};border-radius:1px"></span>
+       <span style="color:var(--muted)">${label}</span>
+     </span>`
+  ).join('');
 }
 
 // ── Trade Chat ────────────────────────────────────────

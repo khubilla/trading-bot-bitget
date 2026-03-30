@@ -1697,9 +1697,13 @@ function _drawEntryChart(canvas, opts) {
 
   // X-axis time labels (every 4 candles)
   ctx.fillStyle='#6e7681'; ctx.font='9px monospace'; ctx.textAlign='center';
+  const isDaily = strategy === 'S2' || strategy === 'S4';
   candles.forEach((c, i) => {
     if (i % 4 === 0) {
-      ctx.fillText(new Date(c.t).toISOString().slice(11,16), idxToX(i), H - 4);
+      const label = isDaily
+        ? new Date(c.t).toISOString().slice(5, 10)   // MM-DD for daily
+        : new Date(c.t).toISOString().slice(11, 16); // HH:MM for intraday
+      ctx.fillText(label, idxToX(i), H - 4);
     }
   });
 }

@@ -220,7 +220,7 @@ def test_chat_endpoint_exists():
         assert resp.status_code == 200
         assert "text/event-stream" in resp.headers["content-type"]
         body = resp.text
-        assert "data: Hello" in body
+        assert 'data: "Hello"' in body
         assert "data: [DONE]" in body
     finally:
         _ca.stream_response = original

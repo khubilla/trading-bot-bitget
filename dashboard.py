@@ -172,7 +172,8 @@ async def chat(request: Request):
         try:
             system = claude_analyst.build_system_prompt(trade)
             for token in claude_analyst.stream_response(system, messages):
-                yield f"data: {token}\n\n"
+                import json as _json
+                yield f"data: {_json.dumps(token)}\n\n"
         except Exception as e:
             yield f"data: ⚠ Error: {e}\n\n"
         yield "data: [DONE]\n\n"

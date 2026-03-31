@@ -17,3 +17,4 @@ backtest_report.html
 settings.json
 ig_bot.log
 .superpowers
+ig_state.json

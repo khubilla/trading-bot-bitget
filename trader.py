@@ -247,7 +247,7 @@ def _place_s2_exits(symbol: str, hold_side: str, qty_str: str,
                 "triggerType":  "mark_price",
                 "holdSide":     hold_side,
                 "size":         half_qty,
-                "rangeRate":    str(round(trail_range / 100, 4)),  # API expects decimal: 10% → "0.1"
+                "rangeRate":    str(round(trail_range, 4)),  # API expects pct string: 10% → "10"
             })
             return True
         except Exception as e:

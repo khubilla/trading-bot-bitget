@@ -82,6 +82,24 @@ def _log_trade(action: str, details: dict):
         w.writerow(row)
 
 
+def _get_open_csv_row(csv_path: str, symbol: str) -> dict | None:
+    """Return the most recent open (LONG/SHORT) CSV row for a symbol, or None."""
+    if not os.path.exists(csv_path):
+        return None
+    try:
+        with open(csv_path, newline="") as f:
+            rows = list(csv.DictReader(f))
+        for r in reversed(rows):
+            action = r.get("action", "")
+            if (r.get("symbol") == symbol
+                    and any(action.endswith(sfx) for sfx in ("_LONG", "_SHORT"))
+                    and r.get("qty")):
+                return r
+    except Exception:
+        pass
+    return None
+
+
 def _rebuild_stats_from_csv(csv_path: str):
     """Rebuild win/loss stats in state.py from the CSV so they survive bot restarts."""
     if not os.path.exists(csv_path):
@@ -180,6 +198,63 @@ class MTFBot:
                 })
             if existing:
                 st.add_scan_log(f"Resumed {len(existing)} position(s)", "WARN")
+
+            # ── Startup partial reconciliation ────────────────────── #
+            # Detect partial TPs that fired while bot was disconnected.
+            # Covers both cases: initial_qty already in position_memory,
+            # and the edge case where bot disconnected before first tick
+            # (initial_qty recovered from CSV open row instead).
+            if not PAPER_MODE:
+                for sym, ap in list(self.active_positions.items()):
+                    if ap.get("strategy") not in ("S2", "S3", "S4", "S5"):
+                        continue
+                    if ap.get("partial_logged"):
+                        continue
+                    pos         = existing.get(sym, {})
+                    current_qty = float(pos.get("qty", 0))
+                    initial_qty = ap.get("initial_qty")
+                    csv_open    = None
+                    if not initial_qty:
+                        csv_open    = _get_open_csv_row(config.TRADE_LOG, sym)
+                        initial_qty = float(csv_open["qty"]) if csv_open and csv_open.get("qty") else None
+                        if initial_qty:
+                            ap["initial_qty"] = initial_qty
+                            st.update_position_memory(sym, initial_qty=initial_qty)
+                    if not initial_qty or current_qty <= 0:
+                        continue
+                    if current_qty < initial_qty * 0.75:
+                        if csv_open is None:
+                            csv_open = _get_open_csv_row(config.TRADE_LOG, sym)
+                        entry_p  = float(pos.get("entry_price", 0))
+                        side     = ap["side"]
+                        lev      = float(pos.get("leverage") or 10)
+                        trade_id = (csv_open or {}).get("trade_id", ap.get("trade_id", ""))
+                        # Use the stored TP as exit price (where profit_plan was placed)
+                        tp_str   = (csv_open or {}).get("tp") or pos.get("tp")
+                        try:
+                            exit_p = float(tp_str) if tp_str and tp_str not in ("?", "") else tr.get_mark_price(sym)
+                        except Exception:
+                            exit_p = entry_p
+                        price_chg   = (exit_p - entry_p) / entry_p if side == "LONG" else (entry_p - exit_p) / entry_p
+                        _ot         = st.get_open_trade(sym)
+                        half_margin = float(_ot.get("margin", 0)) * 0.5 if _ot else 0.0
+                        partial_pnl = round(price_chg * half_margin * lev, 4) if half_margin else 0.0
+                        partial_pct = round(price_chg * lev * 100, 2)
+                        ap["partial_logged"] = True
+                        ap["partial_pnl"]    = round(partial_pnl, 4)
+                        st.update_position_memory(sym, partial_logged=True)
+                        st.update_open_trade_margin(sym, half_margin)
+                        _log_trade(f"{ap['strategy']}_PARTIAL", {
+                            "trade_id": trade_id, "symbol": sym, "side": side,
+                            "pnl": partial_pnl, "exit_price": round(exit_p, 8),
+                            "result": "WIN" if partial_pnl >= 0 else "LOSS",
+                            "pnl_pct": partial_pct, "exit_reason": "PARTIAL_TP",
+                        })
+                        logger.warning(
+                            f"[{ap['strategy']}][{sym}] ⚠️  Startup reconcile: partial detected | "
+                            f"qty {initial_qty}→{current_qty} | PnL≈{partial_pnl:+.4f} ({partial_pct:+.1f}%)"
+                        )
+
         except Exception as e:
             logger.error(f"Startup sync error: {e}")
 

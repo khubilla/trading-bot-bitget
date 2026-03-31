@@ -34,7 +34,7 @@ S5_LTF_INTERVAL    = "15m"
 S5_OB_LOOKBACK     = 50     # candles to scan for the most recent OB
 S5_OB_MIN_IMPULSE  = 0.01   # impulse must move price ≥1% to qualify
 S5_OB_MIN_RANGE_PCT = 0.005  # OB candle range (high-low)/low must be ≥0.5%; filters narrow SL sweeps
-S5_CHOCH_LOOKBACK  = 20     # candles to check for OB touch + ChoCH confirmation
+S5_CHOCH_LOOKBACK  = 20     # candles to scan for OB touch (was ChoCH lookback — ChoCH removed)
 
 # ── Entry / SL ────────────────────────────────────────────── #
 # S5_ENTRY_BUFFER_PCT removed — entry is at ob_high exactly (limit order)

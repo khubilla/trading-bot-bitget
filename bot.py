@@ -29,6 +29,7 @@ from strategy import (
     find_swing_high_target, find_swing_low_target,
 )
 from claude_filter import claude_approve
+import snapshot
 PAPER_MODE = "--paper" in sys.argv
 if PAPER_MODE:
     import paper_trader as tr
@@ -142,6 +143,15 @@ def _get_open_csv_row(csv_path: str, symbol: str) -> dict | None:
     except Exception:
         pass
     return None
+
+
+def _df_to_candles(df) -> list[dict]:
+    """Convert OHLCV DataFrame to snapshot candle list."""
+    return [
+        {"t": int(r["ts"]), "o": float(r["open"]), "h": float(r["high"]),
+         "l": float(r["low"]),  "c": float(r["close"]), "v": float(r["vol"])}
+        for _, r in df.iterrows()
+    ]
 
 
 def _rebuild_stats_from_csv(csv_path: str):
@@ -1074,6 +1084,15 @@ class MTFBot:
         trade["trade_id"] = uuid.uuid4().hex[:8]
         _log_trade(f"S1_{s1_sig}", trade)
         st.add_open_trade(trade)
+        try:
+            snapshot.save_snapshot(
+                trade_id=trade["trade_id"], event="open",
+                symbol=symbol, interval=config_s1.LTF_INTERVAL,
+                candles=_df_to_candles(ltf_df),
+                event_price=float(trade.get("entry", 0)),
+            )
+        except Exception as e:
+            logger.warning(f"[S1][{symbol}] snapshot save failed: {e}")
         if PAPER_MODE: tr.tag_strategy(symbol, "S1")
         self.active_positions[symbol] = {
             "side": s1_sig, "strategy": "S1",
@@ -1130,6 +1149,15 @@ class MTFBot:
         trade["trade_id"] = uuid.uuid4().hex[:8]
         _log_trade("S2_LONG", trade)
         st.add_open_trade(trade)
+        try:
+            snapshot.save_snapshot(
+                trade_id=trade["trade_id"], event="open",
+                symbol=symbol, interval="1D",
+                candles=_df_to_candles(c["daily_df"]),
+                event_price=float(trade.get("entry", 0)),
+            )
+        except Exception as e:
+            logger.warning(f"[S2][{symbol}] snapshot save failed: {e}")
         if PAPER_MODE: tr.tag_strategy(symbol, "S2")
         self.active_positions[symbol] = {
             "side": "LONG", "strategy": "S2",
@@ -1190,6 +1218,15 @@ class MTFBot:
         trade["trade_id"] = uuid.uuid4().hex[:8]
         _log_trade("S3_LONG", trade)
         st.add_open_trade(trade)
+        try:
+            snapshot.save_snapshot(
+                trade_id=trade["trade_id"], event="open",
+                symbol=symbol, interval=config_s3.S3_LTF_INTERVAL,
+                candles=_df_to_candles(c["m15_df"]),
+                event_price=float(trade.get("entry", 0)),
+            )
+        except Exception as e:
+            logger.warning(f"[S3][{symbol}] snapshot save failed: {e}")
         if PAPER_MODE: tr.tag_strategy(symbol, "S3")
         self.active_positions[symbol] = {
             "side": "LONG", "strategy": "S3",
@@ -1252,6 +1289,15 @@ class MTFBot:
         trade["trade_id"] = uuid.uuid4().hex[:8]
         _log_trade("S4_SHORT", trade)
         st.add_open_trade(trade)
+        try:
+            snapshot.save_snapshot(
+                trade_id=trade["trade_id"], event="open",
+                symbol=symbol, interval="1D",
+                candles=_df_to_candles(c["daily_df"]),
+                event_price=float(trade.get("entry", 0)),
+            )
+        except Exception as e:
+            logger.warning(f"[S4][{symbol}] snapshot save failed: {e}")
         if PAPER_MODE: tr.tag_strategy(symbol, "S4")
         self.active_positions[symbol] = {
             "side": "SHORT", "strategy": "S4",
@@ -1324,6 +1370,16 @@ class MTFBot:
             trade["trade_id"] = uuid.uuid4().hex[:8]
             _log_trade("S5_LONG", trade)
             st.add_open_trade(trade)
+            try:
+                if m15_df is not None:
+                    snapshot.save_snapshot(
+                        trade_id=trade["trade_id"], event="open",
+                        symbol=symbol, interval=config_s5.S5_LTF_INTERVAL,
+                        candles=_df_to_candles(m15_df),
+                        event_price=float(trade.get("entry", 0)),
+                    )
+            except Exception as e:
+                logger.warning(f"[S5][{symbol}] snapshot save failed: {e}")
             if PAPER_MODE: tr.tag_strategy(symbol, "S5")
             self.active_positions[symbol] = {
                 "side": "LONG", "strategy": "S5",
@@ -1389,6 +1445,16 @@ class MTFBot:
             trade["trade_id"] = uuid.uuid4().hex[:8]
             _log_trade("S5_SHORT", trade)
             st.add_open_trade(trade)
+            try:
+                if m15_df is not None:
+                    snapshot.save_snapshot(
+                        trade_id=trade["trade_id"], event="open",
+                        symbol=symbol, interval=config_s5.S5_LTF_INTERVAL,
+                        candles=_df_to_candles(m15_df),
+                        event_price=float(trade.get("entry", 0)),
+                    )
+            except Exception as e:
+                logger.warning(f"[S5][{symbol}] snapshot save failed: {e}")
             if PAPER_MODE: tr.tag_strategy(symbol, "S5")
             self.active_positions[symbol] = {
                 "side": "SHORT", "strategy": "S5",

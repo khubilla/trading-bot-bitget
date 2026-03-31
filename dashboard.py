@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 _STRATEGY_INTERVAL = {
     "S1": "3m", "S2": "1D", "S3": "15m", "S4": "1D", "S5": "15m",
 }
+_TRADE_EVENT_ORDER = ["open", "scale_in", "partial", "close"]
 
 try:
     from trader import PRODUCT_TYPE
@@ -818,6 +819,10 @@ def get_trade_chart(
     if not trade_id:
         return JSONResponse({"error": "trade_id required"}, status_code=400)
 
+    import re as _re
+    if not _re.fullmatch(r'[A-Za-z0-9_-]{1,64}', trade_id):
+        return JSONResponse({"error": "trade_id required"}, status_code=400)
+
     import snapshot as _snap
     from datetime import datetime as _dt
 
@@ -825,11 +830,10 @@ def get_trade_chart(
     if not events_found:
         return JSONResponse({"error": "no snapshots found"}, status_code=404)
 
-    EVENT_ORDER = ["open", "scale_in", "partial", "close"]
     candle_map: dict = {}   # t (int ms) → candle dict; later snapshot overwrites earlier
     loaded: list    = []    # [{event, snap}] in canonical order
 
-    for event in EVENT_ORDER:
+    for event in _TRADE_EVENT_ORDER:
         if event not in events_found:
             continue
         snap = _snap.load_snapshot(trade_id, event)
@@ -844,6 +848,8 @@ def get_trade_chart(
 
     # Build sorted candle list
     candles = sorted(candle_map.values(), key=lambda c: int(c["t"]))
+    if not candles:
+        return JSONResponse({"error": "no snapshots found"}, status_code=404)
     ts_list = [int(c["t"]) for c in candles]
 
     # Map each event's captured_at to nearest candle index
@@ -852,7 +858,7 @@ def get_trade_chart(
         return min(range(len(ts_list)), key=lambda i: abs(ts_list[i] - ts_ms))
 
     events_out = []
-    first_snap = loaded[0]["snap"]
+    meta_snap = loaded[0]["snap"]
     for item in loaded:
         ev_type = item["event"]
         snap    = item["snap"]
@@ -862,13 +868,15 @@ def get_trade_chart(
             "price":      snap["event_price"],
         }
         if ev_type == "open":
-            if sl is not None:  ev["sl"] = sl
-            if tp is not None:  ev["tp"] = tp
+            if sl is not None:
+                ev["sl"] = sl
+            if tp is not None:
+                ev["tp"] = tp
         events_out.append(ev)
 
     return JSONResponse({
-        "symbol":   first_snap["symbol"],
-        "interval": first_snap["interval"],
+        "symbol":   meta_snap["symbol"],
+        "interval": meta_snap["interval"],
         "strategy": strategy,
         "side":     side,
         "candles":  candles,

@@ -15,7 +15,7 @@ A two-file pytest security regression suite that runs after existing unit tests.
 
 | Layer | File | Tool | Catches |
 |-------|------|------|---------|
-| Application | `tests/test_security.py` | httpx + real uvicorn | Known auth, rate-limit, input, CORS, info-exposure gaps |
+| Application | `tests/test_security.py` | httpx + real uvicorn | Auth, rate-limit, input, CORS, info-exposure, injection, security headers |
 | Dependencies | `tests/test_security_scan.py` | pip-audit | New CVEs in installed packages as they are disclosed |
 | Source code | `tests/test_security_scan.py` | bandit | Insecure patterns introduced in new code |
 
@@ -139,6 +139,66 @@ Tests:
 
 Expected fix: add a payload size check at the start of the `/api/chat` handler before calling `claude_analyst.stream_response`.
 
+#### `TestInjectionAttacks`
+
+Asserts that injection payloads sent to `/api/candles/{symbol}` and `/api/chat` are rejected before reaching any processing layer.
+
+**Command/OS injection payloads** in `symbol` param — all must return **400**:
+- `$(python -c 'import os; os.getcwd()')`
+- `` `id` ``
+- `BTCUSDT; python -c 'import socket'`
+- `BTCUSDT | python -c 'import sys'`
+- `BTCUSDT && whoami`
+
+**SQL-style injection payloads** in `symbol` param — all must return **400**:
+- `' OR 1=1--`
+- `'; DROP TABLE orders;--`
+- `1 UNION SELECT NULL--`
+
+**Header injection** via newlines in `symbol` param — all must return **400**:
+- `BTCUSDT\r\nX-Injected: evil`
+- `BTCUSDT\nSet-Cookie: session=hijacked`
+
+**JSON structure attacks** in `/api/chat` body — all must return **400** or be safely ignored:
+- Deeply nested object (`{"a": {"a": {"a": ...}}}` 100 levels deep)
+- Array where string expected (`"messages": [[[["payload"]]]`)
+- Null bytes in string fields (`"trade": "data\x00injection"`)
+
+Note: these payloads will not actually execute code — FastAPI does not shell-execute path params. The tests confirm the allowlist and input validation layers are enforced, protecting against future refactors that might introduce execution paths.
+
+Expected fix: covered by the symbol allowlist regex (`^[A-Z0-9]{2,20}$`) from `TestInputValidation` and payload validation from `TestAPIProxyAbuse`. `bandit` static analysis in `test_security_scan.py` independently confirms no `subprocess`/`eval`/`exec` calls use user-controlled input in the source.
+
+#### `TestSecurityHeaders`
+
+Asserts that every dashboard response includes the required HTTP security headers.
+
+Endpoints checked: `GET /`, `GET /api/state`, `GET /api/candles/BTCUSDT`
+
+Required headers and values:
+- `X-Frame-Options: DENY` — prevents clickjacking the dashboard in an iframe
+- `X-Content-Type-Options: nosniff` — prevents MIME-type sniffing attacks
+- `Content-Security-Policy` — present, does not contain `unsafe-inline` for `script-src` (TradingView CDN must be explicitly listed instead)
+- `Referrer-Policy: no-referrer` — suppresses referrer leakage on outbound links
+- `Server` header — must be absent or not expose `uvicorn` version string
+
+Expected fix: add a response middleware in `dashboard.py` that injects these headers on every response. Example:
+
+```python
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' https://unpkg.com; "
+        "style-src 'self' 'unsafe-inline'"
+    )
+    response.headers.pop("server", None)
+    return response
+```
+
 ---
 
 ## `test_security_scan.py` — Scanner Tests
@@ -196,6 +256,7 @@ All tests in `test_security.py` are expected to fail until the following fixes a
 4. Add `CORSMiddleware` restricted to localhost origins
 5. Add global exception handler suppressing stack traces
 6. Add payload size validation to `/api/chat` handler
+7. Add security headers response middleware to `dashboard.py`
 
 Scanner tests in `test_security_scan.py` may pass immediately if no current CVEs or bandit issues exist.
 
@@ -206,7 +267,7 @@ Scanner tests in `test_security_scan.py` may pass immediately if no current CVEs
 | File | Change |
 |------|--------|
 | `tests/conftest.py` | Add `live_server_url` session-scoped fixture |
-| `tests/test_security.py` | New file — 6 test classes, ~50 test cases |
+| `tests/test_security.py` | New file — 8 test classes, ~70 test cases |
 | `tests/test_security_scan.py` | New file — 2 test functions |
 | `requirements.txt` | Add `httpx>=0.27.0` |
 | `requirements-dev.txt` | New file — `pip-audit`, `bandit`, `pytest`, `httpx` |

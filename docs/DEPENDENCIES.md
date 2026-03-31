@@ -199,6 +199,80 @@ sed -n '24,36p' ig_bot.py
 
 ---
 
+### 2.2 snapshot.py
+
+**Purpose:** Saves and loads OHLCV candle snapshots at trade lifecycle events (open, scale_in, partial, close) so charts always reflect the exact market state at each event.
+
+**Files stored:** `data/snapshots/{trade_id}_{event}.json`
+
+**Used by:**
+- `bot.py` line 32 — `import snapshot` (module-level); calls `save_snapshot()` at trade open (line 1164), scale-in (line 1109), partial TP (line 533), close (line 692), and during startup reconciliation for partials (line 338) and closes (line 385)
+- `dashboard.py` line 647 — lazy import `import snapshot as _snap`; calls `load_snapshot(trade_id, "open")` (line 659) to serve candle data via the `/api/entry-chart` endpoint
+- `dashboard.py` (in `get_trade_chart`) — lazy import `import snapshot as _snap`; calls `list_snapshots(trade_id)` to discover all events, then `load_snapshot(trade_id, event)` for each event to serve merged candle data via the `/api/trade-chart` endpoint
+
+**Key functions:**
+
+```python
+def save_snapshot(
+    trade_id: str,
+    event: str,          # "open" | "scale_in" | "partial" | "close"
+    symbol: str,
+    interval: str,       # e.g. "15m", "1D"
+    candles: list[dict], # list of {"t", "o", "h", "l", "c", "v"}
+    event_price: float,
+    captured_at: str | None = None,
+) -> None: ...
+
+def load_snapshot(trade_id: str, event: str) -> dict | None: ...
+
+def list_snapshots(trade_id: str) -> list[str]: ...
+```
+
+**Snapshot file structure:**
+```json
+{
+  "trade_id":    "a1b2c3d4",
+  "symbol":      "BTCUSDT",
+  "interval":    "15m",
+  "event":       "open",
+  "captured_at": "2026-03-31T04:00:00+00:00",
+  "event_price": 82500.0,
+  "candles":     [{"t": 1743379200000, "o": 82400.0, "h": 82600.0, "l": 82300.0, "c": 82500.0, "v": 123.4}]
+}
+```
+
+**Breaking scenarios:**
+
+1. **Renaming event strings** (`"open"` → `"entry"`) → `load_snapshot(trade_id, "open")` in dashboard.py returns None; entry chart shows no data
+   - Fix: Update all `save_snapshot(event=...)` calls in bot.py AND `load_snapshot` call in dashboard.py
+
+2. **Moving `_SNAP_DIR`** → Existing snapshot files become unreachable
+   - Fix: Migrate existing files or update `_SNAP_DIR` in snapshot.py
+
+3. **Changing candle dict keys** (`"t"/"o"/"h"/"l"/"c"/"v"`) → dashboard.py chart renderer breaks
+   - Fix: Update dashboard.py chart rendering code to match new keys
+
+4. **Removing `event_price` from payload** → dashboard.py `/api/entry-chart` response loses price marker
+   - Fix: Update dashboard.py line ~670 where `event_price` is read from snapshot
+
+**Verification commands:**
+
+```bash
+# Check snapshot callers in bot.py
+grep -n "snapshot.save_snapshot\|snapshot.load_snapshot" bot.py
+
+# Check dashboard usage
+grep -n "snapshot" dashboard.py
+
+# List saved snapshots for a trade
+python -c "import snapshot; print(snapshot.list_snapshots('a1b2c3d4'))"
+
+# Check snapshot directory exists
+ls data/snapshots/ 2>/dev/null | head -5 || echo "No snapshots yet"
+```
+
+---
+
 ## 3. Bot-Specific Files
 
 [To be populated in Task 7]
@@ -358,7 +432,7 @@ python -c "import json; s=json.load(open('state_paper.json')); ps=s['pair_states
 - `dashboard.py` line 71: Injects CSV history into state (CSV is authoritative source)
 - `optimize.py` line 229: `csv_path.replace("trades.csv", "trades_paper.csv")` — parameter analysis
 
-**Columns (37 fields):**
+**Columns (38 fields):**
 
 ```csv
 timestamp,trade_id,action,symbol,side,qty,entry,sl,tp,
@@ -369,7 +443,7 @@ snap_entry_trigger,snap_sl,snap_rr,
 snap_rsi_peak,snap_spike_body_pct,snap_rsi_div,snap_rsi_div_str,
 snap_s5_ob_low,snap_s5_ob_high,snap_s5_tp,
 snap_sr_clearance_pct,
-result,pnl,pnl_pct,exit_reason
+result,pnl,pnl_pct,exit_reason,exit_price
 ```
 
 **Field categories:**
@@ -381,7 +455,7 @@ result,pnl,pnl_pct,exit_reason
 - **S4 snapshot:** snap_rsi_peak, snap_spike_body_pct, snap_rsi_div, snap_rsi_div_str
 - **S5 snapshot:** snap_s5_ob_low, snap_s5_ob_high, snap_s5_tp
 - **S/R snapshot:** snap_sr_clearance_pct
-- **Close data:** result, pnl, pnl_pct, exit_reason
+- **Close data:** result, pnl, pnl_pct, exit_reason, exit_price
 
 **Breaking scenarios:**
 
@@ -930,4 +1004,6 @@ head -1 ig_trades.csv
 ### Document History
 
 - 2026-03-28: Complete dependency documentation system deployed
+- 2026-03-31: Added Section 2.2 (snapshot.py); added exit_price to Section 4.2 trades.csv columns (38 fields, was 37)
+- 2026-03-31: Updated Section 2.2 — dashboard.py now also calls list_snapshots() + load_snapshot() for all events via /api/trade-chart
 - 2026-03-31: S5 SMC Limit Order Entry — evaluate_s5() now returns PENDING_LONG/SHORT (not LONG/SHORT); removed S5_ENTRY_BUFFER_PCT from config import (replaced by S5_MAX_ENTRY_BUFFER as stale OB guard); ig_state.json gained pending_order field; ChoCH removed from S5 strategy logic

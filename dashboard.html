@@ -1434,6 +1434,13 @@ function render(s) {
             <div class="tg-row"><span class="tg-key">TP</span><span class="tg-val pos">$${fmtPrice(t.tp)}</span></div>
             <div class="tg-row" style="grid-column:1/-1"><span class="tg-key">Margin</span><span class="tg-val">$${fmt(margin,2)} @ ${lev}x</span></div>
           </div>
+          ${t.trade_id ? `<div style="text-align:right;padding:4px 0 0;font-size:11px">
+            <span onclick="openCombinedChart(${JSON.stringify({
+              trade_id: t.trade_id, symbol: t.symbol, strategy: strat,
+              side: t.side, entry: t.entry, sl: t.sl, tp: t.tp,
+              open_at: t.open_at || '',
+            })})" title="Trade chart" style="cursor:pointer;color:var(--muted)">📊</span>
+          </div>` : ''}
         </div>`;
     }).join('');
   }
@@ -1478,7 +1485,7 @@ function render(s) {
           <span class="hist-pnl ${pnlClass}">${fmtUSD(pnl)}</span>
           <span class="hist-time">${relTime(t.closed_at)}</span>
           <span style="font-size:9px;color:var(--muted);margin-left:auto;display:flex;gap:7px;align-items:center">
-            ${canChart ? `<span onclick="openEntryChart(window._histTrades[${i}])" title="Entry chart" style="cursor:pointer">📊</span>` : ''}
+            ${canChart ? `<span onclick="openCombinedChart(window._histTrades[${i}])" title="Trade chart" style="cursor:pointer">📊</span>` : ''}
             <span onclick="openChat(window._histTrades[${i}])" title="AI analysis" style="cursor:pointer">💬</span>
             ${canChart ? `<span onclick="openTradeChart(window._histTrades[${i}])" title="Full chart" style="cursor:pointer">↗</span>` : ''}
           </span>
@@ -1489,6 +1496,67 @@ function render(s) {
 
 // ── Entry Chart Modal ──────────────────────────────────
 const _ENTRY_CHART_INTERVAL = {S1:'3m', S2:'1D', S3:'15m', S4:'1D', S5:'15m'};
+
+async function openCombinedChart(trade) {
+  if (!trade || !trade.trade_id) return openEntryChart(trade);
+
+  const interval = _ENTRY_CHART_INTERVAL[trade.strategy] || '15m';
+  document.getElementById('entryChartTitle').textContent =
+    `${trade.symbol} · ${trade.strategy || '?'} · ${interval} · ${(trade.open_at || '').slice(0,16).replace('T',' ')} UTC`;
+  document.getElementById('entryChartLegend').innerHTML =
+    '<span style="color:var(--muted)">Loading…</span>';
+  document.getElementById('entryChartOverlay').classList.add('open');
+
+  const params = new URLSearchParams({
+    trade_id: trade.trade_id,
+    side:     trade.side     || '',
+    sl:       trade.sl       || 0,
+    tp:       trade.tp       || 0,
+    strategy: trade.strategy || '',
+  });
+
+  try {
+    const resp = await fetch(`/api/trade-chart?${params}`);
+
+    if (resp.status === 404) {
+      document.getElementById('entryChartOverlay').classList.remove('open');
+      return openEntryChart(trade);
+    }
+
+    const data = await resp.json();
+
+    if (data.error) {
+      document.getElementById('entryChartLegend').innerHTML =
+        `<span style="color:var(--rose)">Error: ${data.error}</span>`;
+      return;
+    }
+
+    const EV_META = {
+      open:     { color: '#3fb950', label: (data.side||'').toUpperCase() === 'LONG' ? 'Entry ▲' : 'Entry ▼' },
+      scale_in: { color: '#e3b341', label: 'Scale-in' },
+      partial:  { color: '#a371f7', label: 'Partial' },
+      close:    { color: '#f85149', label: (data.side||'').toUpperCase() === 'LONG' ? 'Close ▼' : 'Close ▲' },
+    };
+    const legendHtml = (data.events || []).map(e => {
+      const m = EV_META[e.type] || { color: '#aaa', label: e.type };
+      return `<span style="display:flex;align-items:center;gap:4px">` +
+        `<span style="width:8px;height:8px;background:${m.color};border-radius:2px;display:inline-block"></span>` +
+        `<span>${m.label} ${parseFloat(e.price).toFixed(4)}</span></span>`;
+    }).join('');
+    document.getElementById('entryChartLegend').innerHTML =
+      legendHtml || '<span style="color:var(--muted)">No events</span>';
+
+    const canvas = document.getElementById('entryChartCanvas');
+    canvas.style.width  = '100%';
+    canvas.style.height = '420px';
+
+    requestAnimationFrame(() => { _drawTradeChart(canvas, data); });
+
+  } catch (err) {
+    document.getElementById('entryChartLegend').innerHTML =
+      `<span style="color:var(--rose)">Failed to load chart: ${err.message}</span>`;
+  }
+}
 
 async function openEntryChart(trade) {
   if (!trade || !trade.entry || !trade.open_at) return;
@@ -1512,6 +1580,7 @@ async function openEntryChart(trade) {
     box_high:           trade.box_high           || '',
     snap_s5_ob_low:     trade.snap_s5_ob_low     || '',
     snap_s5_ob_high:    trade.snap_s5_ob_high    || '',
+    trade_id:           trade.trade_id           || '',
   });
 
   try {
@@ -1717,6 +1786,166 @@ function _drawEntryChart(canvas, opts) {
     ctx.beginPath(); ctx.moveTo(PAD_L, yH2); ctx.lineTo(W - PAD_R, yH2); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(PAD_L, yL2); ctx.lineTo(W - PAD_R, yL2); ctx.stroke();
     ctx.setLineDash([]);
+  }
+}
+
+// ── Combined Trade Lifecycle Chart ────────────────────────────────
+function _drawTradeChart(canvas, data) {
+  const { candles, events = [], side = 'LONG', symbol = '', strategy = '', interval = '15m' } = data;
+  if (!candles || !candles.length) return;
+
+  const dpr  = window.devicePixelRatio || 1;
+  const W    = canvas.clientWidth;
+  const H    = canvas.clientHeight;
+  if (!W || !H) return;
+  canvas.width  = W * dpr;
+  canvas.height = H * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const PAD_L = 8, PAD_R = 88, PAD_T = 24, PAD_B = 55, VOL_H = 30;
+  const chartH = H - PAD_T - PAD_B - VOL_H - 6;
+
+  const n       = candles.length;
+  const candleW = Math.floor((W - PAD_L - PAD_R) / n);
+  const gap     = Math.max(1, Math.round(candleW * 0.15));
+  const bodyW   = candleW - gap * 2;
+  const idxToX  = i => PAD_L + i * candleW + Math.floor(candleW / 2);
+
+  const evMap = {};
+  events.forEach(e => { evMap[e.candle_idx] = e; });
+  const openEv = events.find(e => e.type === 'open');
+
+  const evPrices = events.map(e => e.price).filter(Boolean);
+  const slTp = openEv ? [openEv.sl, openEv.tp].filter(p => p > 0) : [];
+  const allPrices = [
+    ...candles.map(c => c.l), ...candles.map(c => c.h),
+    ...evPrices, ...slTp,
+  ].filter(Boolean);
+  let minP = Math.min(...allPrices);
+  let maxP = Math.max(...allPrices);
+  const padP = (maxP - minP) * 0.12;
+  minP -= padP; maxP += padP;
+  const p2y = p => PAD_T + chartH * (1 - (p - minP) / (maxP - minP));
+
+  ctx.fillStyle = '#0d1117';
+  ctx.fillRect(0, 0, W, H);
+
+  for (let gi = 0; gi <= 5; gi++) {
+    const gy = PAD_T + gi * chartH / 5;
+    const gp = maxP - gi * (maxP - minP) / 5;
+    ctx.strokeStyle = '#21262d'; ctx.lineWidth = 0.5; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(PAD_L, gy); ctx.lineTo(W - PAD_R, gy); ctx.stroke();
+    ctx.fillStyle = '#484f58'; ctx.font = '9px monospace'; ctx.textAlign = 'left';
+    ctx.fillText(gp.toFixed(4), W - PAD_R + 4, gy + 3);
+  }
+
+  const hLine = (price, color, label, dash = [4, 3]) => {
+    if (!price || price <= 0) return;
+    const hy = p2y(price);
+    ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash(dash);
+    ctx.beginPath(); ctx.moveTo(PAD_L, hy); ctx.lineTo(W - PAD_R, hy); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = color; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'left';
+    ctx.fillText(`${label} ${price.toFixed(4)}`, W - PAD_R + 4, hy - 2);
+  };
+  if (openEv) {
+    hLine(openEv.sl, '#f85149', 'SL');
+    hLine(openEv.tp, '#3fb950', 'TP');
+    hLine(openEv.price, 'rgba(88,166,255,0.6)', 'ENT', [4, 3]);
+  }
+
+  const EV_STYLE = {
+    open:     { body: '#3fb950', wick: '#2ea043', bg: 'rgba(63,185,80,0.08)',   vol: 'rgba(63,185,80,0.5)'   },
+    scale_in: { body: '#e3b341', wick: '#c9a030', bg: 'rgba(227,179,65,0.08)',  vol: 'rgba(227,179,65,0.5)'  },
+    partial:  { body: '#a371f7', wick: '#7c4dff', bg: 'rgba(163,113,247,0.08)', vol: 'rgba(163,113,247,0.5)' },
+    close:    { body: '#f85149', wick: '#da3633', bg: 'rgba(248,81,73,0.08)',   vol: 'rgba(248,81,73,0.5)'   },
+  };
+
+  const volMax = Math.max(...candles.map(c => c.v));
+  candles.forEach((c, i) => {
+    const ev  = evMap[i];
+    const x   = idxToX(i);
+    const bull = c.c >= c.o;
+    const sty  = ev ? EV_STYLE[ev.type] : null;
+
+    if (sty) {
+      ctx.fillStyle = sty.bg;
+      ctx.fillRect(PAD_L + i * candleW, PAD_T, candleW, chartH);
+    }
+
+    ctx.strokeStyle = sty ? sty.wick : (bull ? '#2ea043' : '#da3633');
+    ctx.lineWidth = 1; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(x, p2y(c.h)); ctx.lineTo(x, p2y(c.l)); ctx.stroke();
+
+    const yO   = p2y(c.o), yC = p2y(c.c);
+    const bTop = Math.min(yO, yC);
+    const bH   = Math.max(Math.abs(yC - yO), 1);
+    ctx.fillStyle   = sty ? sty.body : (bull ? '#3fb950' : '#f85149');
+    ctx.globalAlpha = sty ? 0.9 : (bull ? 0.75 : 0.6);
+    ctx.fillRect(PAD_L + i * candleW + gap, bTop, bodyW, bH);
+    ctx.globalAlpha = 1;
+
+    const vBase = H - PAD_B;
+    const vh    = Math.max(1, (c.v / volMax) * VOL_H);
+    ctx.fillStyle = sty ? sty.vol : (bull ? 'rgba(62,175,84,0.25)' : 'rgba(248,81,73,0.25)');
+    ctx.fillRect(PAD_L + i * candleW + gap, vBase - vh, bodyW, vh);
+  });
+
+  events.forEach(e => {
+    if (e.candle_idx >= n) return;
+    const x1 = PAD_L + e.candle_idx * candleW;
+    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(x1 + 1, p2y(e.price)); ctx.lineTo(x1 + candleW - 1, p2y(e.price)); ctx.stroke();
+  });
+
+  const ARROW_H = 10, ARROW_W = 9, ARROW_GAP = 5;
+  const isLong  = (side || '').toUpperCase() === 'LONG';
+  const opensEntry = t => t === 'open' || t === 'scale_in';
+
+  const arrowUp = (i, color, label) => {
+    const x   = idxToX(i);
+    const tip = p2y(candles[i].l) + ARROW_GAP + ARROW_H;
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.moveTo(x, tip - ARROW_H); ctx.lineTo(x - ARROW_W/2, tip); ctx.lineTo(x + ARROW_W/2, tip); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = color; ctx.font = 'bold 8px monospace'; ctx.textAlign = 'center';
+    ctx.fillText(label, x, tip + 10);
+  };
+  const arrowDown = (i, color, label) => {
+    const x   = idxToX(i);
+    const tip = p2y(candles[i].h) - ARROW_GAP - ARROW_H;
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.moveTo(x, tip + ARROW_H); ctx.lineTo(x - ARROW_W/2, tip); ctx.lineTo(x + ARROW_W/2, tip); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = color; ctx.font = 'bold 8px monospace'; ctx.textAlign = 'center';
+    ctx.fillText(label, x, tip - 4);
+  };
+
+  const LABELS = { open: 'ENTRY', scale_in: 'SCALE', partial: 'PARTIAL', close: 'CLOSE' };
+  events.forEach(e => {
+    if (e.candle_idx >= n) return;
+    const sty  = EV_STYLE[e.type] || { body: '#ffffff' };
+    const goUp = isLong ? opensEntry(e.type) : !opensEntry(e.type);
+    if (goUp) arrowUp  (e.candle_idx, sty.body, LABELS[e.type] || e.type.toUpperCase());
+    else      arrowDown(e.candle_idx, sty.body, LABELS[e.type] || e.type.toUpperCase());
+  });
+
+  ctx.fillStyle = '#6e7681'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
+  const step = Math.max(1, Math.floor(n / 8));
+  candles.forEach((c, i) => {
+    if (i % step !== 0) return;
+    const d     = new Date(c.t);
+    const label = interval === '1D'
+      ? d.toISOString().slice(5, 10)
+      : d.toISOString().slice(11, 16);
+    ctx.fillText(label, idxToX(i), H - 4);
+  });
+
+  ctx.fillStyle = '#8b949e'; ctx.font = 'bold 10px monospace'; ctx.textAlign = 'left';
+  ctx.fillText(`${symbol} · ${strategy} · ${interval} · ${side}`, PAD_L + 4, PAD_T - 6);
+
+  if (events.length === 1 && events[0].type === 'open') {
+    ctx.fillStyle = '#3fb950'; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'right';
+    ctx.fillText('● OPEN', W - PAD_R - 4, PAD_T - 6);
   }
 }
 

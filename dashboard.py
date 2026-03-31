@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 _STRATEGY_INTERVAL = {
     "S1": "3m", "S2": "1D", "S3": "15m", "S4": "1D", "S5": "15m",
 }
+_TRADE_EVENT_ORDER = ["open", "scale_in", "partial", "close"]
 
 try:
     from trader import PRODUCT_TYPE
@@ -121,10 +122,13 @@ def _load_csv_history(csv_path: str, limit: int = 50) -> list:
             tid      = r.get("trade_id") or ""
             closed_tids.add(tid)
             pnl      = _safe_float(r.get("pnl")) or 0.0
+            partial_pnl = _safe_float((partial_rows.get(tid) or {}).get("pnl")) or 0.0
+            pnl     += partial_pnl
             open_row = open_rows.get(tid, {})
 
             rows.append({
                 # existing fields (unchanged contract for dashboard rendering)
+                "trade_id":    tid,
                 "symbol":      r.get("symbol") or open_row.get("symbol", ""),
                 "side":        r.get("side") or open_row.get("side", ""),
                 "pnl":         round(pnl, 4),
@@ -161,6 +165,7 @@ def _load_csv_history(csv_path: str, limit: int = 50) -> list:
             pnl      = _safe_float(r.get("pnl")) or 0.0
             open_row = open_rows.get(tid, {})
             rows.append({
+                "trade_id":    tid,
                 "symbol":      r.get("symbol") or open_row.get("symbol", ""),
                 "side":        r.get("side") or open_row.get("side", ""),
                 "pnl":         round(pnl, 4),
@@ -630,6 +635,7 @@ def get_entry_chart(
     box_high:           str   = "",
     snap_s5_ob_low:     str   = "",
     snap_s5_ob_high:    str   = "",
+    trade_id:           str   = "",
 ):
     """
     Returns 25 candles centred around entry (20 before + 5 after) plus
@@ -639,6 +645,7 @@ def get_entry_chart(
         import numpy as np
         import pandas as pd
         import bitget_client as bc
+        import snapshot as _snap
         from datetime import datetime
         from strategy import calculate_stoch
 
@@ -647,8 +654,35 @@ def get_entry_chart(
 
         # Parse open_at ISO → ms
         open_ts_ms = int(datetime.fromisoformat(open_at).timestamp() * 1000)
-        end_ts_ms  = open_ts_ms + 10 * interval_ms
 
+        # ── Snapshot fast-path ────────────────────────────────────── #
+        if trade_id:
+            snap = _snap.load_snapshot(trade_id, "open")
+            if snap:
+                _df = pd.DataFrame(snap["candles"])
+                _df = _df.rename(columns={"t": "ts"})
+                entry_idx = len(_df) - 1
+                for i, row in _df.iterrows():
+                    if int(row["ts"]) >= open_ts_ms:
+                        entry_idx = i
+                        break
+                start = max(0, entry_idx - 20)
+                end   = min(len(_df), entry_idx + 5)
+                view  = _df.iloc[start:end].reset_index(drop=True)
+                candles_out = [
+                    {"t": int(r["ts"]), "o": r["o"], "h": r["h"],
+                     "l": r["l"],  "c": r["c"], "v": r["v"]}
+                    for _, r in view.iterrows()
+                ]
+                entry_ts = int(_df.iloc[entry_idx]["ts"])
+                return JSONResponse({
+                    "candles":      candles_out,
+                    "entry_ts":     entry_ts,
+                    "highlights":   {},
+                    "from_snapshot": True,
+                })
+
+        end_ts_ms  = open_ts_ms + 10 * interval_ms
         fetch_limit = 300 if interval != "1D" else 60
         granularity = "1Dutc" if interval == "1D" else interval
 
@@ -768,6 +802,86 @@ def get_entry_chart(
     except Exception as exc:
         import traceback
         return JSONResponse({"error": str(exc), "detail": traceback.format_exc()}, status_code=200)
+
+
+@app.get("/api/trade-chart")
+def get_trade_chart(
+    trade_id: str = "",
+    side:     str   = "",
+    sl:       float | None = None,
+    tp:       float | None = None,
+    strategy: str   = "",
+):
+    """
+    Returns merged candle array + event list for all available snapshots of a trade.
+    Candles from multiple snapshots are unioned by timestamp; later snapshot wins on overlap.
+    """
+    if not trade_id:
+        return JSONResponse({"error": "trade_id required"}, status_code=400)
+
+    import re as _re
+    if not _re.fullmatch(r'[A-Za-z0-9_-]{1,64}', trade_id):
+        return JSONResponse({"error": "trade_id required"}, status_code=400)
+
+    import snapshot as _snap
+    from datetime import datetime as _dt
+
+    events_found = _snap.list_snapshots(trade_id)
+    if not events_found:
+        return JSONResponse({"error": "no snapshots found"}, status_code=404)
+
+    candle_map: dict = {}   # t (int ms) → candle dict; later snapshot overwrites earlier
+    loaded: list    = []    # [{event, snap}] in canonical order
+
+    for event in _TRADE_EVENT_ORDER:
+        if event not in events_found:
+            continue
+        snap = _snap.load_snapshot(trade_id, event)
+        if not snap:
+            continue
+        for c in snap["candles"]:
+            candle_map[int(c["t"])] = c
+        loaded.append({"event": event, "snap": snap})
+
+    if not loaded:
+        return JSONResponse({"error": "no snapshots found"}, status_code=404)
+
+    # Build sorted candle list
+    candles = sorted(candle_map.values(), key=lambda c: int(c["t"]))
+    if not candles:
+        return JSONResponse({"error": "no snapshots found"}, status_code=404)
+    ts_list = [int(c["t"]) for c in candles]
+
+    # Map each event's captured_at to nearest candle index
+    def _nearest_idx(captured_at: str) -> int:
+        ts_ms = int(_dt.fromisoformat(captured_at).timestamp() * 1000)
+        return min(range(len(ts_list)), key=lambda i: abs(ts_list[i] - ts_ms))
+
+    events_out = []
+    meta_snap = loaded[0]["snap"]
+    for item in loaded:
+        ev_type = item["event"]
+        snap    = item["snap"]
+        ev: dict = {
+            "type":       ev_type,
+            "candle_idx": _nearest_idx(snap["captured_at"]),
+            "price":      snap["event_price"],
+        }
+        if ev_type == "open":
+            if sl is not None:
+                ev["sl"] = sl
+            if tp is not None:
+                ev["tp"] = tp
+        events_out.append(ev)
+
+    return JSONResponse({
+        "symbol":   meta_snap["symbol"],
+        "interval": meta_snap["interval"],
+        "strategy": strategy,
+        "side":     side,
+        "candles":  candles,
+        "events":   events_out,
+    })
 
 
 @app.get("/api/ig/state")

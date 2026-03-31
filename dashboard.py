@@ -803,6 +803,79 @@ def get_entry_chart(
         return JSONResponse({"error": str(exc), "detail": traceback.format_exc()}, status_code=200)
 
 
+@app.get("/api/trade-chart")
+def get_trade_chart(
+    trade_id: str = "",
+    side:     str   = "",
+    sl:       float = 0.0,
+    tp:       float = 0.0,
+    strategy: str   = "",
+):
+    """
+    Returns merged candle array + event list for all available snapshots of a trade.
+    Candles from multiple snapshots are unioned by timestamp; later snapshot wins on overlap.
+    """
+    if not trade_id:
+        return JSONResponse({"error": "trade_id required"}, status_code=400)
+
+    import snapshot as _snap
+    from datetime import datetime as _dt
+
+    events_found = _snap.list_snapshots(trade_id)
+    if not events_found:
+        return JSONResponse({"error": "no snapshots found"}, status_code=404)
+
+    EVENT_ORDER = ["open", "scale_in", "partial", "close"]
+    candle_map: dict = {}   # t (int ms) → candle dict; later snapshot overwrites earlier
+    loaded: list    = []    # [{event, snap}] in canonical order
+
+    for event in EVENT_ORDER:
+        if event not in events_found:
+            continue
+        snap = _snap.load_snapshot(trade_id, event)
+        if not snap:
+            continue
+        for c in snap["candles"]:
+            candle_map[int(c["t"])] = c
+        loaded.append({"event": event, "snap": snap})
+
+    if not loaded:
+        return JSONResponse({"error": "no snapshots found"}, status_code=404)
+
+    # Build sorted candle list
+    candles = sorted(candle_map.values(), key=lambda c: int(c["t"]))
+    ts_list = [int(c["t"]) for c in candles]
+
+    # Map each event's captured_at to nearest candle index
+    def _nearest_idx(captured_at: str) -> int:
+        ts_ms = int(_dt.fromisoformat(captured_at).timestamp() * 1000)
+        return min(range(len(ts_list)), key=lambda i: abs(ts_list[i] - ts_ms))
+
+    events_out = []
+    first_snap = loaded[0]["snap"]
+    for item in loaded:
+        ev_type = item["event"]
+        snap    = item["snap"]
+        ev: dict = {
+            "type":       ev_type,
+            "candle_idx": _nearest_idx(snap["captured_at"]),
+            "price":      snap["event_price"],
+        }
+        if ev_type == "open":
+            if sl:  ev["sl"] = sl
+            if tp:  ev["tp"] = tp
+        events_out.append(ev)
+
+    return JSONResponse({
+        "symbol":   first_snap["symbol"],
+        "interval": first_snap["interval"],
+        "strategy": strategy,
+        "side":     side,
+        "candles":  candles,
+        "events":   events_out,
+    })
+
+
 @app.get("/api/ig/state")
 def get_ig_state():
     _ET = zoneinfo.ZoneInfo("America/New_York")

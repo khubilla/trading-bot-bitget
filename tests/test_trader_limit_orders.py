@@ -104,6 +104,12 @@ def test_get_order_fill_cancelled(monkeypatch):
     assert result == {"status": "cancelled", "fill_price": 0.0}
 
 
+def test_get_order_fill_new_status_treated_as_live(monkeypatch):
+    monkeypatch.setattr(bc, "get", lambda path, params: {"code": "00000", "data": {"status": "new"}})
+    result = trader.get_order_fill("BTCUSDT", "ORD123")
+    assert result == {"status": "live", "fill_price": 0.0}
+
+
 def test_get_order_fill_raises_on_error(monkeypatch):
     monkeypatch.setattr(bc, "get", lambda path, params: {"code": "50001", "msg": "err"})
     with pytest.raises(RuntimeError):

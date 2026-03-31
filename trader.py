@@ -610,15 +610,14 @@ def cancel_all_orders(symbol: str):
         logger.warning(f"[{symbol}] cancel orders warn: {e}")
 
 
-def place_limit_long(symbol: str, limit_price: float, sl_price: float,
-                     tp_price: float, qty_str: str) -> str:
-    """Place a GTC limit buy order. Returns order_id string."""
+def _place_limit_order(side: str, symbol: str, limit_price: float,
+                       sl_price: float, tp_price: float, qty_str: str) -> str:
     resp = bc.post("/api/v2/mix/order/place-order", {
         "symbol":                symbol,
         "productType":           PRODUCT_TYPE,
         "marginMode":            "isolated",
         "marginCoin":            MARGIN_COIN,
-        "side":                  "buy",
+        "side":                  side,
         "tradeSide":             "open",
         "orderType":             "limit",
         "timeInForceValue":      "gtc",
@@ -630,28 +629,18 @@ def place_limit_long(symbol: str, limit_price: float, sl_price: float,
     if resp.get("code") != "00000":
         raise RuntimeError(f"place_limit order failed: {resp}")
     return str(resp["data"]["orderId"])
+
+
+def place_limit_long(symbol: str, limit_price: float, sl_price: float,
+                     tp_price: float, qty_str: str) -> str:
+    """Place a GTC limit buy order. Returns order_id string."""
+    return _place_limit_order("buy", symbol, limit_price, sl_price, tp_price, qty_str)
 
 
 def place_limit_short(symbol: str, limit_price: float, sl_price: float,
                       tp_price: float, qty_str: str) -> str:
     """Place a GTC limit sell order. Returns order_id string."""
-    resp = bc.post("/api/v2/mix/order/place-order", {
-        "symbol":                symbol,
-        "productType":           PRODUCT_TYPE,
-        "marginMode":            "isolated",
-        "marginCoin":            MARGIN_COIN,
-        "side":                  "sell",
-        "tradeSide":             "open",
-        "orderType":             "limit",
-        "timeInForceValue":      "gtc",
-        "price":                 str(round(limit_price, 8)),
-        "size":                  qty_str,
-        "presetStopLossPrice":   str(round(sl_price, 8)),
-        "presetTakeProfitPrice": str(round(tp_price, 8)),
-    })
-    if resp.get("code") != "00000":
-        raise RuntimeError(f"place_limit order failed: {resp}")
-    return str(resp["data"]["orderId"])
+    return _place_limit_order("sell", symbol, limit_price, sl_price, tp_price, qty_str)
 
 
 def cancel_order(symbol: str, order_id: str) -> None:

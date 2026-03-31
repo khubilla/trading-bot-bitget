@@ -524,6 +524,40 @@ def scale_in_short(symbol: str, additional_trade_size_pct: float, leverage: int)
     logger.info(f"[{symbol}] ➕ Scale-in SHORT qty={qty} @ mark≈{mark:.5f}")
 
 
+def get_history_position(symbol: str) -> dict | None:
+    """
+    Query the most recent closed position from Bitget history-position API.
+    Returns {pnl, exit_price, close_time} or None on error / no record.
+    """
+    try:
+        data = bc.get("/api/v2/mix/position/history-position",
+                      params={"productType": PRODUCT_TYPE, "symbol": symbol, "limit": "1"})
+        records = data.get("data", {}).get("list") or data.get("data", [])
+        if not records:
+            return None
+        r = records[0]
+        pnl = float(r.get("achievedProfits", 0) or 0)
+        if pnl == 0:
+            return None  # API hasn't settled yet
+        close_avg = r.get("closeAvgPrice") or r.get("closeAveragePrice")
+        close_ts  = r.get("closeTime") or r.get("updateTime")
+        close_dt  = None
+        if close_ts:
+            try:
+                from datetime import datetime, timezone
+                close_dt = datetime.fromtimestamp(int(close_ts) / 1000, tz=timezone.utc).isoformat()
+            except Exception:
+                pass
+        return {
+            "pnl":        pnl,
+            "exit_price": float(close_avg) if close_avg else None,
+            "close_time": close_dt,
+        }
+    except Exception as e:
+        logger.warning(f"[{symbol}] get_history_position error: {e}")
+    return None
+
+
 def get_realized_pnl(symbol: str) -> float | None:
     """
     Query the most recent closed position's realized PnL from Bitget.

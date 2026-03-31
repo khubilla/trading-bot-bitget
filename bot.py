@@ -82,6 +82,50 @@ def _log_trade(action: str, details: dict):
         w.writerow(row)
 
 
+def _get_unclosed_csv_positions(csv_path: str) -> dict[str, dict]:
+    """
+    Scan the CSV and return {symbol: enriched_open_row} for every position
+    that has an open (_LONG/_SHORT) row but no matching _CLOSE row.
+    Enriched dict includes partial_logged and partial_pnl from any _PARTIAL row.
+    """
+    if not os.path.exists(csv_path):
+        return {}
+    try:
+        with open(csv_path, newline="") as f:
+            rows = list(csv.DictReader(f))
+        open_by_tid:    dict[str, dict]  = {}
+        closed_tids:    set[str]         = set()
+        partial_by_tid: dict[str, float] = {}
+        for r in rows:
+            action = r.get("action", "")
+            tid    = r.get("trade_id", "")
+            if not tid:
+                continue
+            if any(action.endswith(sfx) for sfx in ("_LONG", "_SHORT")):
+                open_by_tid[tid] = r
+            elif "_CLOSE" in action:
+                closed_tids.add(tid)
+            elif "_PARTIAL" in action:
+                try:
+                    partial_by_tid[tid] = float(r.get("pnl") or 0)
+                except (ValueError, TypeError):
+                    partial_by_tid[tid] = 0.0
+        result: dict[str, dict] = {}
+        for tid, r in open_by_tid.items():
+            if tid in closed_tids:
+                continue
+            sym = r.get("symbol", "")
+            if sym:
+                result[sym] = {
+                    **r,
+                    "partial_logged": tid in partial_by_tid,
+                    "partial_pnl":    partial_by_tid.get(tid, 0.0),
+                }
+        return result
+    except Exception:
+        return {}
+
+
 def _get_open_csv_row(csv_path: str, symbol: str) -> dict | None:
     """Return the most recent open (LONG/SHORT) CSV row for a symbol, or None."""
     if not os.path.exists(csv_path):
@@ -254,6 +298,44 @@ class MTFBot:
                             f"[{ap['strategy']}][{sym}] ⚠️  Startup reconcile: partial detected | "
                             f"qty {initial_qty}→{current_qty} | PnL≈{partial_pnl:+.4f} ({partial_pct:+.1f}%)"
                         )
+
+            # ── Startup close reconciliation ──────────────────────── #
+            # Detect full SL/TP closes that fired while bot was disconnected.
+            # Scan CSV for positions without a CLOSE row, then check exchange.
+            if not PAPER_MODE:
+                unclosed = _get_unclosed_csv_positions(config.TRADE_LOG)
+                for sym, csv_row in unclosed.items():
+                    if sym in existing:
+                        continue  # position still open — handled above
+                    strategy  = csv_row.get("action", "").split("_")[0]
+                    trade_id  = csv_row.get("trade_id", "")
+                    side      = csv_row.get("side", "")
+                    hist      = tr.get_history_position(sym)
+                    if hist is None:
+                        logger.warning(f"[{strategy}][{sym}] ⚠️  Closed while disconnected but history-position unavailable")
+                        continue
+                    total_pnl = hist["pnl"]
+                    exit_p    = hist.get("exit_price")
+                    # Subtract already-logged partial PnL to avoid double-counting
+                    close_pnl = round(total_pnl - csv_row["partial_pnl"], 4)
+                    result    = "WIN" if close_pnl >= 0 else "LOSS"
+                    _log_trade(f"{strategy}_CLOSE", {
+                        "trade_id":    trade_id,
+                        "symbol":      sym,
+                        "side":        side,
+                        "pnl":         close_pnl,
+                        "result":      result,
+                        "exit_reason": "RECONCILED",
+                        "exit_price":  round(exit_p, 8) if exit_p else None,
+                    })
+                    st.clear_position_memory(sym)
+                    logger.warning(
+                        f"[{strategy}][{sym}] ⚠️  Startup reconcile: close detected | "
+                        f"PnL≈{close_pnl:+.4f} | exit≈{exit_p}"
+                    )
+                if unclosed:
+                    # Re-sync stats to include any newly logged closes
+                    _rebuild_stats_from_csv(config.TRADE_LOG)
 
         except Exception as e:
             logger.error(f"Startup sync error: {e}")

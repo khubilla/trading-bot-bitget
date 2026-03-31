@@ -443,10 +443,10 @@ class IGBot:
         tp: float,
     ) -> None:
         """Update per-instrument signal entry and prepend to scan log (capped at 20)."""
-        _ET = zoneinfo.ZoneInfo("America/New_York")
-        now_et = datetime.now(_ET)
+        now_et = datetime.now(ET)
 
-        ema_ok = "Daily EMA flat" not in reason and "S5 disabled" not in reason
+        ema_ok = ("Daily EMA bearish" in reason or "Daily EMA bullish" in reason
+                  or "BOS \u2705" in reason or signal in ("PENDING_LONG", "PENDING_SHORT"))
         bos_ok = "BOS \u2705" in reason or signal in ("PENDING_LONG", "PENDING_SHORT")
         ob_ok  = "OB \u2705"  in reason or signal in ("PENDING_LONG", "PENDING_SHORT")
 

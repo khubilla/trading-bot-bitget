@@ -1706,6 +1706,17 @@ function _drawEntryChart(canvas, opts) {
       ctx.fillText(label, idxToX(i), H - 4);
     }
   });
+
+  // Redraw zone borders on top of candles so they aren't obscured by wicks
+  if (zLow && zHigh) {
+    const isOB2 = !!highlights.ob_low;
+    ctx.strokeStyle = isOB2 ? 'rgba(57,197,207,0.65)' : 'rgba(88,166,255,0.5)';
+    ctx.lineWidth   = 1.5; ctx.setLineDash(isOB2 ? [] : [4,3]);
+    const yH2 = priceToY(zHigh), yL2 = priceToY(zLow);
+    ctx.beginPath(); ctx.moveTo(PAD_L, yH2); ctx.lineTo(W - PAD_R, yH2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(PAD_L, yL2); ctx.lineTo(W - PAD_R, yL2); ctx.stroke();
+    ctx.setLineDash([]);
+  }
 }
 
 function _fmtEntryPrice(p) {

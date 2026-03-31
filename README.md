@@ -4,6 +4,19 @@ Automated trading bot supporting **Bitget USDT-margined crypto futures** and **I
 
 ---
 
+## ⚠️ Risk Disclaimer
+
+**Trading involves substantial risk of loss.** This software is provided for educational and informational purposes only and does NOT constitute financial advice.
+
+- Past performance does not guarantee future results
+- You may lose some or all of your invested capital
+- The creator accepts **no liability** for any financial losses or damages arising from use of this software
+- Use entirely at your own risk
+
+On first run, the bot will display this disclaimer and require you to type `I AGREE` before starting. This acceptance is stored locally and only shown once per installation.
+
+---
+
 ## Exchanges
 
 | Exchange | Instrument | Strategies |
@@ -97,10 +110,9 @@ Multi-timeframe Smart Money Concepts strategy. Long or short depending on market
 | 1D | EMA10 > EMA20 > EMA50 (bullish bias) or reverse (bearish bias) |
 | 1H | Break of Structure — close above most recent 1H swing high pivot (LONG) or below swing low pivot (SHORT) |
 | 15m | Order Block — last opposing candle before a ≥1% impulse of 2+ candles; OB range must be ≥0.5% |
-| 15m | Pullback touches OB zone |
-| 15m | Change of Character (ChoCH) — close back through OB boundary confirms entry |
+| 15m | Pullback touches OB zone — limit order placed immediately at `ob_high` (LONG) or `ob_low` (SHORT) |
 
-**Entry:** 0.5% beyond the OB boundary. When ChoCH fires but price hasn't yet crossed the trigger, the setup is queued as **PENDING** — the entry watcher thread catches the breakout within 3–7 seconds instead of waiting for the next scan cycle.
+**Entry:** GTC limit order placed at the OB boundary (`ob_high` for LONG, `ob_low` for SHORT) the moment the pullback touches the OB zone. The limit fills when price dips through the boundary and returns — providing structural confirmation at a materially better price than a post-ChoCH market order. The order is cancelled if the OB is invalidated (price closes below `ob_low` for LONG) or after 4 hours.
 
 **Exits (standard SMC):** SL trails to the previous completed 15m candle's low (LONG) or high (SHORT) each scan cycle (`S5_USE_CANDLE_STOPS`). 50% partial close at 1:1 R:R → SL moves to breakeven. Remaining 50% targets the nearest structural swing high/low on 15m. Fallback 5% trailing stop if no structural target is found.
 
@@ -153,7 +165,7 @@ BITGET_API_PASSPHRASE=your_passphrase
 | `config_s2.py` | Strategy 2 — big candle detection, coil, trailing stop params |
 | `config_s3.py` | Strategy 3 — EMA alignment, Stochastics, MACD, risk params |
 | `config_s4.py` | Strategy 4 — spike detection, RSI divergence, entry/exit params |
-| `config_s5.py` | Strategy 5 — SMC OB lookback, ChoCH window, R:R minimum, candle stops, risk params |
+| `config_s5.py` | Strategy 5 — SMC OB lookback, OB invalidation buffer, R:R minimum, candle stops, risk params |
 
 Each config has an `S*_ENABLED = True/False` switch to disable a strategy without touching any other code.
 
@@ -278,12 +290,14 @@ The unified dashboard has a **Bitget** tab and an **IG** tab.
 - Trade history: closed trades with PnL, result, and strategy tag
 - Pair scanner tabs: S1 · S2 · S3 · S4 · S5 — each showing signals and setup status per pair; S5 shows OB zone, entry trigger, SL, and structural TP lines on the 15m chart
 - Candlestick chart with RSI and MACD subcharts, entry/SL signal lines
+- Entry chart modal: click any trade to see the exact candle snapshot captured at entry, partial TP, and close events
 
 **IG tab:**
 - Session badge: **In Session** (green, 09:30–12:30 ET weekdays) or **Closed** (red)
 - Bot status badge: Running / Stopped
 - Current open position: side, entry, SL, TP1, final TP, contracts, OB zone, partial-close status
 - Trade history: all closed trades with P/L and exit reason
+- Trade lifecycle chart: click any closed trade to see a combined candle chart across all lifecycle events (entry → partial → close)
 
 ---
 
@@ -361,6 +375,8 @@ Claude suggests changes; you review and apply them manually. All five strategies
 ├── scanner.py          # Pair scanner + market sentiment (Bitget)
 │
 ├── ig_client.py        # IG REST API client
+├── snapshot.py         # Candle snapshot capture/restore at trade lifecycle events
+├── optimize_ig.py      # Claude Sonnet IG strategy parameter optimizer
 │
 ├── dashboard.py        # Live web dashboard (FastAPI) — Bitget + IG tab
 ├── dashboard.html      # Dashboard frontend
@@ -371,6 +387,7 @@ Claude suggests changes; you review and apply them manually. All five strategies
 │
 ├── config.py           # Bitget credentials + bot settings
 ├── config_ig.py        # IG credentials + session hours + sizing
+├── config_ig_s5.py     # Strategy 5 IG-specific overrides (US30 tuning)
 ├── config_s1.py        # Strategy 1 parameters
 ├── config_s2.py        # Strategy 2 parameters
 ├── config_s3.py        # Strategy 3 parameters
@@ -384,7 +401,7 @@ Claude suggests changes; you review and apply them manually. All five strategies
 ├── ig_trades.csv       # IG trade log (live + paper)
 ├── state.json          # Bitget live runtime state
 ├── state_paper.json    # Bitget paper runtime state
-├── ig_state.json       # IG runtime state (current position)
+├── ig_state.json       # IG runtime state (current position + pending_order)
 ├── paper_state.json    # Bitget paper simulation state
 └── bot.log / ig_bot.log
 ```
@@ -414,7 +431,7 @@ Claude suggests changes; you review and apply them manually. All five strategies
 | Column | Description |
 |--------|-------------|
 | `timestamp` | UTC ISO timestamp |
-| `action` | `S5_OPEN`, `S5_PARTIAL`, `S5_CLOSE` |
+| `action` | `S5_LONG`, `S5_SHORT`, `S5_PARTIAL`, `S5_CLOSE` |
 | `side` | `LONG` or `SHORT` |
 | `qty` | Contracts |
 | `entry` / `sl` / `tp` | Prices |

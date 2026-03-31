@@ -885,6 +885,17 @@
     gap: 6px 16px; padding: 14px;
   }
   .ig-pos-item { display: flex; flex-direction: column; gap: 3px; }
+  .ig-scan-log-row {
+    display: flex; gap: 8px; align-items: baseline;
+    padding: 3px 12px; border-bottom: 1px solid var(--border);
+    font-size: 9px;
+  }
+  .ig-scan-log-row:last-child { border-bottom: none; }
+  .ig-log-ts   { color: var(--muted); min-width: 34px; flex-shrink: 0; }
+  .ig-log-inst { min-width: 32px; flex-shrink: 0; font-weight: 600; font-size: 8px; }
+  .ig-log-inst.US30 { color: var(--blue); }
+  .ig-log-inst.Gold { color: var(--amber); }
+  .ig-log-msg  { color: var(--text2); line-height: 1.4; }
 
 </style>
 </head>
@@ -1121,6 +1132,17 @@
     </div>
   </header>
 
+  <!-- Instrument Scanner -->
+  <div class="panel" style="margin-top:8px;">
+    <div class="panel-header">
+      <span class="panel-title">Instrument Scanner</span>
+    </div>
+    <div class="panel-body" style="padding:8px;">
+      <div class="pair-grid" id="ig-scanner-body"></div>
+    </div>
+  </div>
+
+  <!-- Position + Scan Log -->
   <div class="ig-grid">
 
     <!-- Position card -->
@@ -1134,17 +1156,26 @@
       </div>
     </div>
 
-    <!-- Trade History -->
+    <!-- Scan Log -->
     <div class="panel">
       <div class="panel-header">
-        <span class="panel-title">Trade History</span>
-        <span class="panel-sub" id="ig-hist-count" style="font-size:9px; color:var(--muted);"></span>
+        <span class="panel-title">Scan Log</span>
+        <span class="panel-sub" id="ig-log-count" style="font-size:9px; color:var(--muted);"></span>
       </div>
-      <div id="ig-hist-body" class="panel-body" style="padding:0; overflow-y:auto; max-height:420px;">
-        <div style="color:var(--muted); text-align:center; padding:40px 0; font-size:11px;">No trades yet</div>
-      </div>
+      <div id="ig-log-body" class="panel-body" style="padding:0; overflow-y:auto; max-height:260px;"></div>
     </div>
 
+  </div>
+
+  <!-- Trade History -->
+  <div class="panel" style="margin-top:8px;">
+    <div class="panel-header">
+      <span class="panel-title">Trade History</span>
+      <span class="panel-sub" id="ig-hist-count" style="font-size:9px; color:var(--muted);"></span>
+    </div>
+    <div id="ig-hist-body" class="panel-body" style="padding:0; overflow-y:auto; max-height:300px;">
+      <div style="color:var(--muted); text-align:center; padding:40px 0; font-size:11px;">No trades yet</div>
+    </div>
   </div>
 </div>
 
@@ -3381,8 +3412,80 @@ function renderIG(d) {
   bb.className = 'status-badge ' + (d.bot_running ? 'running' : 'stopped');
   bt.textContent = d.bot_running ? 'Running' : 'Stopped';
 
+  renderIGScanner(d.scan_signals || {});
+  renderIGScanLog(d.scan_log || []);
   renderIGPosition(d.position);
   renderIGHistory(d.trade_history);
+}
+
+function renderIGScanner(scanSignals) {
+  const body = $('ig-scanner-body');
+  if (!scanSignals || !Object.keys(scanSignals).length) {
+    body.innerHTML = '<div style="color:var(--muted);font-size:10px;padding:8px 0;">No signal data yet — waiting for first scan…</div>';
+    return;
+  }
+  body.innerHTML = Object.entries(scanSignals).map(([name, ps]) => {
+    const sig = ps.signal || 'HOLD';
+    const badgeSig = sig.startsWith('PENDING') ? 'PENDING' : sig;
+    const cardClass = badgeSig === 'LONG'  ? 'signal-long'
+                    : badgeSig === 'SHORT' ? 'signal-short' : '';
+    const emaOk  = ps.ema_ok;
+    const bosOk  = ps.bos_ok;
+    const obOk   = ps.ob_ok;
+    const limit  = sig.startsWith('PENDING');
+    const obLabel = (ps.ob_low && ps.ob_high)
+      ? `${(+ps.ob_low).toFixed(1)}–${(+ps.ob_high).toFixed(1)} ✓`
+      : (bosOk ? 'Not found' : '—');
+    const reason = (ps.reason || '').replace(/[✅]/g, '✓').slice(0, 80);
+    const age = ps.updated_at
+      ? (() => { const s = Math.floor((Date.now() - new Date(ps.updated_at)) / 1000);
+                 return s < 60 ? s + 's ago' : Math.floor(s/60) + 'm ago'; })()
+      : '';
+    return `<div class="pair-card ${cardClass}">
+      <div class="pair-top">
+        <div class="pair-name">${name}</div>
+        <span class="pair-sig-badge ${badgeSig}">${badgeSig}</span>
+      </div>
+      <div class="pair-checks">
+        <div class="pair-check">
+          <span class="check-label">Daily EMA</span>
+          <span class="check-val ${emaOk ? 'pass' : 'muted'}">${emaOk ? 'Bias ✓' : 'No bias'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">1H BOS</span>
+          <span class="check-val ${!emaOk ? 'muted' : bosOk ? 'pass' : 'muted'}">${!emaOk ? '—' : bosOk ? 'Confirmed ✓' : 'Not broken'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">15m OB</span>
+          <span class="check-val ${!bosOk ? 'muted' : obOk ? 'pass' : 'muted'}">${!bosOk ? '—' : obLabel}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">Limit Order</span>
+          <span class="check-val ${!obOk ? 'muted' : limit ? 'warn' : 'muted'}">${!obOk ? '—' : limit ? 'Watching…' : 'None'}</span>
+        </div>
+      </div>
+      <div class="pair-reason">${reason}${age ? ' · ' + age : ''}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderIGScanLog(scanLog) {
+  const body  = $('ig-log-body');
+  const count = $('ig-log-count');
+  if (!scanLog || !scanLog.length) {
+    if (count) count.textContent = '';
+    body.innerHTML = '<div style="color:var(--muted);text-align:center;padding:24px 0;font-size:10px;">No scan entries yet</div>';
+    return;
+  }
+  if (count) count.textContent = `last ${scanLog.length}`;
+  body.innerHTML = scanLog.map(e => {
+    const inst = (e.instrument || '').replace(/[^A-Za-z0-9]/g, '');
+    return `<div class="ig-scan-log-row">
+      <span class="ig-log-ts">${e.ts || ''}</span>
+      <span class="ig-log-inst ${inst}">${e.instrument || ''}</span>
+      <span class="ig-log-msg">${(e.message || '').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span>
+    </div>`;
+  }).join('');
 }
 
 function renderIGPosition(pos) {

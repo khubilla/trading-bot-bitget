@@ -55,8 +55,10 @@ def _load_csv_history(csv_path: str, limit: int = 50) -> list:
     if not os.path.exists(csv_path):
         return []
 
-    open_rows  = {}   # trade_id → {entry, sl, tp, open_at, side, strategy, symbol, interval}
-    event_rows = {}   # trade_id → [{type, price, ts}, ...]
+    open_rows    = {}   # trade_id → {entry, sl, tp, open_at, side, strategy, symbol, interval}
+    event_rows   = {}   # trade_id → [{type, price, ts}, ...]
+    partial_rows = {}   # trade_id → raw CSV row (for standalone display when no CLOSE exists)
+    closed_tids  = set()  # trade_ids that have a CLOSE row
     rows = []
 
     try:
@@ -108,6 +110,7 @@ def _load_csv_history(csv_path: str, limit: int = 50) -> list:
                     "price": _safe_float(r.get("exit_price")),
                     "ts":    r.get("timestamp", ""),
                 })
+                partial_rows[tid] = r  # keep raw row for possible standalone display
 
         # ── Pass 2: enrich CLOSE rows ────────────────────────────────── #
         for r in all_rows:
@@ -116,6 +119,7 @@ def _load_csv_history(csv_path: str, limit: int = 50) -> list:
                 continue
 
             tid      = r.get("trade_id") or ""
+            closed_tids.add(tid)
             pnl      = _safe_float(r.get("pnl")) or 0.0
             open_row = open_rows.get(tid, {})
 
@@ -147,6 +151,29 @@ def _load_csv_history(csv_path: str, limit: int = 50) -> list:
                     "snap_s5_ob_low", "snap_s5_ob_high", "snap_s5_tp",
                     "snap_sr_clearance_pct",
                 )},
+            })
+
+        # ── Pass 3: emit PARTIAL rows as standalone entries (only when trade still open) ── #
+        for tid, r in partial_rows.items():
+            if tid in closed_tids:
+                continue  # already shown as overlay on the CLOSE row
+            action   = r.get("action") or ""
+            pnl      = _safe_float(r.get("pnl")) or 0.0
+            open_row = open_rows.get(tid, {})
+            rows.append({
+                "symbol":      r.get("symbol") or open_row.get("symbol", ""),
+                "side":        r.get("side") or open_row.get("side", ""),
+                "pnl":         round(pnl, 4),
+                "pnl_pct":     r.get("pnl_pct", ""),
+                "result":      "PARTIAL",
+                "exit_reason": r.get("exit_reason", ""),
+                "strategy":    action.split("_")[0],
+                "closed_at":   r.get("timestamp", ""),
+                "exit_price":  _safe_float(r.get("exit_price")),
+                "entry":       open_row.get("entry"),
+                "open_at":     open_row.get("open_at"),
+                "interval":    open_row.get("interval"),
+                "events":      [],
             })
 
     except Exception:

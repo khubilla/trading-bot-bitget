@@ -1139,6 +1139,18 @@ class MTFBot:
                     updated_pos = tr.get_all_open_positions().get(sym, {})
                     if updated_pos.get("margin"):
                         st.update_open_trade_margin(sym, updated_pos["margin"])
+                else:
+                    # Refresh plan exits (profit_plan + moving_plan) to reflect new total qty.
+                    # SL (place-pos-tpsl) is position-level and auto-scales on Bitget.
+                    try:
+                        import time as _si_t
+                        _si_t.sleep(1.5)  # allow fill to settle
+                        hold_side = "long" if ap["side"] == "LONG" else "short"
+                        if not tr.refresh_plan_exits(sym, hold_side):
+                            logger.warning(f"[{ap['strategy']}][{sym}] ⚠️ Scale-in exits refresh failed — verify plan orders manually")
+                            st.add_scan_log(f"[{ap['strategy']}][{sym}] ⚠️ Scale-in exits refresh failed", "WARN")
+                    except Exception as _ref_e:
+                        logger.warning(f"[{ap['strategy']}][{sym}] ⚠️ Scale-in exits refresh error: {_ref_e}")
                 # Save scale-in snapshot
                 try:
                     interval = _STRATEGY_CANDLE_INTERVAL.get(ap["strategy"], "15m")

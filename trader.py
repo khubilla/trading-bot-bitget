@@ -197,6 +197,81 @@ def _place_tpsl(symbol: str, hold_side: str,
     return False
 
 
+def refresh_plan_exits(symbol: str, hold_side: str) -> bool:
+    """
+    Called after a scale-in to resize profit_plan and moving_plan orders to the
+    current total position qty.  The SL (place-pos-tpsl) is position-level on
+    Bitget and auto-scales — this function only touches plan orders.
+
+    Steps:
+    1. Fetch pending profit_plan + moving_plan for this hold_side.
+    2. Cancel them.
+    3. Read current total position qty from the exchange.
+    4. Re-place both orders at the same trigger prices, split half / rest.
+    """
+    import time as _t
+
+    data    = bc.get("/api/v2/mix/order/plan-orders", {"symbol": symbol, "productType": PRODUCT_TYPE})
+    orders  = (data.get("data") or {}).get("entrustedList", [])
+    targets = [o for o in orders if o.get("holdSide") == hold_side
+               and o.get("planType") in ("profit_plan", "moving_plan")]
+
+    profit = next((o for o in targets if o["planType"] == "profit_plan"), None)
+    moving = next((o for o in targets if o["planType"] == "moving_plan"), None)
+
+    if not profit or not moving:
+        logger.warning(f"[{symbol}] refresh_plan_exits: profit_plan or moving_plan not found — exits unchanged")
+        return False
+
+    trail_trigger = float(profit["triggerPrice"])
+    trail_range   = str(moving.get("rangeRate", "10"))
+
+    for o in [profit, moving]:
+        try:
+            bc.post("/api/v2/mix/order/cancel-plan-order",
+                    {"symbol": symbol, "productType": PRODUCT_TYPE, "orderId": o["orderId"]})
+            _t.sleep(0.3)
+        except Exception as e:
+            logger.warning(f"[{symbol}] cancel plan order {o['orderId']}: {e}")
+
+    _t.sleep(0.5)
+
+    positions        = get_all_open_positions()
+    total_qty_float  = float((positions.get(symbol) or {}).get("qty", 0))
+    if total_qty_float <= 0:
+        logger.error(f"[{symbol}] refresh_plan_exits: position not found after scale-in")
+        return False
+
+    half_qty = _round_qty(total_qty_float / 2, symbol)
+    rest_qty = _round_qty(total_qty_float - float(half_qty), symbol)
+
+    for attempt in range(3):
+        try:
+            bc.post("/api/v2/mix/order/place-tpsl-order", {
+                "symbol": symbol, "productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN,
+                "planType": "profit_plan", "triggerPrice": str(trail_trigger),
+                "triggerType": "mark_price", "executePrice": "0",
+                "holdSide": hold_side, "size": half_qty,
+            })
+            _t.sleep(0.5)
+            bc.post("/api/v2/mix/order/place-tpsl-order", {
+                "symbol": symbol, "productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN,
+                "planType": "moving_plan", "triggerPrice": str(trail_trigger),
+                "triggerType": "mark_price", "holdSide": hold_side,
+                "size": rest_qty, "rangeRate": trail_range,
+            })
+            logger.info(
+                f"[{symbol}] ✅ Plan exits refreshed after scale-in: "
+                f"profit_plan={half_qty}@{trail_trigger}, moving_plan={rest_qty}"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"[{symbol}] refresh_plan_exits attempt {attempt+1}/3: {e}")
+            if attempt < 2:
+                _t.sleep(1.5)
+    return False
+
+
 def _place_s2_exits(symbol: str, hold_side: str, qty_str: str,
                     sl_trig: float, sl_exec: float,
                     trail_trigger: float, trail_range: float) -> bool:
@@ -207,7 +282,8 @@ def _place_s2_exits(symbol: str, hold_side: str, qty_str: str,
     3. Trailing stop on remaining 50% (place-plan-order moving_plan)
     """
     import time as _t
-    half_qty   = str(round(float(qty_str) / 2, 4))
+    half_qty = _round_qty(float(qty_str) / 2, symbol)
+    rest_qty = _round_qty(float(qty_str) - float(half_qty), symbol)
 
     for attempt in range(3):
         try:
@@ -237,7 +313,7 @@ def _place_s2_exits(symbol: str, hold_side: str, qty_str: str,
             })
             _t.sleep(0.5)
 
-            # 3. Trailing stop on remaining 50%
+            # 3. Trailing stop on remaining position
             bc.post("/api/v2/mix/order/place-tpsl-order", {
                 "symbol":       symbol,
                 "productType":  PRODUCT_TYPE,
@@ -246,7 +322,7 @@ def _place_s2_exits(symbol: str, hold_side: str, qty_str: str,
                 "triggerPrice": str(trail_trigger),
                 "triggerType":  "mark_price",
                 "holdSide":     hold_side,
-                "size":         half_qty,
+                "size":         rest_qty,
                 "rangeRate":    str(round(trail_range, 4)),  # API expects pct string: 10% → "10"
             })
             return True
@@ -268,7 +344,8 @@ def _place_s5_exits(symbol: str, hold_side: str, qty_str: str,
        Falls back to trailing stop if tp_target is 0
     """
     import time as _t
-    half_qty = str(round(float(qty_str) / 2, 4))
+    half_qty = _round_qty(float(qty_str) / 2, symbol)
+    rest_qty = _round_qty(float(qty_str) - float(half_qty), symbol)
 
     for attempt in range(3):
         try:
@@ -309,10 +386,10 @@ def _place_s5_exits(symbol: str, hold_side: str, qty_str: str,
                     "triggerType":  "mark_price",
                     "executePrice": "0",
                     "holdSide":     hold_side,
-                    "size":         half_qty,
+                    "size":         rest_qty,
                 })
             else:
-                # Fallback: trailing stop on remaining 50%
+                # Fallback: trailing stop on remaining position
                 bc.post("/api/v2/mix/order/place-tpsl-order", {
                     "symbol":       symbol,
                     "productType":  PRODUCT_TYPE,
@@ -321,7 +398,7 @@ def _place_s5_exits(symbol: str, hold_side: str, qty_str: str,
                     "triggerPrice": str(partial_trig),
                     "triggerType":  "mark_price",
                     "holdSide":     hold_side,
-                    "size":         half_qty,
+                    "size":         rest_qty,
                     "rangeRate":    str(round(trail_range_pct / 100, 4)),
                 })
             return True
@@ -387,10 +464,9 @@ def open_long(
     elif use_s2_exits:
         from config_s2 import S2_TRAILING_TRIGGER_PCT, S2_TRAILING_RANGE_PCT
         trail_trig = float(_round_price(mark * (1 + S2_TRAILING_TRIGGER_PCT), symbol))
-        if sl_floor > 0:
-            sl_trig = float(_round_price(sl_floor, symbol))
-        else:
-            sl_trig = float(_round_price(box_low * 0.999, symbol))
+        raw_sl = sl_floor if sl_floor > 0 else box_low * 0.999
+        sl_cap = mark * (1 - stop_loss_pct)   # cap: never risk more than stop_loss_pct (e.g. 5% = -50% at 10x)
+        sl_trig = float(_round_price(max(raw_sl, sl_cap), symbol))
         sl_exec = float(_round_price(sl_trig * 0.995, symbol))
         ok = _place_s2_exits(symbol, "long", qty,
                              sl_trig, sl_exec,

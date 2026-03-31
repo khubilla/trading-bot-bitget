@@ -250,7 +250,7 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
         import trader as tr
         import config
         import config_s1
-        from strategy import detect_consolidation, calculate_rsi, evaluate_s2, evaluate_s4, find_nearest_resistance, find_nearest_support, find_spike_base
+        from strategy import detect_consolidation, calculate_rsi, evaluate_s2, evaluate_s4, find_nearest_resistance, find_nearest_support
 
         # Fetch extra candles for indicator warmup (EMA/ADX need history to converge)
         # Then trim to display_limit for the chart
@@ -421,11 +421,19 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
                     s4_rsi_peak_val = round(rsi_pk, 1)
             except Exception:
                 pass
-            # Pre-pump base: high of most recent spike candle below current price
+            # Pre-pump base support: open of the biggest spike candle in lookback
             try:
-                base = find_spike_base(df_full, price_ceiling=sample_price)
-                if base:
-                    s4_base_support = round(base, max(2, price_decimals))
+                from config_s4 import S4_BIG_CANDLE_BODY_PCT, S4_BIG_CANDLE_LOOKBACK
+                lookback_df = df_full.iloc[-(S4_BIG_CANDLE_LOOKBACK + 1):-1]
+                best_bp, best_open = 0.0, None
+                for _, row in lookback_df.iterrows():
+                    o, c = float(row["open"]), float(row["close"])
+                    bp = abs(c - o) / o if o else 0
+                    if bp >= S4_BIG_CANDLE_BODY_PCT and bp > best_bp:
+                        best_bp  = bp
+                        best_open = o
+                if best_open:
+                    s4_base_support = round(best_open, max(2, price_decimals))
             except Exception:
                 pass
 

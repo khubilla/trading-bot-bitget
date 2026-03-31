@@ -42,14 +42,14 @@ def test_list_snapshots(tmp_path, monkeypatch):
     import snapshot
     monkeypatch.setattr(snapshot, "_SNAP_DIR", tmp_path)
 
-    for event in ("open", "partial", "close"):
+    for event in ("open", "scale_in", "partial", "close"):
         snapshot.save_snapshot(
             trade_id="tid1", event=event, symbol="BTCUSDT",
             interval="15m", candles=FAKE_CANDLES, event_price=42000.0,
         )
 
     snaps = snapshot.list_snapshots("tid1")
-    assert set(snaps) == {"open", "partial", "close"}
+    assert set(snaps) == {"open", "scale_in", "partial", "close"}
 
 
 def test_save_overwrites_existing(tmp_path, monkeypatch):

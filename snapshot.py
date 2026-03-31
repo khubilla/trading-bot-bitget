@@ -56,7 +56,7 @@ def save_snapshot(
         "candles":     candles,
     }
     path = _SNAP_DIR / f"{trade_id}_{event}.json"
-    path.write_text(json.dumps(payload, separators=(",", ":")))
+    path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
     logger.debug(f"[snapshot] saved {path.name} ({len(candles)} candles)")
 
 
@@ -66,7 +66,7 @@ def load_snapshot(trade_id: str, event: str) -> dict | None:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
         logger.warning(f"[snapshot] failed to read {path.name}: {e}")
         return None
@@ -76,8 +76,8 @@ def list_snapshots(trade_id: str) -> list[str]:
     """Return list of event names that have saved snapshots for this trade_id."""
     if not _SNAP_DIR.exists():
         return []
-    return [
+    return sorted(
         p.stem.split("_", 1)[1]
         for p in _SNAP_DIR.glob(f"{trade_id}_*.json")
         if "_" in p.stem
-    ]
+    )

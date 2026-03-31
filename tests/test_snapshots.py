@@ -200,3 +200,49 @@ def test_startup_reconcile_partial_saves_snapshot(tmp_path, monkeypatch):
     assert result["interval"] == "15m"
     assert result["event_price"] == 17.332
     assert len(result["candles"]) == 50
+
+
+def test_entry_chart_uses_snapshot_when_available(tmp_path, monkeypatch):
+    """
+    /api/entry-chart must return snapshot candles without hitting the exchange
+    when a snapshot file exists for the given trade_id.
+    """
+    import snapshot
+    from fastapi.testclient import TestClient
+    import dashboard
+
+    monkeypatch.setattr(snapshot, "_SNAP_DIR", tmp_path)
+
+    # Save a snapshot with known candles
+    candles = [
+        {"t": 1743296100000 + i * 900_000,
+         "o": 15.71, "h": 15.82, "l": 15.68, "c": 15.80, "v": 100.0}
+        for i in range(25)
+    ]
+    snapshot.save_snapshot(
+        trade_id="snap01", event="open",
+        symbol="RIVERUSDT", interval="15m",
+        candles=candles, event_price=15.756,
+        captured_at="2026-03-30T18:21:18+00:00",
+    )
+
+    # Ensure bc.get_public is NOT called
+    exchange_called = []
+    import bitget_client as bc
+    monkeypatch.setattr(bc, "get_public", lambda *a, **kw: exchange_called.append(1) or {"data": []})
+
+    client = TestClient(dashboard.app)
+    resp = client.get("/api/entry-chart", params={
+        "symbol": "RIVERUSDT",
+        "open_at": "2026-03-30T18:21:18+00:00",
+        "strategy": "S3",
+        "entry": 15.756,
+        "trade_id": "snap01",
+    })
+
+    assert resp.status_code == 200, f"status: {resp.status_code}, body: {resp.text}"
+    data = resp.json()
+    assert "candles" in data, f"missing candles key: {data}"
+    assert len(data["candles"]) > 0
+    assert data.get("from_snapshot") is True, "should be from snapshot"
+    assert exchange_called == [], f"exchange must NOT be called when snapshot exists, was called {len(exchange_called)} times"

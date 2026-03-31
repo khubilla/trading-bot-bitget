@@ -121,6 +121,8 @@ def _load_csv_history(csv_path: str, limit: int = 50) -> list:
             tid      = r.get("trade_id") or ""
             closed_tids.add(tid)
             pnl      = _safe_float(r.get("pnl")) or 0.0
+            partial_pnl = _safe_float((partial_rows.get(tid) or {}).get("pnl")) or 0.0
+            pnl     += partial_pnl
             open_row = open_rows.get(tid, {})
 
             rows.append({
@@ -630,6 +632,7 @@ def get_entry_chart(
     box_high:           str   = "",
     snap_s5_ob_low:     str   = "",
     snap_s5_ob_high:    str   = "",
+    trade_id:           str   = "",
 ):
     """
     Returns 25 candles centred around entry (20 before + 5 after) plus
@@ -647,8 +650,37 @@ def get_entry_chart(
 
         # Parse open_at ISO → ms
         open_ts_ms = int(datetime.fromisoformat(open_at).timestamp() * 1000)
-        end_ts_ms  = open_ts_ms + 10 * interval_ms
 
+        # ── Snapshot fast-path ────────────────────────────────────── #
+        if trade_id:
+            import snapshot as _snap
+            snap = _snap.load_snapshot(trade_id, "open")
+            if snap:
+                _df = pd.DataFrame(snap["candles"])
+                _df = _df.rename(columns={"t": "ts"})
+                interval_ms = {"3m": 180_000, "15m": 900_000, "1D": 86_400_000}.get(snap["interval"], 900_000)
+                entry_idx = len(_df) - 1
+                for i, row in _df.iterrows():
+                    if int(row["ts"]) >= open_ts_ms:
+                        entry_idx = i
+                        break
+                start = max(0, entry_idx - 20)
+                end   = min(len(_df), entry_idx + 5)
+                view  = _df.iloc[start:end].reset_index(drop=True)
+                candles_out = [
+                    {"t": int(r["ts"]), "o": r["o"], "h": r["h"],
+                     "l": r["l"],  "c": r["c"], "v": r["v"]}
+                    for _, r in view.iterrows()
+                ]
+                entry_ts = int(_df.iloc[entry_idx]["ts"])
+                return JSONResponse({
+                    "candles":      candles_out,
+                    "entry_ts":     entry_ts,
+                    "highlights":   {},
+                    "from_snapshot": True,
+                })
+
+        end_ts_ms  = open_ts_ms + 10 * interval_ms
         fetch_limit = 300 if interval != "1D" else 60
         granularity = "1Dutc" if interval == "1D" else interval
 

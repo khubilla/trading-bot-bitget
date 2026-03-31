@@ -251,23 +251,35 @@ class MTFBot:
             if existing:
                 st.add_scan_log(f"Resumed {len(existing)} position(s)", "WARN")
 
-            # ── Startup partial reconciliation ────────────────────── #
-            # Detect partial TPs that fired while bot was disconnected.
-            # Covers both cases: initial_qty already in position_memory,
-            # and the edge case where bot disconnected before first tick
-            # (initial_qty recovered from CSV open row instead).
+            # ── Startup partial + close reconciliation ────────────── #
+            # Read CSV once; used by both passes below.
+            if not PAPER_MODE:
+                unclosed = _get_unclosed_csv_positions(config.TRADE_LOG)
+
+            # Pass A — partial TPs that fired while bot was disconnected.
+            # Guards (in priority order):
+            #   1. position_memory already has partial_logged=True
+            #   2. CSV already has a _PARTIAL row for this trade_id
+            #      (covers manually-added rows that never went through bot code)
             if not PAPER_MODE:
                 for sym, ap in list(self.active_positions.items()):
                     if ap.get("strategy") not in ("S2", "S3", "S4", "S5"):
                         continue
                     if ap.get("partial_logged"):
                         continue
+                    # If CSV already has a partial row, sync the flag and skip
+                    csv_data = unclosed.get(sym, {})
+                    if csv_data.get("partial_logged"):
+                        ap["partial_logged"] = True
+                        st.update_position_memory(sym, partial_logged=True)
+                        continue
                     pos         = existing.get(sym, {})
                     current_qty = float(pos.get("qty", 0))
                     initial_qty = ap.get("initial_qty")
-                    csv_open    = None
+                    csv_open    = csv_data if csv_data else None
                     if not initial_qty:
-                        csv_open    = _get_open_csv_row(config.TRADE_LOG, sym)
+                        if not csv_open:
+                            csv_open = _get_open_csv_row(config.TRADE_LOG, sym)
                         initial_qty = float(csv_open["qty"]) if csv_open and csv_open.get("qty") else None
                         if initial_qty:
                             ap["initial_qty"] = initial_qty
@@ -275,13 +287,10 @@ class MTFBot:
                     if not initial_qty or current_qty <= 0:
                         continue
                     if current_qty < initial_qty * 0.75:
-                        if csv_open is None:
-                            csv_open = _get_open_csv_row(config.TRADE_LOG, sym)
                         entry_p  = float(pos.get("entry_price", 0))
                         side     = ap["side"]
                         lev      = float(pos.get("leverage") or 10)
                         trade_id = (csv_open or {}).get("trade_id", ap.get("trade_id", ""))
-                        # Use the stored TP as exit price (where profit_plan was placed)
                         tp_str   = (csv_open or {}).get("tp") or pos.get("tp")
                         try:
                             exit_p = float(tp_str) if tp_str and tp_str not in ("?", "") else tr.get_mark_price(sym)
@@ -307,11 +316,8 @@ class MTFBot:
                             f"qty {initial_qty}→{current_qty} | PnL≈{partial_pnl:+.4f} ({partial_pct:+.1f}%)"
                         )
 
-            # ── Startup close reconciliation ──────────────────────── #
-            # Detect full SL/TP closes that fired while bot was disconnected.
-            # Scan CSV for positions without a CLOSE row, then check exchange.
+            # Pass B — full SL/TP closes that fired while bot was disconnected.
             if not PAPER_MODE:
-                unclosed = _get_unclosed_csv_positions(config.TRADE_LOG)
                 for sym, csv_row in unclosed.items():
                     if sym in existing:
                         continue  # position still open — handled above

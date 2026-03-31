@@ -657,7 +657,75 @@ grep -n "ig_state.json" dashboard.py
 
 ## 6. Function Call Graph
 
-[To be populated in Task 6]
+### 6.1 trader.py — Exit Order Functions
+
+These functions place and manage exit orders on Bitget. All are called from `bot.py` only (not `ig_bot.py`).
+
+#### `_place_s2_exits(symbol, hold_side, qty_str, sl_trig, sl_exec, trail_trigger, trail_range)`
+Places 3 exit orders for S2 (LONG) and S4 (SHORT) strategies:
+1. `place-pos-tpsl` — position-level SL (full position, auto-scales with size changes)
+2. `place-tpsl-order profit_plan` — partial TP at `trail_trigger` for `half_qty`
+3. `place-tpsl-order moving_plan` — trailing stop at `trail_trigger` for `rest_qty`
+
+**Called from:** `open_long` (S2/S3 path), `open_short` (S4 path)
+
+**Key behaviour:**
+- `half_qty = _round_qty(qty / 2, symbol)` — respects `volume_place` (e.g. integer-only symbols like STOUSDT)
+- `rest_qty = _round_qty(qty - half, symbol)` — covers true remainder (not a duplicate half)
+- Returns `False` if all 3 retry attempts fail → `tpsl_set=False` in CSV row
+
+**Breaking change:** Changing the `size` format or plan types breaks live exit execution for S2/S4 trades.
+
+---
+
+#### `_place_s5_exits(symbol, hold_side, qty_str, sl_trig, sl_exec, partial_trig, tp_target, trail_range_pct)`
+Places 3 exit orders for S5 strategy:
+1. `place-pos-tpsl` — position-level SL
+2. `place-tpsl-order profit_plan` — partial TP at 1:1 R:R for `half_qty`
+3. If `tp_target > 0`: hard TP for `rest_qty`; else: `moving_plan` trailing stop for `rest_qty`
+
+**Called from:** `open_long` (S5 path), `open_short` (S5 path), `bot.py` directly for live S5 limit fills
+
+**Same qty splitting rules as `_place_s2_exits`.**
+
+---
+
+#### `open_long(symbol, box_low, sl_floor, leverage, trade_size_pct, take_profit_pct, stop_loss_pct, use_s2_exits, use_s5_exits, tp_price_abs)`
+Opens a LONG market order then places exits based on the `use_*_exits` flag.
+
+**SL cap (S2 path):** `sl_trig = max(box_low * 0.999, mark * (1 - stop_loss_pct))` — prevents box_low from being so far below entry that the SL exceeds the intended max loss (e.g. `-50%` at 10x for `S2_STOP_LOSS_PCT=0.05`).
+
+**Returns:** dict with `{symbol, side, qty, entry, sl, tp, box_low, leverage, margin, tpsl_set}` — `entry` is mark price at function call time, **not** actual fill price.
+
+**Called from:** `bot.py` — `_execute_s2`, `_execute_s3`, `_execute_s5` (paper path)
+
+---
+
+#### `scale_in_long(symbol, additional_trade_size_pct, leverage)` / `scale_in_short(...)`
+Places a market order to add to an existing position. Does **not** update exit orders.
+
+**Called from:** `bot.py` — `_do_scale_in` (S2 uses `scale_in_long`, S4 uses `scale_in_short`)
+
+**Note:** After scale-in, `_do_scale_in` calls `refresh_plan_exits()` to update plan orders. The position-level SL (`place-pos-tpsl`) auto-scales on Bitget and is not touched.
+
+---
+
+#### `refresh_plan_exits(symbol, hold_side) → bool`
+After scale-in, resizes `profit_plan` and `moving_plan` orders to the current total position qty.
+
+**Steps:**
+1. Fetch pending `profit_plan` + `moving_plan` for `hold_side` via `GET /api/v2/mix/order/plan-orders`
+2. Cancel both via `POST /api/v2/mix/order/cancel-plan-order`
+3. Read current total qty via `get_all_open_positions()`
+4. Re-place both at the same trigger prices, split with `_round_qty`
+
+**Does NOT touch:** Position-level SL (`place-pos-tpsl`) — it auto-scales.
+
+**Returns `False` if:** existing orders not found, position not found after scale-in, or all 3 placement retries fail.
+
+**Called from:** `bot.py` — `_do_scale_in` (real mode only, after 1.5s settle delay, in isolated try/except)
+
+**Breaking change:** Changing `profit_plan`/`moving_plan` plan types or `orderId` field name breaks cancellation.
 
 ---
 

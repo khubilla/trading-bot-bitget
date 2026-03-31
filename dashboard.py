@@ -11,6 +11,7 @@ from pathlib import Path
 from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 import os as _os
@@ -23,6 +24,13 @@ IG_STATE_FILE  = str(_DATA_DIR / "ig_state.json")
 IG_TRADES_FILE = str(_DATA_DIR / "ig_trades.csv")
 PORT       = int(_os.environ.get("PORT", 8081 if PAPER_MODE else 8080))
 app = FastAPI(title="MTF Bot Dashboard" + (" [PAPER]" if PAPER_MODE else ""))
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 # Middleware to validate symbols before Starlette's router rejects path traversal attempts
 @app.middleware("http")

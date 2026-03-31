@@ -567,8 +567,12 @@ class IGBot:
         deal_id = self.pending_order["deal_id"]
         side    = self.pending_order["side"]
 
-        status_info = ig.get_working_order_status(deal_id)
-        status      = status_info["status"]
+        try:
+            status_info = ig.get_working_order_status(deal_id)
+            status = status_info["status"]
+        except Exception as e:
+            logger.warning(f"[S5] _check_pending_order: status check failed ({e}), retrying next tick")
+            return True
 
         if status == "filled":
             fill_price = status_info["fill_price"] or self.pending_order["trigger"]
@@ -842,13 +846,30 @@ class IGBot:
     def _session_end_close(self) -> None:
         # Cancel any pending working order first
         if self.pending_order is not None:
+            pending_deal_id = self.pending_order["deal_id"]
             try:
-                ig.cancel_working_order(self.pending_order["deal_id"])
-                logger.info(f"[SESSION END] Cancelled pending limit order {self.pending_order['deal_id']}")
+                ig.cancel_working_order(pending_deal_id)
+                logger.info(f"[SESSION END] Cancelled pending limit order {pending_deal_id}")
             except Exception as e:
                 logger.warning(f"[SESSION END] Failed to cancel pending order: {e}")
-            self.pending_order = None
-            self._save_state()
+            # Check if the order filled despite the cancel attempt
+            try:
+                status_info = ig.get_working_order_status(pending_deal_id)
+                if status_info["status"] == "filled":
+                    fill_price = status_info["fill_price"] or self.pending_order["trigger"]
+                    logger.info(
+                        f"[SESSION END] order filled during cancel, "
+                        f"closing position at fill_price={fill_price}"
+                    )
+                    self._handle_pending_filled(fill_price)
+                    # Don't clear pending_order here — let the position close block below handle it
+                else:
+                    self.pending_order = None
+                    self._save_state()
+            except Exception as e:
+                logger.warning(f"[SESSION END] could not verify cancel status: {e}")
+                self.pending_order = None
+                self._save_state()
 
         if self.position is None:
             return
@@ -889,6 +910,7 @@ class IGBot:
             f"[SESSION END] {result} | PnL={realized:+.2f}"
         )
         self.position = None
+        self.pending_order = None
         if not self.paper:
             self._clear_state()
 

@@ -266,7 +266,55 @@ def test_session_end_cancels_pending_order(monkeypatch):
     assert bot.pending_order is None
 
 
-# ── 9. test_pending_order_persisted_in_state ──────────────────────── #
+# ── 9. test_session_end_order_fills_during_cancel ─────────────────── #
+
+def test_session_end_order_fills_during_cancel(monkeypatch):
+    """If cancel attempt coincides with a fill, position is set and then closed."""
+    bot = _make_bot(monkeypatch)
+    bot.pending_order = _pending_order()
+    bot.position = None
+
+    # cancel_working_order succeeds (no raise)
+    cancelled = []
+    monkeypatch.setattr(ig, "cancel_working_order",
+                        lambda deal_id: cancelled.append(deal_id))
+
+    # get_working_order_status reports the order filled during the cancel window
+    monkeypatch.setattr(ig, "get_working_order_status",
+                        lambda deal_id: {"status": "filled", "fill_price": 40505.0})
+
+    # For the position close path, provide a valid mark price
+    monkeypatch.setattr(ig, "get_mark_price", lambda epic: 40505.0)
+
+    bot._session_end_close()
+
+    # cancel was attempted
+    assert len(cancelled) == 1
+    assert cancelled[0] == "DEAL_PENDING_001"
+    # position was created by _handle_pending_filled and then closed by session-end logic
+    assert bot.position is None
+    # pending_order was cleared
+    assert bot.pending_order is None
+
+
+# ── 10. test_check_pending_status_exception_retries ──────────────────── #
+
+def test_check_pending_status_exception_retries(monkeypatch):
+    """When get_working_order_status raises, _check_pending_order returns True (retry next tick)."""
+    bot = _make_bot(monkeypatch)
+    bot.pending_order = _pending_order()
+
+    monkeypatch.setattr(ig, "get_working_order_status",
+                        lambda deal_id: (_ for _ in ()).throw(RuntimeError("network error")))
+
+    result = bot._check_pending_order(40300.0)
+
+    assert result is True
+    # pending_order should NOT be cleared — we retry next tick
+    assert bot.pending_order is not None
+
+
+# ── 11. test_pending_order_persisted_in_state ──────────────────────── #
 
 def test_pending_order_persisted_in_state(monkeypatch):
     """pending_order round-trips through _save_state and _sync_live_position (load)."""

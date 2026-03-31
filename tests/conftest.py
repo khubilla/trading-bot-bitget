@@ -130,7 +130,7 @@ def live_server_url(tmp_path_factory):
     import os as _os
     _os.environ["DASHBOARD_API_KEY"] = "test-token"
 
-    config = uvicorn.Config(dashboard.app, host="127.0.0.1", port=8099, log_level="error")
+    config = uvicorn.Config(dashboard.app, host="127.0.0.1", port=8099, log_level="error", server_header=False)
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()

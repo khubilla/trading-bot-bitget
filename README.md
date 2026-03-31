@@ -208,7 +208,7 @@ IG_ACCOUNT_ID=     # optional — leave blank to auto-select
 | File | Purpose |
 |------|---------|
 | `config_ig.py` | Session hours (ET), contract sizing, poll interval, file paths |
-| `config_s5.py` | Shared S5 strategy parameters (OB lookback, ChoCH window, R:R minimum) |
+| `config_ig_s5.py` | S5 strategy parameters — US30-tuned overrides (OB lookback, OB invalidation buffer, R:R minimum, candle stops) |
 
 ---
 

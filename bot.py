@@ -154,11 +154,18 @@ class MTFBot:
             existing = tr.get_all_open_positions()
             for sym, pos in existing.items():
                 strategy = pos.get("strategy", "UNKNOWN")
-                self.active_positions[sym] = {
+                _pmem = st.get_position_memory(sym)
+                _resumed_ap: dict = {
                     "side": pos["side"], "strategy": strategy,
                     "box_high": 0.0, "box_low": 0.0,
                 }
-                logger.warning(f"⚠️  Resumed: {sym} {pos['side']} qty={pos['qty']} [{strategy}]")
+                if _pmem.get("initial_qty"):
+                    _resumed_ap["initial_qty"] = _pmem["initial_qty"]
+                if _pmem.get("partial_logged"):
+                    _resumed_ap["partial_logged"] = _pmem["partial_logged"]
+                self.active_positions[sym] = _resumed_ap
+                logger.warning(f"⚠️  Resumed: {sym} {pos['side']} qty={pos['qty']} [{strategy}]"
+                               + (f" | initial_qty={_pmem['initial_qty']}" if _pmem.get("initial_qty") else ""))
                 st.add_open_trade({
                     "symbol":    sym,
                     "side":      pos["side"],
@@ -275,6 +282,7 @@ class MTFBot:
                     if not PAPER_MODE and ap.get("strategy") in ("S2", "S3", "S4", "S5"):
                         if "initial_qty" not in ap:
                             ap["initial_qty"] = float(pos["qty"])
+                            st.update_position_memory(sym, initial_qty=float(pos["qty"]))
                         elif (not ap.get("partial_logged") and
                               float(pos["qty"]) < ap["initial_qty"] * 0.75):
                             # Qty dropped below 75% of original → partial TP fired
@@ -290,6 +298,7 @@ class MTFBot:
                             partial_pct = round(price_chg * ap.get("leverage", 10) * 100, 2)
                             ap["partial_logged"] = True
                             ap["partial_pnl"]    = round(partial_pnl, 4)
+                            st.update_position_memory(sym, partial_logged=True)
                             _log_trade(f"{ap['strategy']}_PARTIAL", {
                                 "trade_id": ap.get("trade_id", ""),
                                 "symbol": sym, "side": side,
@@ -476,6 +485,7 @@ class MTFBot:
                         "pnl_pct": pnl_pct, "exit_reason": exit_reason,
                         "exit_price": _exit_price,
                     })
+                    st.clear_position_memory(sym)
                     del self.active_positions[sym]
 
         # ── 4. Check if we can open more trades ───────────────────── #

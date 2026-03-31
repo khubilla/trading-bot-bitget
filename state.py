@@ -26,6 +26,7 @@ _default: dict = {
     "scan_log":        [],
     "qualified_pairs": [],
     "pair_states":     {},
+    "position_memory": {},   # survives reset(): {symbol: {initial_qty, partial_logged}}
     "sentiment": {
         "direction":      "NEUTRAL",
         "bullish_weight": 0.5,
@@ -69,11 +70,12 @@ def _write(s: dict):
 # ── Public API ────────────────────────────────────────────────────── #
 
 def reset():
-    """Reset runtime state but preserve trade_history and stats across restarts."""
+    """Reset runtime state but preserve trade_history, stats, and position_memory across restarts."""
     s = _read()
     fresh = dict(_default)
-    fresh["trade_history"] = s.get("trade_history", [])
-    fresh["stats"]         = s.get("stats", dict(_default["stats"]))
+    fresh["trade_history"]   = s.get("trade_history", [])
+    fresh["stats"]           = s.get("stats", dict(_default["stats"]))
+    fresh["position_memory"] = s.get("position_memory", {})
     _write(fresh)
 
 def set_status(status: str):
@@ -218,4 +220,20 @@ def add_scan_log(msg: str, level: str = "INFO"):
     s = _read()
     s["scan_log"].insert(0, {"time": _now(), "level": level, "msg": msg})
     s["scan_log"] = s["scan_log"][:100]
+    _write(s)
+
+def get_position_memory(symbol: str) -> dict:
+    """Return persisted {initial_qty, partial_logged} for a symbol, or {} if none."""
+    return _read().get("position_memory", {}).get(symbol, {})
+
+def update_position_memory(symbol: str, **kwargs):
+    """Persist partial-detection state for a symbol so it survives restarts."""
+    s = _read()
+    s.setdefault("position_memory", {}).setdefault(symbol, {}).update(kwargs)
+    _write(s)
+
+def clear_position_memory(symbol: str):
+    """Remove position memory for a symbol when the trade fully closes."""
+    s = _read()
+    s.get("position_memory", {}).pop(symbol, None)
     _write(s)

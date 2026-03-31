@@ -66,7 +66,7 @@ def live_server_url(tmp_path_factory):
       - dashboard.IG_STATE_FILE  → tmp ig_state.json
       - trader.get_candles       → returns mock DataFrame
       - claude_analyst.stream_response      → yields one token then stops
-      - claude_analyst.build_system_prompt  → returns empty string
+      - claude_analyst.build_system_prompt  → returns "mock prompt"
     """
     import uvicorn
     import dashboard

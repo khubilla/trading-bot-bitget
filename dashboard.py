@@ -616,9 +616,8 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
             "sr_support":       round(sr_support,    max(2, price_decimals)) if sr_support    else None,
         })
 
-    except Exception as e:
-        import traceback
-        return JSONResponse({"error": str(e), "trace": traceback.format_exc()})
+    except Exception:
+        return JSONResponse({"error": "internal server error"}, status_code=500)
 
 
 @app.get("/api/entry-chart")

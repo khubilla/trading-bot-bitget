@@ -421,6 +421,86 @@ def close_position(deal_id: str, size: float, direction: str) -> bool:
     return partial_close(deal_id, size, direction)
 
 
+# ── Working / limit orders ───────────────────────────────────────── #
+
+def _place_working_order(epic: str, direction: str, limit_price: float,
+                         sl_price: float, tp_price: float, size: float) -> str:
+    """
+    POST /workingorders/otc to create a GTC LIMIT working order.
+    Returns the deal_id string.
+    """
+    body = {
+        "epic":          epic,
+        "direction":     direction,
+        "size":          size,
+        "level":         limit_price,
+        "type":          "LIMIT",
+        "timeInForce":   "GOOD_TILL_CANCELLED",
+        "stopLevel":     sl_price,
+        "limitLevel":    tp_price,
+        "currencyCode":  config_ig.CURRENCY,
+        "expiry":        "-",
+    }
+    try:
+        resp = _get_session().post("/workingorders/otc", body=body, version="2")
+    except Exception as e:
+        raise RuntimeError(f"place_working_order failed: {e}") from e
+
+    deal_ref = resp.get("dealReference", "")
+    confirm  = _poll_confirm(deal_ref)
+    return confirm.get("dealId", "")
+
+
+def place_limit_long(epic: str, limit_price: float, sl_price: float,
+                     tp_price: float, size: float) -> str:
+    """Place a GTC limit buy working order. Returns deal_id string."""
+    return _place_working_order(epic, "BUY", limit_price, sl_price, tp_price, size)
+
+
+def place_limit_short(epic: str, limit_price: float, sl_price: float,
+                      tp_price: float, size: float) -> str:
+    """Place a GTC limit sell working order. Returns deal_id string."""
+    return _place_working_order(epic, "SELL", limit_price, sl_price, tp_price, size)
+
+
+def cancel_working_order(deal_id: str) -> None:
+    """Cancel a working order by deal_id."""
+    try:
+        _get_session().delete(f"/workingorders/otc/{deal_id}", version="2")
+    except Exception as e:
+        raise RuntimeError(f"cancel_working_order({deal_id}) failed: {e}") from e
+
+
+def get_working_order_status(deal_id: str) -> dict:
+    """
+    Returns {"status": "open"|"filled"|"deleted", "fill_price": float | None}.
+    Checks /workingorders first; if not found checks /positions.
+    """
+    # 1. Check if still a working (pending) order
+    try:
+        data = _get_session().get("/workingorders", version="2")
+        for item in data.get("workingOrders", []):
+            wo = item.get("workingOrderData", {}) or {}
+            if wo.get("dealId") == deal_id:
+                return {"status": "open", "fill_price": None}
+    except Exception as e:
+        logger.error(f"get_working_order_status({deal_id}) workingorders: {e}")
+
+    # 2. Not in working orders — check if it became a position (filled)
+    try:
+        data = _get_session().get("/positions", version="2")
+        for item in data.get("positions", []):
+            pos = item.get("position", {}) or {}
+            if pos.get("dealId") == deal_id:
+                fill_price = float(pos.get("openLevel") or 0)
+                return {"status": "filled", "fill_price": fill_price}
+    except Exception as e:
+        logger.error(f"get_working_order_status({deal_id}) positions: {e}")
+
+    # 3. Not found anywhere — treated as deleted/expired
+    return {"status": "deleted", "fill_price": None}
+
+
 def get_realized_pnl(deal_id: str) -> float | None:
     """
     Attempt to retrieve realized PnL from IG activity history.

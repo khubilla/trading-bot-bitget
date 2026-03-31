@@ -885,6 +885,7 @@
     gap: 6px 16px; padding: 14px;
   }
   .ig-pos-item { display: flex; flex-direction: column; gap: 3px; }
+  #ig-scanner-body .pair-card { cursor: default; }
   .ig-scan-log-row {
     display: flex; gap: 8px; align-items: baseline;
     padding: 3px 12px; border-bottom: 1px solid var(--border);
@@ -3436,14 +3437,15 @@ function renderIGScanner(scanSignals) {
     const obLabel = (ps.ob_low && ps.ob_high)
       ? `${(+ps.ob_low).toFixed(1)}–${(+ps.ob_high).toFixed(1)} ✓`
       : (bosOk ? 'Not found' : '—');
-    const reason = (ps.reason || '').replace(/[✅]/g, '✓').slice(0, 80);
+    const reason = (ps.reason || '').replace(/[✅]/g, '✓').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0, 80);
     const age = ps.updated_at
       ? (() => { const s = Math.floor((Date.now() - new Date(ps.updated_at)) / 1000);
                  return s < 60 ? s + 's ago' : Math.floor(s/60) + 'm ago'; })()
       : '';
+    const nameSafe = name.replace(/</g,'&lt;').replace(/>/g,'&gt;');
     return `<div class="pair-card ${cardClass}">
       <div class="pair-top">
-        <div class="pair-name">${name}</div>
+        <div class="pair-name">${nameSafe}</div>
         <span class="pair-sig-badge ${badgeSig}">${badgeSig}</span>
       </div>
       <div class="pair-checks">

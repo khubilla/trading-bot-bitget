@@ -1580,6 +1580,7 @@ class MTFBot:
                 equity   = tr._get_total_equity() or balance
                 notional = equity * config_s5.S5_TRADE_SIZE_PCT * config_s5.S5_LEVERAGE
                 mark     = tr.get_mark_price(symbol)
+                # NOTE: qty snapped at queue time, not fill time — acceptable for S5 (positions sized conservatively)
                 qty_str  = tr._round_qty(notional / mark, symbol)
                 if side == "LONG":
                     order_id = tr.place_limit_long(symbol, trigger, sl, tp, qty_str)

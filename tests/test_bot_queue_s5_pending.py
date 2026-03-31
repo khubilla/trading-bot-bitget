@@ -93,6 +93,8 @@ def test_queue_s5_pending_long_calls_place_limit_long(monkeypatch):
     assert sl_p == SL
     assert tp_p == TP
     assert isinstance(qty, str)
+    # equity=1000, notional=1000*0.04*10=400, mark=1.0100 → qty=400/1.0100 rounded to 4dp
+    assert qty == "396.0396"
     assert b.pending_signals[SYMBOL]["order_id"] == "ORD999"
 
 

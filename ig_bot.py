@@ -40,7 +40,7 @@ del _cs5_orig, _cs5_ig, _attr, _base_attrs
 from config_ig_s5 import (
     S5_DAILY_EMA_FAST, S5_DAILY_EMA_SLOW,
     S5_USE_CANDLE_STOPS, S5_SL_BUFFER_PCT, S5_SWING_LOOKBACK, S5_MAX_ENTRY_BUFFER,
-    S5_LTF_INTERVAL,
+    S5_LTF_INTERVAL, S5_OB_INVALIDATION_BUFFER_PCT,
 )
 from strategy import evaluate_s5, find_swing_low_target, find_swing_high_target, calculate_ema
 
@@ -266,6 +266,10 @@ class IGBot:
         self.paper       = paper
         self.running     = True
         self.position: dict | None = None   # live position state dict
+        self.pending_order: dict | None = None
+        # Structure: {"deal_id": str, "side": str, "ob_low": float, "ob_high": float,
+        #              "sl": float, "tp": float, "trigger": float, "size": float,
+        #              "expires": float}
         self._paper      = _PaperState() if paper else None
         # Candle cache: fetch full history once, then append new candles only.
         # IG limits historical price data to 10,000 points/week — fetching 550
@@ -283,6 +287,14 @@ class IGBot:
         if paper:
             # Restore position from paper state if any
             self.position = self._paper.position
+            # Restore pending order from state file if present
+            if os.path.exists(config_ig.STATE_FILE):
+                try:
+                    with open(config_ig.STATE_FILE) as _f:
+                        _data = json.load(_f)
+                    self.pending_order = _data.get("pending_order")
+                except Exception:
+                    pass
         else:
             self._sync_live_position()
 
@@ -326,29 +338,32 @@ class IGBot:
         return combined
 
     def _sync_live_position(self) -> None:
-        """On startup, restore position from STATE_FILE if dealId is still open on exchange."""
+        """On startup, restore position and pending_order from STATE_FILE."""
         if not os.path.exists(config_ig.STATE_FILE):
             return
         try:
             with open(config_ig.STATE_FILE) as f:
                 data = json.load(f)
             saved = data.get("position")
-            if not saved:
-                return
-            deal_id = saved.get("deal_id", "")
-            live    = ig.get_open_position(deal_id)
-            if live:
-                self.position = saved
-                logger.info(f"Restored position from state file: {deal_id}")
-            else:
-                logger.info("State file has position but it's no longer open — clearing")
-                self._clear_state()
+            if saved:
+                deal_id = saved.get("deal_id", "")
+                live    = ig.get_open_position(deal_id)
+                if live:
+                    self.position = saved
+                    logger.info(f"Restored position from state file: {deal_id}")
+                else:
+                    logger.info("State file has position but it's no longer open — clearing")
+                    self._clear_state()
+            saved_pending = data.get("pending_order")
+            if saved_pending:
+                self.pending_order = saved_pending
+                logger.info(f"Restored pending order from state file: {saved_pending.get('deal_id')}")
         except Exception as e:
             logger.warning(f"Could not restore state: {e}")
 
     def _save_state(self) -> None:
         with open(config_ig.STATE_FILE, "w") as f:
-            json.dump({"position": self.position}, f, indent=2)
+            json.dump({"position": self.position, "pending_order": self.pending_order}, f, indent=2)
 
     def _clear_state(self) -> None:
         self.position = None
@@ -380,8 +395,8 @@ class IGBot:
         self._heartbeat()
         now = _now_et()
 
-        # 1. Session-end force close
-        if self.position and _is_session_end(now):
+        # 1. Session-end force close (handles both open position and pending order)
+        if (self.position or self.pending_order) and _is_session_end(now):
             self._session_end_close()
             return
 
@@ -399,6 +414,13 @@ class IGBot:
 
         # 4. Already in a trade
         if self.position:
+            return
+
+        # 4b. Check pending working order (returns early to avoid new entry evaluation)
+        if self.pending_order is not None:
+            mark = ig.get_mark_price(EPIC)
+            if mark > 0:
+                self._check_pending_order(mark)
             return
 
         # 5. Fetch candles (cached — only hits API when new candle has formed)
@@ -423,16 +445,42 @@ class IGBot:
         )
         logger.info(f"[S5] {reason}")
 
-        if sig not in ("LONG", "SHORT"):
+        if sig not in ("PENDING_LONG", "PENDING_SHORT"):
             return
 
-        # 8. Entry window check
+        # 8. Get mark price for limit order placement
         mark = ig.get_mark_price(EPIC)
-        if mark <= 0 or not _entry_in_window(sig, mark, trigger):
+        if mark <= 0:
             return
 
-        # 9. Open trade
-        self._open_trade(sig, sl, tp, ob_low, ob_high, trigger, mark)
+        # 9. Place limit working order
+        side = "LONG" if sig == "PENDING_LONG" else "SHORT"
+        sl   = round(sl, 1)
+        tp   = round(tp, 1) if tp else round(trigger + abs(trigger - sl) if side == "LONG" else trigger - abs(trigger - sl), 1)
+        try:
+            if side == "LONG":
+                deal_id = ig.place_limit_long(EPIC, trigger, sl, tp, CONTRACT_SIZE)
+            else:
+                deal_id = ig.place_limit_short(EPIC, trigger, sl, tp, CONTRACT_SIZE)
+        except Exception as e:
+            logger.error(f"[S5] Failed to place limit {side}: {e}")
+            return
+        self.pending_order = {
+            "deal_id":  deal_id,
+            "side":     side,
+            "ob_low":   ob_low,
+            "ob_high":  ob_high,
+            "sl":       sl,
+            "tp":       tp,
+            "trigger":  trigger,
+            "size":     CONTRACT_SIZE,
+            "expires":  time.time() + 4 * 3600,
+        }
+        self._save_state()
+        logger.info(
+            f"[S5] {side} limit order placed | trigger={trigger:.1f} | "
+            f"SL={sl:.1f} | TP={tp:.1f} | deal_id={deal_id}"
+        )
 
     # ── Open trade ─────────────────────────────────────────────── #
 
@@ -503,6 +551,138 @@ class IGBot:
         logger.info(
             f"[S5] {sig} opened | entry={entry:.1f} | SL={sl:.1f} | "
             f"TP1={tp1:.1f} | TP={tp:.1f} | size={CONTRACT_SIZE} | R:R={rr}"
+        )
+
+    # ── Pending working order management ──────────────────────── #
+
+    def _check_pending_order(self, mark: float) -> bool:
+        """
+        Check status of the pending GTC working order.
+        Returns True if the pending order was handled (filled, cancelled, or still live).
+        Returns False if there is no pending order.
+        """
+        if self.pending_order is None:
+            return False
+
+        deal_id = self.pending_order["deal_id"]
+        side    = self.pending_order["side"]
+
+        try:
+            status_info = ig.get_working_order_status(deal_id)
+            status = status_info["status"]
+        except Exception as e:
+            logger.warning(f"[S5] _check_pending_order: status check failed ({e}), retrying next tick")
+            return True
+
+        if status == "filled":
+            fill_price = status_info["fill_price"] or self.pending_order["trigger"]
+            self._handle_pending_filled(fill_price)
+            self.pending_order = None
+            self._save_state()
+            return True
+
+        elif status == "open":
+            # Check OB invalidation
+            if side == "LONG" and mark < self.pending_order["ob_low"] * (1 - S5_OB_INVALIDATION_BUFFER_PCT):
+                try:
+                    ig.cancel_working_order(deal_id)
+                except Exception as e:
+                    logger.warning(f"[S5] cancel_working_order error: {e}")
+                logger.info(f"[S5] OB invalidated — cancelled limit order {deal_id}")
+                self.pending_order = None
+                self._save_state()
+            elif side == "SHORT" and mark > self.pending_order["ob_high"] * (1 + S5_OB_INVALIDATION_BUFFER_PCT):
+                try:
+                    ig.cancel_working_order(deal_id)
+                except Exception as e:
+                    logger.warning(f"[S5] cancel_working_order error: {e}")
+                logger.info(f"[S5] OB invalidated — cancelled limit order {deal_id}")
+                self.pending_order = None
+                self._save_state()
+            elif time.time() > self.pending_order["expires"]:
+                try:
+                    ig.cancel_working_order(deal_id)
+                except Exception as e:
+                    logger.warning(f"[S5] cancel_working_order error: {e}")
+                logger.info(f"[S5] Limit order expired — cancelled {deal_id}")
+                self.pending_order = None
+                self._save_state()
+            return True  # still pending (or just cleared)
+
+        elif status == "deleted":
+            logger.info(f"[S5] Limit order deleted externally: {deal_id}")
+            self.pending_order = None
+            self._save_state()
+            return True
+
+        elif status == "unknown":
+            # Transient error — leave pending_order as-is, retry next tick
+            return True
+
+        return False
+
+    def _handle_pending_filled(self, fill_price: float) -> None:
+        """
+        Called when the GTC limit order fills.
+        Sets self.position (matching the structure _monitor_position expects)
+        and logs the trade to CSV.
+        """
+        po       = self.pending_order
+        side     = po["side"]
+        sl       = po["sl"]
+        tp       = po["tp"]
+        trigger  = po["trigger"]
+        ob_low   = po["ob_low"]
+        ob_high  = po["ob_high"]
+        size     = po["size"]
+
+        risk = abs(fill_price - sl)
+        tp1  = round(fill_price + risk if side == "LONG" else fill_price - risk, 1)
+
+        trade_id = uuid.uuid4().hex[:8]
+
+        if self.paper:
+            trade = self._paper.open(side, fill_price, sl, tp1, tp,
+                                     size, trade_id, ob_low, ob_high)
+            self.position = self._paper.position
+        else:
+            self.position = {
+                "side":         side,
+                "deal_id":      po["deal_id"],
+                "entry":        fill_price,
+                "sl":           sl,
+                "tp1":          tp1,
+                "tp":           tp,
+                "initial_qty":  size,
+                "current_qty":  size,
+                "partial_done": False,
+                "trade_id":     trade_id,
+                "opened_at":    _now_et().isoformat(),
+                "ob_low":       ob_low,
+                "ob_high":      ob_high,
+            }
+            self._save_state()
+
+        rr = round(abs(tp - fill_price) / risk, 2) if risk > 0 else 0
+
+        _log_trade(f"S5_{side}", {
+            "trade_id":           trade_id,
+            "side":               side,
+            "qty":                size,
+            "entry":              round(fill_price, 1),
+            "sl":                 sl,
+            "tp":                 tp,
+            "snap_entry_trigger": round(trigger, 1),
+            "snap_sl":            sl,
+            "snap_rr":            rr,
+            "snap_s5_ob_low":     round(ob_low, 1),
+            "snap_s5_ob_high":    round(ob_high, 1),
+            "snap_s5_tp":         tp,
+        }, paper=self.paper)
+
+        logger.info(
+            f"[S5] {side} limit order FILLED | entry={fill_price:.1f} | "
+            f"SL={sl:.1f} | TP1={tp1:.1f} | TP={tp:.1f} | size={size} | R:R={rr}"
         )
 
     # ── Monitor open position ──────────────────────────────────── #
@@ -664,6 +844,36 @@ class IGBot:
     # ── Session-end force close ────────────────────────────────── #
 
     def _session_end_close(self) -> None:
+        # Cancel any pending working order first
+        if self.pending_order is not None:
+            pending_deal_id = self.pending_order["deal_id"]
+            try:
+                ig.cancel_working_order(pending_deal_id)
+                logger.info(f"[SESSION END] Cancelled pending limit order {pending_deal_id}")
+            except Exception as e:
+                logger.warning(f"[SESSION END] Failed to cancel pending order: {e}")
+            # Check if the order filled despite the cancel attempt
+            try:
+                status_info = ig.get_working_order_status(pending_deal_id)
+                if status_info["status"] == "filled":
+                    fill_price = status_info["fill_price"] or self.pending_order["trigger"]
+                    logger.info(
+                        f"[SESSION END] order filled during cancel, "
+                        f"closing position at fill_price={fill_price}"
+                    )
+                    self._handle_pending_filled(fill_price)
+                    # Don't clear pending_order here — let the position close block below handle it
+                else:
+                    self.pending_order = None
+                    self._save_state()
+            except Exception as e:
+                logger.warning(f"[SESSION END] could not verify cancel status: {e}")
+                self.pending_order = None
+                self._save_state()
+
+        if self.position is None:
+            return
+
         pos   = self.position
         mark  = ig.get_mark_price(EPIC) if not self.paper else 0.0
         close_dir = "SELL" if pos["side"] == "LONG" else "BUY"
@@ -700,6 +910,7 @@ class IGBot:
             f"[SESSION END] {result} | PnL={realized:+.2f}"
         )
         self.position = None
+        self.pending_order = None
         if not self.paper:
             self._clear_state()
 

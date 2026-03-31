@@ -37,20 +37,20 @@ S5_OB_MIN_IMPULSE  = 0.005
 S5_OB_MIN_RANGE_PCT = 0.002
 
 # Crypto default: 20 (5h). US30: 10 = 2.5h, tighter for 3h session.
-S5_CHOCH_LOOKBACK  = 10
+S5_CHOCH_LOOKBACK  = 10     # candles to scan for OB touch (was ChoCH lookback — ChoCH removed)
 
 # ── Entry / SL ───────────────────────────────────────────── #
-# Crypto default: 0.005 (0.5%). Slightly tighter on a point-based instrument.
-S5_ENTRY_BUFFER_PCT = 0.003
+# S5_ENTRY_BUFFER_PCT removed — entry is at ob_high exactly (limit order)
 
 # Crypto default: 0.04 (4% = ~720pts — meaningless staleness guard on US30).
 # US30: 1% = ~180pts, meaningful threshold for a stale entry.
 # Note: used by ig_bot.py's _entry_in_window(), NOT by evaluate_s5().
-S5_MAX_ENTRY_BUFFER = 0.01
+S5_MAX_ENTRY_BUFFER = 0.01  # IG: tighter stale OB guard (1% vs 4% crypto) — US30 point values differ
 
 # Crypto default: 0.003 (0.3% = ~54pts). 0.2% = ~36pts is tighter but
 # sufficient for a 30-50pt average candle range.
 S5_SL_BUFFER_PCT   = 0.002
+S5_OB_INVALIDATION_BUFFER_PCT = 0.001  # cancel limit if mark crosses ob_low by >0.1%
 
 # ── Structural TP (swing target) ─────────────────────────── #
 # Crypto default: 50 (12.5h — TP targets land in overnight/Asian hours).

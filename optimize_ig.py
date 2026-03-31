@@ -26,7 +26,6 @@ def _load_current_params() -> dict:
         "OB_MIN_IMPULSE":    f"{c.S5_OB_MIN_IMPULSE * 100:.1f}%",
         "OB_MIN_RANGE_PCT":  f"{c.S5_OB_MIN_RANGE_PCT * 100:.1f}%",
         "CHOCH_LOOKBACK":    c.S5_CHOCH_LOOKBACK,
-        "ENTRY_BUFFER_PCT":  f"{c.S5_ENTRY_BUFFER_PCT * 100:.2f}%",
         "MAX_ENTRY_BUFFER":  f"{c.S5_MAX_ENTRY_BUFFER * 100:.0f}%",
         "SL_BUFFER_PCT":     f"{c.S5_SL_BUFFER_PCT * 100:.1f}%",
         "SWING_LOOKBACK":    c.S5_SWING_LOOKBACK,

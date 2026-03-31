@@ -103,6 +103,7 @@ logger = logging.getLogger(__name__)
 # ── Constants ────────────────────────────────────────────────── #
 EPIC          = config_ig.EPIC
 CONTRACT_SIZE = config_ig.CONTRACT_SIZE
+DISPLAY_NAME  = "US30"          # Human-readable instrument label used in scan_signals keys
 PARTIAL_SIZE  = config_ig.PARTIAL_SIZE
 POINT_VALUE   = config_ig.POINT_VALUE
 ET            = zoneinfo.ZoneInfo("America/New_York")
@@ -320,6 +321,8 @@ class IGBot:
         # IG limits historical price data to 10,000 points/week — fetching 550
         # points every 45s would exceed that in ~4 minutes.
         self._candle_cache: dict[str, pd.DataFrame] = {}
+        self._scan_signals: dict = {}   # keyed by DISPLAY_NAME; latest evaluate_s5 output per instrument
+        self._scan_log: list     = []   # last 20 scan entries, newest first
 
         mode = "PAPER" if paper else f"LIVE ({config_ig.IG_ACC_TYPE})"
         logger.info(
@@ -332,12 +335,14 @@ class IGBot:
         if paper:
             # Restore position from paper state if any
             self.position = self._paper.position
-            # Restore pending order from state file if present
+            # Restore pending order and scan state from state file if present
             if os.path.exists(config_ig.STATE_FILE):
                 try:
                     with open(config_ig.STATE_FILE) as _f:
                         _data = json.load(_f)
-                    self.pending_order = _data.get("pending_order")
+                    self.pending_order  = _data.get("pending_order")
+                    self._scan_signals  = _data.get("scan_signals", {})
+                    self._scan_log      = _data.get("scan_log", [])
                 except Exception:
                     pass
         else:
@@ -403,12 +408,19 @@ class IGBot:
             if saved_pending:
                 self.pending_order = saved_pending
                 logger.info(f"Restored pending order from state file: {saved_pending.get('deal_id')}")
+            self._scan_signals = data.get("scan_signals", {})
+            self._scan_log     = data.get("scan_log", [])
         except Exception as e:
             logger.warning(f"Could not restore state: {e}")
 
     def _save_state(self) -> None:
         with open(config_ig.STATE_FILE, "w") as f:
-            json.dump({"position": self.position, "pending_order": self.pending_order}, f, indent=2)
+            json.dump({
+                "position":      self.position,
+                "pending_order": self.pending_order,
+                "scan_signals":  self._scan_signals,
+                "scan_log":      self._scan_log,
+            }, f, indent=2)
 
     def _clear_state(self) -> None:
         self.position = None
@@ -418,6 +430,46 @@ class IGBot:
         """Touch state file every tick so dashboard knows the bot is alive."""
         if not os.path.exists(config_ig.STATE_FILE) or not self.position:
             self._save_state()
+
+    def _update_scan_state(
+        self,
+        instrument: str,
+        signal: str,
+        reason: str,
+        ob_low: float,
+        ob_high: float,
+        entry_trigger: float,
+        sl: float,
+        tp: float,
+    ) -> None:
+        """Update per-instrument signal entry and prepend to scan log (capped at 20)."""
+        _ET = zoneinfo.ZoneInfo("America/New_York")
+        now_et = datetime.now(_ET)
+
+        ema_ok = "Daily EMA flat" not in reason and "S5 disabled" not in reason
+        bos_ok = "BOS \u2705" in reason or signal in ("PENDING_LONG", "PENDING_SHORT")
+        ob_ok  = "OB \u2705"  in reason or signal in ("PENDING_LONG", "PENDING_SHORT")
+
+        self._scan_signals[instrument] = {
+            "signal":        signal,
+            "reason":        reason,
+            "ema_ok":        ema_ok,
+            "bos_ok":        bos_ok,
+            "ob_ok":         ob_ok,
+            "ob_low":        ob_low  if ob_low  else None,
+            "ob_high":       ob_high if ob_high else None,
+            "entry_trigger": entry_trigger if entry_trigger else None,
+            "sl":            sl if sl else None,
+            "tp":            tp if tp else None,
+            "updated_at":    datetime.now(timezone.utc).isoformat(),
+        }
+
+        self._scan_log.insert(0, {
+            "ts":         now_et.strftime("%H:%M"),
+            "instrument": instrument,
+            "message":    reason,
+        })
+        self._scan_log = self._scan_log[:20]
 
     def run(self) -> None:
         signal.signal(signal.SIGINT,  self.stop)
@@ -489,6 +541,10 @@ class IGBot:
             EPIC, daily_df, htf_df, m15_df, allowed_direction,
         )
         logger.info(f"[S5] {reason}")
+
+        # Update scan state so dashboard always shows latest signal — save regardless of signal
+        self._update_scan_state(DISPLAY_NAME, sig, reason, ob_low, ob_high, trigger, sl, tp)
+        self._save_state()
 
         if sig not in ("PENDING_LONG", "PENDING_SHORT"):
             return

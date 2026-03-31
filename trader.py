@@ -524,21 +524,46 @@ def scale_in_short(symbol: str, additional_trade_size_pct: float, leverage: int)
     logger.info(f"[{symbol}] ➕ Scale-in SHORT qty={qty} @ mark≈{mark:.5f}")
 
 
-def get_history_position(symbol: str) -> dict | None:
+def get_history_position(symbol: str,
+                         open_time_iso: str | None = None,
+                         entry_price:   float | None = None) -> dict | None:
     """
-    Query the most recent closed position from Bitget history-position API.
+    Find a specific closed position in Bitget history-position API.
+
+    When open_time_iso + entry_price are provided, queries from that open
+    time and matches the record whose openAvgPrice is closest to entry_price.
+    This handles multiple successive closes on the same symbol during a
+    disconnect. Falls back to the most recent record if no match found.
+
     Returns {pnl, exit_price, close_time} or None on error / no record.
     """
     try:
-        data = bc.get("/api/v2/mix/position/history-position",
-                      params={"productType": PRODUCT_TYPE, "symbol": symbol, "limit": "1"})
+        params: dict = {"productType": PRODUCT_TYPE, "symbol": symbol, "limit": "10"}
+        if open_time_iso:
+            try:
+                from datetime import datetime, timezone
+                dt = datetime.fromisoformat(open_time_iso)
+                params["startTime"] = str(int(dt.timestamp() * 1000))
+            except Exception:
+                pass
+        data    = bc.get("/api/v2/mix/position/history-position", params=params)
         records = data.get("data", {}).get("list") or data.get("data", [])
         if not records:
             return None
-        r = records[0]
+
+        # Match by entry price when provided; otherwise take the first record
+        def _entry_of(r: dict) -> float:
+            v = r.get("openAvgPrice") or r.get("openAveragePrice") or 0
+            return float(v)
+
+        if entry_price:
+            records = sorted(records, key=lambda r: abs(_entry_of(r) - entry_price))
+
+        r   = records[0]
         pnl = float(r.get("achievedProfits", 0) or 0)
         if pnl == 0:
             return None  # API hasn't settled yet
+
         close_avg = r.get("closeAvgPrice") or r.get("closeAveragePrice")
         close_ts  = r.get("closeTime") or r.get("updateTime")
         close_dt  = None

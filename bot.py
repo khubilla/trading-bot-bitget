@@ -310,7 +310,11 @@ class MTFBot:
                     strategy  = csv_row.get("action", "").split("_")[0]
                     trade_id  = csv_row.get("trade_id", "")
                     side      = csv_row.get("side", "")
-                    hist      = tr.get_history_position(sym)
+                    hist      = tr.get_history_position(
+                        sym,
+                        open_time_iso=csv_row.get("timestamp"),
+                        entry_price=float(csv_row["entry"]) if csv_row.get("entry") else None,
+                    )
                     if hist is None:
                         logger.warning(f"[{strategy}][{sym}] ⚠️  Closed while disconnected but history-position unavailable")
                         continue

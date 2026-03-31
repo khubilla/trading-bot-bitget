@@ -53,6 +53,8 @@ def _check_disclaimer():
 ║    damages, or consequences arising from use of this software        ║
 ║  • This is NOT financial advice                                      ║
 ║  • Use entirely at your own risk                                     ║
+║  • The creator is NOT responsible for modified, redistributed,       ║
+║    or tampered versions — only the original source is covered        ║
 ║                                                                      ║
 ║  By continuing you confirm that you:                                 ║
 ║    (1) understand and accept all risks of algorithmic trading        ║

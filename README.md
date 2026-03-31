@@ -12,6 +12,8 @@ Automated trading bot supporting **Bitget USDT-margined crypto futures** and **I
 - You may lose some or all of your invested capital
 - The creator accepts **no liability** for any financial losses or damages arising from use of this software
 - Use entirely at your own risk
+- The creator is **not responsible** for any modified, redistributed, or tampered versions — only the original source is covered by this disclaimer
+- Always verify you are running the original source from the [official repository](https://github.com/khubilla/trading-bot-bitget)
 
 On first run, the bot will display this disclaimer and require you to type `I AGREE` before starting. This acceptance is stored locally and only shown once per installation.
 

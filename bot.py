@@ -886,13 +886,7 @@ class MTFBot:
                     _s5_rr = round((s5_trigger - s5_tp) / (s5_sl - s5_trigger), 2)
                 else:
                     _s5_rr = None
-                # Compute S/R clearance from entry trigger (uniform reference for ranking)
-                if s5_sig in ("LONG", "PENDING_LONG"):
-                    _s5_nr = find_nearest_resistance(m15_df, s5_trigger, lookback=300)
-                    s5_sr_pct = round((_s5_nr - s5_trigger) / s5_trigger * 100, 1) if _s5_nr else None
-                else:
-                    _s5_ns = find_nearest_support(m15_df, s5_trigger, lookback=300)
-                    s5_sr_pct = round((s5_trigger - _s5_ns) / s5_trigger * 100, 1) if _s5_ns else None
+                s5_sr_pct = None  # S5 R:R to structural swing target handles clearance internally
                 # Collect for priority ranking — execution deferred to _execute_best_candidate()
                 self.candidates.append({
                     "strategy": "S5", "symbol": symbol, "sig": s5_sig,
@@ -911,7 +905,7 @@ class MTFBot:
         # ── S/R Clearance (for dashboard display + entry guard) ──── #
         _sr_res        = find_nearest_resistance(daily_df, close)
         _sr_sup        = find_nearest_support(daily_df, close)
-        _s4_base       = find_spike_base(daily_df)
+        _s4_base       = find_spike_base(daily_df, price_ceiling=close)
         sr_res_pct     = round((_sr_res - close) / close * 100, 1) if _sr_res else None
         sr_sup_pct     = round((close - _sr_sup) / close * 100, 1) if _sr_sup else None
         s4_sr_sup_pct  = round((close - _s4_base) / close * 100, 1) if _s4_base else None
@@ -1371,7 +1365,7 @@ class MTFBot:
             return False
         if mark_now > s4_trigger:
             return False  # price not yet in entry window
-        spike_base = find_spike_base(c["daily_df"])
+        spike_base = find_spike_base(c["daily_df"], price_ceiling=mark_now)
         if spike_base is not None:
             clearance = (mark_now - spike_base) / mark_now
             if clearance < config_s4.S4_MIN_SR_CLEARANCE:
@@ -1444,21 +1438,9 @@ class MTFBot:
             if mark_now > s5_trigger * (1 + config_s5.S5_MAX_ENTRY_BUFFER):
                 logger.info(f"[S5][{symbol}] ⏸️ LONG entry missed — price already >{config_s5.S5_MAX_ENTRY_BUFFER*100:.0f}% above trigger {s5_trigger:.5f}")
                 return False
-            nearest_res = find_nearest_resistance(m15_df, mark_now, lookback=300) if m15_df is not None else None
-            if nearest_res is not None:
-                clearance = (nearest_res - mark_now) / mark_now
-                if clearance < config_s5.S5_MIN_SR_CLEARANCE:
-                    logger.info(
-                        f"[S5][{symbol}] ⏸️ LONG skipped — 15m resistance {nearest_res:.5f} "
-                        f"only {clearance*100:.1f}% away (min {config_s5.S5_MIN_SR_CLEARANCE*100:.0f}%)"
-                    )
-                    st.add_scan_log(f"[S5][{symbol}] ⛔ 15m resistance {nearest_res:.5f} too close ({clearance*100:.1f}%)", "WARN")
-                    return False
             if config.CLAUDE_FILTER_ENABLED:
-                _sr_str = f"{round((nearest_res - mark_now) / mark_now * 100, 1)}%" if nearest_res else "none found"
                 _cd = claude_approve("S5", symbol, {
                     "OB zone": f"{s5_ob_low:.5f}–{s5_ob_high:.5f}",
-                    "S/R clearance (15m)": _sr_str,
                     "Sentiment": self.sentiment.direction,
                     "Entry": round(mark_now, 5),
                     "SL": round(s5_sl, 5),
@@ -1515,21 +1497,9 @@ class MTFBot:
             if mark_now < s5_trigger * (1 - config_s5.S5_MAX_ENTRY_BUFFER):
                 logger.info(f"[S5][{symbol}] ⏸️ SHORT entry missed — price already >{config_s5.S5_MAX_ENTRY_BUFFER*100:.0f}% below trigger {s5_trigger:.5f}")
                 return False
-            nearest_sup = find_nearest_support(m15_df, mark_now, lookback=300) if m15_df is not None else None
-            if nearest_sup is not None:
-                clearance = (mark_now - nearest_sup) / mark_now
-                if clearance < config_s5.S5_MIN_SR_CLEARANCE:
-                    logger.info(
-                        f"[S5][{symbol}] ⏸️ SHORT skipped — 15m support {nearest_sup:.5f} "
-                        f"only {clearance*100:.1f}% away (min {config_s5.S5_MIN_SR_CLEARANCE*100:.0f}%)"
-                    )
-                    st.add_scan_log(f"[S5][{symbol}] ⛔ 15m support {nearest_sup:.5f} too close ({clearance*100:.1f}%)", "WARN")
-                    return False
             if config.CLAUDE_FILTER_ENABLED:
-                _sr_str = f"{round((mark_now - nearest_sup) / mark_now * 100, 1)}%" if nearest_sup else "none found"
                 _cd = claude_approve("S5", symbol, {
                     "OB zone": f"{s5_ob_low:.5f}–{s5_ob_high:.5f}",
-                    "S/R clearance (15m)": _sr_str,
                     "Sentiment": self.sentiment.direction,
                     "Entry": round(mark_now, 5),
                     "SL": round(s5_sl, 5),
@@ -1590,36 +1560,10 @@ class MTFBot:
                           priority_rank: int = 999, priority_score: float = 0.0) -> None:
         """Pre-validate an S5 PENDING signal (S/R + Claude) and add to pending_signals."""
         side = "LONG" if sig == "PENDING_LONG" else "SHORT"
-        # S/R clearance check using already-fetched m15_df
-        nearest = None
-        clearance = None
-        if side == "LONG":
-            nearest = find_nearest_resistance(m15_df, trigger, lookback=300)
-            if nearest is not None:
-                clearance = (nearest - trigger) / trigger
-                if clearance < config_s5.S5_MIN_SR_CLEARANCE:
-                    logger.info(
-                        f"[S5][{symbol}] ⛔ PENDING: resistance {nearest:.5f} "
-                        f"only {clearance*100:.1f}% away — not queuing"
-                    )
-                    return
-        else:
-            nearest = find_nearest_support(m15_df, trigger, lookback=300)
-            if nearest is not None:
-                clearance = (trigger - nearest) / trigger
-                if clearance < config_s5.S5_MIN_SR_CLEARANCE:
-                    logger.info(
-                        f"[S5][{symbol}] ⛔ PENDING: support {nearest:.5f} "
-                        f"only {clearance*100:.1f}% away — not queuing"
-                    )
-                    return
-        sr_pct = round(clearance * 100, 1) if clearance is not None else None
         # Claude filter
         if config.CLAUDE_FILTER_ENABLED:
-            sr_str = f"{sr_pct}%" if sr_pct is not None else "none found"
             _cd = claude_approve("S5", symbol, {
                 "OB zone":            f"{ob_low:.5f}–{ob_high:.5f}",
-                "S/R clearance (15m)": sr_str,
                 "Sentiment":           self.sentiment.direction if self.sentiment else "?",
                 "Entry trigger":       round(trigger, 5),
                 "SL":                  round(sl, 5),
@@ -1634,7 +1578,7 @@ class MTFBot:
             "strategy": "S5", "side": side,
             "trigger": trigger, "sl": sl, "tp": tp,
             "ob_low": ob_low, "ob_high": ob_high,
-            "rr": rr, "sr_clearance_pct": sr_pct,
+            "rr": rr, "sr_clearance_pct": None,
             "sentiment": self.sentiment.direction if self.sentiment else "?",
             "expires": time.time() + 4 * 3600,
             "priority_rank": priority_rank,

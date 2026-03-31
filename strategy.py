@@ -141,22 +141,51 @@ def find_nearest_support(daily_df: pd.DataFrame, entry_price: float,
 
 
 def find_spike_base(daily_df: pd.DataFrame, lookback: int = 30,
-                    min_body_pct: float = 0.20) -> float | None:
+                    min_body_pct: float = 0.20,
+                    price_ceiling: float | None = None) -> float | None:
     """
-    Find the open price of the largest spike candle (body ≥ min_body_pct) within
-    the last `lookback` daily candles. This is the pre-pump base level — the price
-    before the big candle fired — which acts as meaningful support after a breakout.
+    Find the high of the most recent spike candle (body ≥ min_body_pct) within
+    the last `lookback` daily candles whose high is below price_ceiling (current
+    price). Iterates newest→oldest so the most recent qualifying candle wins.
+    This is the pre-pump base — the breakout high before the current pump —
+    which acts as meaningful support. Candles at or above the current price are
+    the pump peak itself and are skipped.
     Returns None if no qualifying spike candle is found.
     """
     df = daily_df.iloc[-(lookback + 1):-1] if len(daily_df) > lookback + 1 else daily_df.iloc[:-1]
-    best_bp, best_open = 0.0, None
-    for _, row in df.iterrows():
+    for _, row in df.iloc[::-1].iterrows():
+        h = float(row["high"])
+        if price_ceiling is not None and h >= price_ceiling:
+            continue
         o, c = float(row["open"]), float(row["close"])
         bp = abs(c - o) / o if o else 0
-        if bp >= min_body_pct and bp > best_bp:
-            best_bp   = bp
-            best_open = o
-    return best_open
+        if bp >= min_body_pct:
+            return h
+    return None
+
+
+def find_breakdown_ceiling(daily_df: pd.DataFrame, lookback: int = 30,
+                           min_body_pct: float = 0.20,
+                           price_floor: float | None = None) -> float | None:
+    """
+    Find the low of the most recent bearish spike candle (body ≥ min_body_pct,
+    close < open) within the last `lookback` candles whose low is above
+    price_floor (current price). Iterates newest→oldest.
+    This is the breakdown ceiling — the broken support that is now resistance.
+    Returns None if no qualifying candle is found.
+    """
+    df = daily_df.iloc[-(lookback + 1):-1] if len(daily_df) > lookback + 1 else daily_df.iloc[:-1]
+    for _, row in df.iloc[::-1].iterrows():
+        low = float(row["low"])
+        if price_floor is not None and low <= price_floor:
+            continue
+        o, c = float(row["open"]), float(row["close"])
+        if c >= o:  # must be bearish
+            continue
+        bp = (o - c) / o if o else 0
+        if bp >= min_body_pct:
+            return low
+    return None
 
 
 # ════════════════════════════════════════════════════════════

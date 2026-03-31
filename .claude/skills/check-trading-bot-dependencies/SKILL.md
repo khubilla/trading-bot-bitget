@@ -84,8 +84,26 @@ The "Constraints for brainstorm/plan" section is carried forward as hard require
 - Editing `strategy.py` → shared by both bots AND backtest.py
 - Confusing `paper_state.json` with `state_paper.json` → completely different purposes (see Section 10)
 
+## Step 5: Update DEPENDENCIES.md after implementation
+
+After the change is implemented (not before), check whether any of the following actually changed:
+
+- Function signature or return value (params added/removed/reordered)
+- state.json or ig_state.json fields (added, removed, renamed, retyped)
+- CSV columns in trades.csv, trades_paper.csv, or ig_trades.csv
+- Config parameter names or types in any config_*.py
+- A new file is now shared between bots
+- A function is now called from an additional file
+
+If any of the above changed, update the relevant section(s) in DEPENDENCIES.md before committing:
+- Update field lists, signatures, line numbers, and breaking scenarios to match the new reality
+- If a section doesn't exist yet for the changed component, add it
+
+**This step is not optional.** Stale dependency docs silently mislead the next pre-change read, defeating the whole system.
+
 ## The Rule
 
 ```
 NO BRAINSTORM. NO PLAN. NO CODE. UNTIL DEPENDENCY CHECK IS DONE.
+NO COMMIT. UNTIL DEPENDENCIES.md REFLECTS THE ACTUAL STATE OF THE CODE.
 ```

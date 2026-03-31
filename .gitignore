@@ -15,6 +15,7 @@ backtest_report.html
 !.claude/skills/
 !.claude/skills/**
 settings.json
+!.claude/settings.json
 ig_bot.log
 .superpowers
 ig_state.json

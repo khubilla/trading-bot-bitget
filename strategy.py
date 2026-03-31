@@ -1095,7 +1095,7 @@ def evaluate_s5(
         S5_DAILY_EMA_FAST, S5_DAILY_EMA_MED, S5_DAILY_EMA_SLOW,
         S5_HTF_BOS_LOOKBACK,
         S5_OB_LOOKBACK, S5_OB_MIN_IMPULSE, S5_CHOCH_LOOKBACK,
-        S5_ENTRY_BUFFER_PCT, S5_SL_BUFFER_PCT,
+        S5_MAX_ENTRY_BUFFER, S5_SL_BUFFER_PCT,
         S5_MIN_RR, S5_SWING_LOOKBACK,
         S5_OB_MIN_RANGE_PCT, S5_SMC_FVG_FILTER, S5_SMC_FVG_LOOKBACK,
     )
@@ -1202,23 +1202,24 @@ def evaluate_s5(
                 f"Waiting pullback touch"
             )
 
-        # ChoCH: last completed 15m candle closed above OB high
-        last_closed = float(m15_df["close"].iloc[-2])
-        if last_closed <= ob_high:
-            return "HOLD", 0.0, 0.0, 0.0, ob_low, ob_high, (
-                f"Daily EMA ✅ | 1H BOS ✅ | Bullish OB {ob_low:.5f}–{ob_high:.5f} | "
-                f"OB touched ✅ | Waiting ChoCH close above {ob_high:.5f} (last={last_closed:.5f})"
-            )
-
-        entry_trigger = ob_high * (1 + S5_ENTRY_BUFFER_PCT)
-        sl_price      = ob_low  * (1 - S5_SL_BUFFER_PCT)
+        # SMC entry: limit order at ob_high — no ChoCH candle close needed.
+        # The limit fills only if price dips below ob_high and bounces back — that IS confirmation.
+        entry_trigger = ob_high
+        sl_price      = ob_low * (1 - S5_SL_BUFFER_PCT)
         current_close = float(m15_df["close"].iloc[-1])
+
+        # Stale OB guard: if price has already moved too far above ob_high, skip
+        if current_close > ob_high * (1 + S5_MAX_ENTRY_BUFFER):
+            return "HOLD", entry_trigger, sl_price, 0.0, ob_low, ob_high, (
+                f"Daily EMA ✅ | 1H BOS ✅ | Bullish OB ✅ | OB touched ✅ | "
+                f"Stale — price {current_close:.5f} already >{S5_MAX_ENTRY_BUFFER*100:.0f}% above ob_high {ob_high:.5f}"
+            )
 
         # Structural TP — compute before entry-trigger check so PENDING signals carry full data
         tp_price = find_swing_high_target(m15_df, entry_trigger, lookback=S5_SWING_LOOKBACK)
         if tp_price is None:
             return "HOLD", entry_trigger, sl_price, 0.0, ob_low, ob_high, (
-                f"S5 ChoCH ✅ but no swing high found above {entry_trigger:.5f} — skip"
+                f"S5 OB ✅ but no swing high found above {entry_trigger:.5f} — skip"
             )
 
         risk   = entry_trigger - sl_price
@@ -1226,21 +1227,15 @@ def evaluate_s5(
         rr     = reward / risk if risk > 0 else 0
         if rr < S5_MIN_RR:
             return "HOLD", entry_trigger, sl_price, tp_price, ob_low, ob_high, (
-                f"S5 ChoCH ✅ but R:R={rr:.1f} < {S5_MIN_RR} (TP={tp_price:.5f}) — skip"
-            )
-
-        if current_close <= entry_trigger:
-            return "PENDING_LONG", entry_trigger, sl_price, tp_price, ob_low, ob_high, (
-                f"Daily EMA ✅ | 1H BOS ✅ | Bullish OB ✅ | ChoCH ✅ | R:R={rr:.1f} | "
-                f"⏳ Waiting entry > {entry_trigger:.5f} (now {current_close:.5f})"
+                f"S5 OB ✅ but R:R={rr:.1f} < {S5_MIN_RR} (TP={tp_price:.5f}) — skip"
             )
 
         logger.info(
-            f"[S5][{symbol}] ✅ LONG | Daily EMA bullish | 1H BOS ✅ | "
-            f"Bullish OB {ob_low:.5f}–{ob_high:.5f} | ChoCH | TP={tp_price:.5f} | R:R={rr:.1f}"
+            f"[S5][{symbol}] 🕐 PENDING_LONG | Bullish OB {ob_low:.5f}–{ob_high:.5f} | "
+            f"limit@{entry_trigger:.5f} | TP={tp_price:.5f} | R:R={rr:.1f}"
         )
-        return "LONG", entry_trigger, sl_price, tp_price, ob_low, ob_high, (
-            f"S5 ✅ OB {ob_low:.5f}–{ob_high:.5f} | ChoCH LONG | TP={tp_price:.5f} R:R={rr:.1f}"
+        return "PENDING_LONG", entry_trigger, sl_price, tp_price, ob_low, ob_high, (
+            f"S5 OB {ob_low:.5f}–{ob_high:.5f} | Limit@{entry_trigger:.5f} | TP={tp_price:.5f} R:R={rr:.1f}"
         )
 
     else:  # go_short
@@ -1276,23 +1271,24 @@ def evaluate_s5(
                 f"Waiting pullback touch"
             )
 
-        # ChoCH: last completed 15m candle closed below OB low
-        last_closed = float(m15_df["close"].iloc[-2])
-        if last_closed >= ob_low:
-            return "HOLD", 0.0, 0.0, 0.0, ob_low, ob_high, (
-                f"Daily EMA ✅ | 1H BOS ✅ | Bearish OB {ob_low:.5f}–{ob_high:.5f} | "
-                f"OB touched ✅ | Waiting ChoCH close below {ob_low:.5f} (last={last_closed:.5f})"
-            )
-
-        entry_trigger = ob_low  * (1 - S5_ENTRY_BUFFER_PCT)
+        # SMC entry: limit order at ob_low — no ChoCH candle close needed.
+        # The limit fills only if price rallies back to ob_low and reverses — that IS confirmation.
+        entry_trigger = ob_low
         sl_price      = ob_high * (1 + S5_SL_BUFFER_PCT)
         current_close = float(m15_df["close"].iloc[-1])
+
+        # Stale OB guard: if price has already moved too far below ob_low, skip
+        if current_close < ob_low * (1 - S5_MAX_ENTRY_BUFFER):
+            return "HOLD", entry_trigger, sl_price, 0.0, ob_low, ob_high, (
+                f"Daily EMA ✅ | 1H BOS ✅ | Bearish OB ✅ | OB touched ✅ | "
+                f"Stale — price {current_close:.5f} already >{S5_MAX_ENTRY_BUFFER*100:.0f}% below ob_low {ob_low:.5f}"
+            )
 
         # Structural TP — compute before entry-trigger check so PENDING signals carry full data
         tp_price = find_swing_low_target(m15_df, entry_trigger, lookback=S5_SWING_LOOKBACK)
         if tp_price is None:
             return "HOLD", entry_trigger, sl_price, 0.0, ob_low, ob_high, (
-                f"S5 ChoCH ✅ but no swing low found below {entry_trigger:.5f} — skip"
+                f"S5 OB ✅ but no swing low found below {entry_trigger:.5f} — skip"
             )
 
         risk   = sl_price - entry_trigger
@@ -1300,19 +1296,13 @@ def evaluate_s5(
         rr     = reward / risk if risk > 0 else 0
         if rr < S5_MIN_RR:
             return "HOLD", entry_trigger, sl_price, tp_price, ob_low, ob_high, (
-                f"S5 ChoCH ✅ but R:R={rr:.1f} < {S5_MIN_RR} (TP={tp_price:.5f}) — skip"
-            )
-
-        if current_close >= entry_trigger:
-            return "PENDING_SHORT", entry_trigger, sl_price, tp_price, ob_low, ob_high, (
-                f"Daily EMA ✅ | 1H BOS ✅ | Bearish OB ✅ | ChoCH ✅ | R:R={rr:.1f} | "
-                f"⏳ Waiting entry < {entry_trigger:.5f} (now {current_close:.5f})"
+                f"S5 OB ✅ but R:R={rr:.1f} < {S5_MIN_RR} (TP={tp_price:.5f}) — skip"
             )
 
         logger.info(
-            f"[S5][{symbol}] ✅ SHORT | Daily EMA bearish | 1H BOS ✅ | "
-            f"Bearish OB {ob_low:.5f}–{ob_high:.5f} | ChoCH | TP={tp_price:.5f} | R:R={rr:.1f}"
+            f"[S5][{symbol}] 🕐 PENDING_SHORT | Bearish OB {ob_low:.5f}–{ob_high:.5f} | "
+            f"limit@{entry_trigger:.5f} | TP={tp_price:.5f} | R:R={rr:.1f}"
         )
-        return "SHORT", entry_trigger, sl_price, tp_price, ob_low, ob_high, (
-            f"S5 ✅ OB {ob_low:.5f}–{ob_high:.5f} | ChoCH SHORT | TP={tp_price:.5f} R:R={rr:.1f}"
+        return "PENDING_SHORT", entry_trigger, sl_price, tp_price, ob_low, ob_high, (
+            f"S5 OB {ob_low:.5f}–{ob_high:.5f} | Limit@{entry_trigger:.5f} | TP={tp_price:.5f} R:R={rr:.1f}"
         )

@@ -485,6 +485,7 @@ def get_working_order_status(deal_id: str) -> dict:
                 return {"status": "open", "fill_price": None}
     except Exception as e:
         logger.error(f"get_working_order_status({deal_id}) workingorders: {e}")
+        return {"status": "unknown", "fill_price": None}
 
     # 2. Not in working orders — check if it became a position (filled)
     try:
@@ -496,6 +497,7 @@ def get_working_order_status(deal_id: str) -> dict:
                 return {"status": "filled", "fill_price": fill_price}
     except Exception as e:
         logger.error(f"get_working_order_status({deal_id}) positions: {e}")
+        return {"status": "unknown", "fill_price": None}
 
     # 3. Not found anywhere — treated as deleted/expired
     return {"status": "deleted", "fill_price": None}

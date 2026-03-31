@@ -175,3 +175,13 @@ def test_get_working_order_status_deleted(monkeypatch):
     _make_session(monkeypatch, get_side_effect=fake_get)
     result = ig_client.get_working_order_status("DEAL_GONE")
     assert result == {"status": "deleted", "fill_price": None}
+
+
+def test_get_working_order_status_unknown_on_exception(monkeypatch):
+    """Exception on /workingorders call → status=unknown, fill_price=None (no fallthrough)."""
+    def fake_get(endpoint, params, version):
+        raise ConnectionError("timeout")
+
+    _make_session(monkeypatch, get_side_effect=fake_get)
+    result = ig_client.get_working_order_status("DEAL_ERR")
+    assert result == {"status": "unknown", "fill_price": None}

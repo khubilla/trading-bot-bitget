@@ -1572,6 +1572,7 @@ class MTFBot:
             "priority_rank": priority_rank,
             "priority_score": priority_score,
             "order_id": None,   # filled in below
+            "qty_str": None,    # filled in below (needed by _handle_limit_filled)
         }
         # Place the GTC limit order immediately — SL preset so position is protected on fill
         if not PAPER_MODE:
@@ -1587,6 +1588,7 @@ class MTFBot:
                 else:
                     order_id = tr.place_limit_short(symbol, trigger, sl, tp, qty_str)
                 self.pending_signals[symbol]["order_id"] = order_id
+                self.pending_signals[symbol]["qty_str"]  = qty_str
                 logger.info(
                     f"[S5][{symbol}] 📋 Limit {side} placed @ {trigger:.5f} | "
                     f"order_id={order_id} | SL={sl:.5f} | TP={tp:.5f}"
@@ -1606,9 +1608,10 @@ class MTFBot:
         )
 
     def _entry_watcher_loop(self) -> None:
-        """Background thread — polls mark prices every 4s for:
-        1. Pending S5 signals waiting for entry trigger
-        2. (Paper only) Active position SL/TP simulation — keeps exit prices accurate
+        """Background thread — polls every 4s for:
+        1. S5 pending signals: poll order fill status + OB invalidation + expiry
+        2. Non-S5 pending signals (S3, etc.): price-trigger check (legacy path)
+        3. (Paper only) Active position SL/TP simulation
         """
         while self.running:
             # Paper position monitor — run _check_exit at 4s resolution
@@ -1632,45 +1635,114 @@ class MTFBot:
                 for symbol, sig in ordered:
                     if not sig:
                         continue
-                    # Expire stale signals
-                    if time.time() > sig["expires"]:
-                        logger.info(f"[S5][{symbol}] ⏰ Pending signal expired — removing")
-                        st.add_scan_log(f"[S5][{symbol}] ⏰ Pending expired", "INFO")
-                        self.pending_signals.pop(symbol, None)
-                        continue
-                    # Already in a trade
+                    # Already in a trade — clear the pending signal
                     if symbol in self.active_positions:
                         self.pending_signals.pop(symbol, None)
                         continue
-                    try:
-                        mark = tr.get_mark_price(symbol)
-                    except Exception:
-                        continue
-                    side = sig["side"]
-                    trigger = sig["trigger"]
-                    triggered = (side == "LONG"  and mark >= trigger) or \
-                                (side == "SHORT" and mark <= trigger)
-                    too_far   = (side == "LONG"  and mark > trigger * (1 + config_s5.S5_MAX_ENTRY_BUFFER)) or \
-                                (side == "SHORT" and mark < trigger * (1 - config_s5.S5_MAX_ENTRY_BUFFER))
-                    if too_far:
-                        logger.info(
-                            f"[S5][{symbol}] ⏸️ Entry missed — "
-                            f"price {mark:.5f} >{config_s5.S5_MAX_ENTRY_BUFFER*100:.0f}% past trigger"
-                        )
-                        self.pending_signals.pop(symbol, None)
-                        continue
-                    if triggered:
-                        with self._trade_lock:
-                            if symbol in self.active_positions:
-                                self.pending_signals.pop(symbol, None)
+
+                    strategy = sig.get("strategy")
+
+                    if strategy == "S5":
+                        # ── S5: order-fill polling path ──────────────── #
+                        order_id = sig.get("order_id")
+                        try:
+                            mark = tr.get_mark_price(symbol)
+                        except Exception:
+                            continue
+                        side = sig["side"]
+
+                        # Determine fill info (real vs paper)
+                        fill_info = None
+                        if PAPER_MODE and order_id == "PAPER":
+                            # Simulate fill by price comparison
+                            paper_triggered = (
+                                (side == "LONG"  and mark >= sig["trigger"]) or
+                                (side == "SHORT" and mark <= sig["trigger"])
+                            )
+                            if paper_triggered:
+                                fill_info = {"status": "filled", "fill_price": sig["trigger"]}
+                            else:
+                                fill_info = {"status": "live", "fill_price": 0.0}
+                        else:
+                            try:
+                                fill_info = tr.get_order_fill(symbol, order_id)
+                            except Exception as e:
+                                logger.warning(f"[S5][{symbol}] get_order_fill error: {e}")
                                 continue
-                            if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
-                                # Slots full — stop processing lower-ranked signals this tick
-                                break
-                            if st.is_pair_paused(symbol):
-                                continue
-                            self._fire_pending(symbol, sig, mark, balance)
-                        self.pending_signals.pop(symbol, None)
+
+                        if fill_info["status"] == "filled":
+                            with self._trade_lock:
+                                if symbol in self.active_positions:
+                                    self.pending_signals.pop(symbol, None)
+                                    continue
+                                if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
+                                    break
+                                if st.is_pair_paused(symbol):
+                                    continue
+                                self._handle_limit_filled(symbol, sig, fill_info["fill_price"], balance)
+                            self.pending_signals.pop(symbol, None)
+
+                        elif (side == "LONG"  and
+                              mark < sig["ob_low"] * (1 - config_s5.S5_OB_INVALIDATION_BUFFER_PCT)):
+                            try:
+                                tr.cancel_order(symbol, order_id)
+                            except Exception as e:
+                                logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
+                            logger.info(
+                                f"[S5][{symbol}] ❌ Limit cancelled — OB invalidated (mark={mark:.5f})"
+                            )
+                            st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
+                            self.pending_signals.pop(symbol, None)
+
+                        elif (side == "SHORT" and
+                              mark > sig["ob_high"] * (1 + config_s5.S5_OB_INVALIDATION_BUFFER_PCT)):
+                            try:
+                                tr.cancel_order(symbol, order_id)
+                            except Exception as e:
+                                logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
+                            logger.info(
+                                f"[S5][{symbol}] ❌ Limit cancelled — OB invalidated (mark={mark:.5f})"
+                            )
+                            st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
+                            self.pending_signals.pop(symbol, None)
+
+                        elif time.time() > sig["expires"]:
+                            try:
+                                tr.cancel_order(symbol, order_id)
+                            except Exception as e:
+                                logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
+                            logger.info(f"[S5][{symbol}] ⏰ Limit cancelled — expired")
+                            st.add_scan_log(f"[S5][{symbol}] ⏰ Limit expired — cancelled", "INFO")
+                            self.pending_signals.pop(symbol, None)
+
+                    else:
+                        # ── Non-S5 (S3, etc.): legacy price-trigger path ── #
+                        # Expire stale signals
+                        if time.time() > sig["expires"]:
+                            logger.info(f"[{strategy}][{symbol}] ⏰ Pending signal expired — removing")
+                            st.add_scan_log(f"[{strategy}][{symbol}] ⏰ Pending expired", "INFO")
+                            self.pending_signals.pop(symbol, None)
+                            continue
+                        try:
+                            mark = tr.get_mark_price(symbol)
+                        except Exception:
+                            continue
+                        side = sig["side"]
+                        trigger = sig["trigger"]
+                        triggered = (side == "LONG"  and mark >= trigger) or \
+                                    (side == "SHORT" and mark <= trigger)
+                        if triggered:
+                            with self._trade_lock:
+                                if symbol in self.active_positions:
+                                    self.pending_signals.pop(symbol, None)
+                                    continue
+                                if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
+                                    break
+                                if st.is_pair_paused(symbol):
+                                    continue
+                                self._fire_pending(symbol, sig, mark, balance)
+                            self.pending_signals.pop(symbol, None)
+
             time.sleep(4)
 
     def _fire_pending(self, symbol: str, sig: dict, mark_now: float, balance: float) -> None:
@@ -1721,6 +1793,77 @@ class MTFBot:
         st.add_scan_log(
             f"[S5][{symbol}] 🎯 Entry watcher: {side} @ {mark_now:.5f} | "
             f"SL={sig['sl']:.5f} | TP={sig['tp']:.5f}", "SIGNAL"
+        )
+
+    def _handle_limit_filled(self, symbol: str, sig: dict, fill_price: float, balance: float) -> None:
+        """Called when a GTC limit order fills. Sets up exits and logs the trade."""
+        side     = sig["side"]
+        sl_price = sig["sl"]
+        tp_price = sig["tp"]
+        qty_str  = sig.get("qty_str") or "0"
+
+        # Compute SL execution price and 1:1 partial TP trigger (mirrors open_long/short with use_s5_exits)
+        if side == "LONG":
+            sl_trig   = float(tr._round_price(sl_price, symbol))
+            sl_exec   = float(tr._round_price(sl_trig * 0.995, symbol))
+            one_r     = fill_price - sl_trig
+            part_trig = float(tr._round_price(fill_price + one_r, symbol))
+            tp_targ   = float(tr._round_price(tp_price, symbol)) if tp_price > fill_price else 0.0
+        else:
+            sl_trig   = float(tr._round_price(sl_price, symbol))
+            sl_exec   = float(tr._round_price(sl_trig * 1.005, symbol))
+            one_r     = sl_trig - fill_price
+            part_trig = float(tr._round_price(fill_price - one_r, symbol))
+            tp_targ   = float(tr._round_price(tp_price, symbol)) if 0 < tp_price < fill_price else 0.0
+
+        tr._place_s5_exits(
+            symbol,
+            side.lower(),
+            qty_str,
+            sl_trig, sl_exec,
+            part_trig, tp_targ,
+            config_s5.S5_TRAIL_RANGE_PCT,
+        )
+
+        trade_id = uuid.uuid4().hex[:8]
+        trade = {
+            "symbol":   symbol,
+            "side":     side,
+            "qty":      qty_str,
+            "entry":    fill_price,
+            "sl":       sl_trig,
+            "tp":       tp_targ if tp_targ > 0 else part_trig,
+            "leverage": config_s5.S5_LEVERAGE,
+            "margin":   round(balance * config_s5.S5_TRADE_SIZE_PCT, 4),
+            "tpsl_set": True,
+            "strategy": "S5",
+            "snap_entry_trigger":    round(sig["trigger"], 8),
+            "snap_sl":               round(sig["sl"], 8),
+            "snap_rr":               sig.get("rr"),
+            "snap_sentiment":        sig.get("sentiment", "?"),
+            "snap_sr_clearance_pct": sig.get("sr_clearance_pct"),
+            "snap_s5_ob_low":        round(sig["ob_low"],  8) if sig.get("ob_low")  else None,
+            "snap_s5_ob_high":       round(sig["ob_high"], 8) if sig.get("ob_high") else None,
+            "snap_s5_tp":            round(sig["tp"], 8)      if sig.get("tp")      else None,
+            "trade_id": trade_id,
+        }
+        _log_trade(f"S5_{side}", trade)
+        st.add_open_trade(trade)
+        if PAPER_MODE:
+            tr.tag_strategy(symbol, "S5")
+        self.active_positions[symbol] = {
+            "side": side, "strategy": "S5",
+            "box_high": sig["trigger"] if side == "LONG" else sig["sl"],
+            "box_low":  sig["sl"]      if side == "LONG" else sig["trigger"],
+            "trade_id": trade_id,
+        }
+        logger.info(
+            f"[S5][{symbol}] ✅ Limit filled {side} @ {fill_price:.5f} | "
+            f"SL={sl_trig} | TP={'trail' if tp_targ == 0 else tp_targ}"
+        )
+        st.add_scan_log(
+            f"[S5][{symbol}] ✅ Limit filled {side} @ {fill_price:.5f} | "
+            f"SL={sl_trig} | TP={tp_price:.5f}", "SIGNAL"
         )
 
 

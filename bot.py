@@ -215,7 +215,15 @@ class MTFBot:
         try:
             existing = tr.get_all_open_positions()
             for sym, pos in existing.items():
-                strategy = pos.get("strategy", "UNKNOWN")
+                # Backfill strategy, SL, TP, and open time from CSV — the exchange
+                # all-position API doesn't return these fields.
+                _csv     = _get_open_csv_row(config.TRADE_LOG, sym)
+                strategy = (_csv.get("action", "").split("_")[0]
+                            if _csv else pos.get("strategy", "UNKNOWN")) or "UNKNOWN"
+                _sl      = (_csv.get("sl")  or pos.get("sl",  "?")) if _csv else pos.get("sl",  "?")
+                _tp      = (_csv.get("tp")  or pos.get("tp",  "?")) if _csv else pos.get("tp",  "?")
+                _opened  = (_csv.get("timestamp") or pos.get("opened_at")) if _csv else pos.get("opened_at")
+
                 _pmem = st.get_position_memory(sym)
                 _resumed_ap: dict = {
                     "side": pos["side"], "strategy": strategy,
@@ -233,12 +241,12 @@ class MTFBot:
                     "side":      pos["side"],
                     "qty":       pos["qty"],
                     "entry":     pos["entry_price"],
-                    "sl":        pos.get("sl", "?"),
-                    "tp":        pos.get("tp", "?"),
+                    "sl":        _sl,
+                    "tp":        _tp,
                     "margin":    pos.get("margin", 0),
                     "leverage":  pos.get("leverage", 0),
                     "strategy":  strategy,
-                    "opened_at": pos.get("opened_at"),  # preserve original open time
+                    "opened_at": _opened,
                 })
             if existing:
                 st.add_scan_log(f"Resumed {len(existing)} position(s)", "WARN")

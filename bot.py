@@ -1571,7 +1571,31 @@ class MTFBot:
             "expires": time.time() + 4 * 3600,
             "priority_rank": priority_rank,
             "priority_score": priority_score,
+            "order_id": None,   # filled in below
         }
+        # Place the GTC limit order immediately — SL preset so position is protected on fill
+        if not PAPER_MODE:
+            try:
+                balance  = tr.get_usdt_balance()
+                equity   = tr._get_total_equity() or balance
+                notional = equity * config_s5.S5_TRADE_SIZE_PCT * config_s5.S5_LEVERAGE
+                mark     = tr.get_mark_price(symbol)
+                qty_str  = tr._round_qty(notional / mark, symbol)
+                if side == "LONG":
+                    order_id = tr.place_limit_long(symbol, trigger, sl, tp, qty_str)
+                else:
+                    order_id = tr.place_limit_short(symbol, trigger, sl, tp, qty_str)
+                self.pending_signals[symbol]["order_id"] = order_id
+                logger.info(
+                    f"[S5][{symbol}] 📋 Limit {side} placed @ {trigger:.5f} | "
+                    f"order_id={order_id} | SL={sl:.5f} | TP={tp:.5f}"
+                )
+            except Exception as e:
+                logger.error(f"[S5][{symbol}] ❌ Failed to place limit order: {e}")
+                self.pending_signals.pop(symbol, None)
+                return
+        else:
+            self.pending_signals[symbol]["order_id"] = "PAPER"
         logger.info(
             f"[S5][{symbol}] 🕐 PENDING {side} queued | "
             f"trigger={trigger:.5f} | SL={sl:.5f} | TP={tp:.5f} | R:R={rr}"

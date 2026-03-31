@@ -964,4 +964,5 @@ def index():
 if __name__ == "__main__":
     label = " [PAPER]" if PAPER_MODE else ""
     print(f"🚀 Dashboard{label}: http://localhost:{PORT}")
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="warning")
+    # nosec B104 — intentional: dashboard is a local LAN service, binding to all interfaces is by design
+    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="warning")  # nosec B104

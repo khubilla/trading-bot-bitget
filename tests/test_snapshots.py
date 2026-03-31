@@ -163,8 +163,9 @@ def test_bot_saves_scale_in_snapshot(tmp_path, monkeypatch):
 
 def test_startup_reconcile_partial_saves_snapshot(tmp_path, monkeypatch):
     """
-    Startup partial reconciliation snapshot save call produces a valid
-    'partial' snapshot in data/snapshots/.
+    Validates the snapshot module contract used by Pass A startup reconciliation:
+    get_candles + save_snapshot with partial event produces a valid snapshot file.
+    Note: does not exercise the bot.__init__ code path directly.
     """
     import snapshot, pandas as pd
 
@@ -193,8 +194,6 @@ def test_startup_reconcile_partial_saves_snapshot(tmp_path, monkeypatch):
         candles=bot._df_to_candles(_sdf),
         event_price=round(exit_p, 8),
     )
-
-    import json
     result = snapshot.load_snapshot(trade_id, "partial")
     assert result is not None
     assert result["event"] == "partial"

@@ -54,6 +54,31 @@ async def validate_symbol_middleware(request: Request, call_next):
     response = await call_next(request)
     return response
 
+# Security headers middleware to protect against common web vulnerabilities
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """
+    Inject security headers on every response:
+    - X-Frame-Options: DENY — prevents clickjacking
+    - X-Content-Type-Options: nosniff — prevents MIME-type sniffing
+    - Referrer-Policy: no-referrer — restricts referrer information
+    - Content-Security-Policy — controls resource loading and prevents XSS
+    - Remove server header — prevents version leakage
+    """
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' https://unpkg.com; "
+        "style-src 'self' 'unsafe-inline'"
+    )
+    # Remove server header to prevent version leakage
+    if "server" in response.headers:
+        del response.headers["server"]
+    return response
+
 # Add bot directory to path so we can import trader + config
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -1027,4 +1052,4 @@ if __name__ == "__main__":
     label = " [PAPER]" if PAPER_MODE else ""
     print(f"🚀 Dashboard{label}: http://localhost:{PORT}")
     # nosec B104 — intentional: dashboard is a local LAN service, binding to all interfaces is by design
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="warning")  # nosec B104
+    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="warning", server_header=False)  # nosec B104

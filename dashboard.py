@@ -807,8 +807,8 @@ def get_entry_chart(
 def get_trade_chart(
     trade_id: str = "",
     side:     str   = "",
-    sl:       float = 0.0,
-    tp:       float = 0.0,
+    sl:       float | None = None,
+    tp:       float | None = None,
     strategy: str   = "",
 ):
     """
@@ -862,8 +862,8 @@ def get_trade_chart(
             "price":      snap["event_price"],
         }
         if ev_type == "open":
-            if sl:  ev["sl"] = sl
-            if tp:  ev["tp"] = tp
+            if sl is not None:  ev["sl"] = sl
+            if tp is not None:  ev["tp"] = tp
         events_out.append(ev)
 
     return JSONResponse({

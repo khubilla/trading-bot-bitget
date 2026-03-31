@@ -1,6 +1,6 @@
 # Codebase Dependency Map
 
-**Last updated:** 2026-03-28
+**Last updated:** 2026-03-31
 **Update frequency:** After every PR that changes interfaces, data contracts, or cross-file dependencies
 
 ---
@@ -111,7 +111,7 @@ def evaluate_s5(
       S5_DAILY_EMA_FAST, S5_DAILY_EMA_MED, S5_DAILY_EMA_SLOW,
       S5_HTF_BOS_LOOKBACK,
       S5_OB_LOOKBACK, S5_OB_MIN_IMPULSE, S5_CHOCH_LOOKBACK,
-      S5_ENTRY_BUFFER_PCT, S5_SL_BUFFER_PCT,
+      S5_MAX_ENTRY_BUFFER, S5_SL_BUFFER_PCT,
       S5_MIN_RR, S5_SWING_LOOKBACK,
       S5_OB_MIN_RANGE_PCT, S5_SMC_FVG_FILTER, S5_SMC_FVG_LOOKBACK,
   )
@@ -121,7 +121,7 @@ def evaluate_s5(
 **Return values:**
 ```python
 (signal, entry_trigger, sl_price, tp_price, ob_low, ob_high, reason)
-# signal: "LONG" | "SHORT" | "HOLD"
+# signal: "PENDING_LONG" | "PENDING_SHORT" | "HOLD"
 # entry_trigger: float (price level to enter trade)
 # sl_price: float (stop loss price)
 # tp_price: float (take profit price)
@@ -506,6 +506,17 @@ grep -n "_log_trade" ig_bot.py
     "sl": float,
     "tp": float,
     "opened_at": str,  # ISO timestamp
+  } | None,
+  "pending_order": {
+    "deal_id": str,
+    "side": "LONG" | "SHORT",
+    "ob_low": float,
+    "ob_high": float,
+    "sl": float,
+    "tp": float,
+    "trigger": float,
+    "size": float,
+    "expires": float,   # Unix timestamp
   } | None
 }
 ```
@@ -517,6 +528,9 @@ grep -n "_log_trade" ig_bot.py
 
 2. **Changing position field names** → IG bot fails to resume position after restart
    - Fix: Update all ig_bot.py position reads/writes
+
+3. **Removing or renaming "pending_order" key** → ig_bot.py fails to restore pending orders after restart
+   - Fix: Update ig_bot.py _save_state() and _sync_live_position() load paths
 
 **Verification commands:**
 
@@ -628,7 +642,7 @@ Each strategy (S2, S3, S5) has its own minimum reward:risk ratio parameter, and 
 |-----------|----------|-----------|----------------|---------|
 | `S2_MIN_RR` | Not defined | — | Strategy S2 does not use MIN_RR | N/A |
 | `S3_MIN_RR` | S3 (Smart Money Confluence) | 2.0 | strategy.py line 739 (breakout R:R check) | 2.0 |
-| `S5_MIN_RR` | S5 (SMC Order Block Pullback) | 2.0 | strategy.py lines 1219, 1293 (ChoCH R:R checks) | 2.0 |
+| `S5_MIN_RR` | S5 (SMC Order Block Pullback) | 2.0 | strategy.py lines 1228, 1297 (R:R checks) | 2.0 |
 
 **Why the confusion:**
 
@@ -916,4 +930,4 @@ head -1 ig_trades.csv
 ### Document History
 
 - 2026-03-28: Complete dependency documentation system deployed
-- [Future updates logged here with date and what changed]
+- 2026-03-31: S5 SMC Limit Order Entry — evaluate_s5() now returns PENDING_LONG/SHORT (not LONG/SHORT); removed S5_ENTRY_BUFFER_PCT from config import (replaced by S5_MAX_ENTRY_BUFFER as stale OB guard); ig_state.json gained pending_order field; ChoCH removed from S5 strategy logic

@@ -239,11 +239,36 @@ def get_state():
         return JSONResponse({"status": "ERROR", "error": str(e)})
 
 
+def _json_depth(obj, current=0):
+    """Return the maximum nesting depth of a JSON-compatible object."""
+    if current > 20:
+        return current
+    if isinstance(obj, dict):
+        if not obj:
+            return current
+        return max(_json_depth(v, current + 1) for v in obj.values())
+    if isinstance(obj, list):
+        if not obj:
+            return current
+        return max(_json_depth(item, current + 1) for item in obj)
+    return current
+
+
 @app.post("/api/chat")
 async def chat(request: Request):
     """Stream a Claude trade analysis response via SSE."""
     import claude_analyst
     body      = await request.json()
+
+    # --- Payload size validation (prevent Anthropic API billing abuse) ---
+    if len(json.dumps(body.get("messages", []))) > 10_000:
+        return JSONResponse({"error": "messages payload too large"}, status_code=413)
+    if len(json.dumps(body.get("trade", {}))) > 5_000:
+        return JSONResponse({"error": "trade payload too large"}, status_code=413)
+    if _json_depth(body) > 20:
+        return JSONResponse({"error": "payload nesting too deep"}, status_code=400)
+    # --- End payload validation ---
+
     trade     = body.get("trade", {})
     messages  = body.get("messages", [])
 

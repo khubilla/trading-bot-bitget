@@ -1655,9 +1655,11 @@ class MTFBot:
                         fill_info = None
                         if PAPER_MODE and order_id == "PAPER":
                             # Simulate fill by price comparison
+                            # LONG limit BUY fills when price DROPS to trigger (mark <= trigger)
+                            # SHORT limit SELL fills when price RISES to trigger (mark >= trigger)
                             paper_triggered = (
-                                (side == "LONG"  and mark >= sig["trigger"]) or
-                                (side == "SHORT" and mark <= sig["trigger"])
+                                (side == "LONG"  and mark <= sig["trigger"]) or
+                                (side == "SHORT" and mark >= sig["trigger"])
                             )
                             if paper_triggered:
                                 fill_info = {"status": "filled", "fill_price": sig["trigger"]}
@@ -1802,6 +1804,71 @@ class MTFBot:
         tp_price = sig["tp"]
         qty_str  = sig.get("qty_str") or "0"
 
+        if PAPER_MODE:
+            # Paper mode: delegate to open_long/open_short which handle exits internally.
+            # _round_price and _place_s5_exits are not available in paper_trader.
+            if side == "LONG":
+                trade = tr.open_long(
+                    symbol,
+                    sl_floor       = sl_price,
+                    leverage       = config_s5.S5_LEVERAGE,
+                    trade_size_pct = config_s5.S5_TRADE_SIZE_PCT,
+                    use_s5_exits   = True,
+                    tp_price_abs   = tp_price,
+                )
+            else:
+                trade = tr.open_short(
+                    symbol,
+                    sl_floor       = sl_price,
+                    leverage       = config_s5.S5_LEVERAGE,
+                    trade_size_pct = config_s5.S5_TRADE_SIZE_PCT,
+                    use_s5_exits   = True,
+                    tp_price_abs   = tp_price,
+                )
+            sl_trig  = trade.get("sl", sl_price)
+            tp_targ  = trade.get("tp", tp_price)
+            trade_id = uuid.uuid4().hex[:8]
+            trade.update({
+                "symbol":   symbol,
+                "side":     side,
+                "qty":      qty_str,
+                "entry":    fill_price,
+                "sl":       sl_trig,
+                "tp":       tp_targ,
+                "leverage": config_s5.S5_LEVERAGE,
+                "margin":   round(balance * config_s5.S5_TRADE_SIZE_PCT, 4),
+                "tpsl_set": True,
+                "strategy": "S5",
+                "snap_entry_trigger":    round(sig["trigger"], 8),
+                "snap_sl":               round(sig["sl"], 8),
+                "snap_rr":               sig.get("rr"),
+                "snap_sentiment":        sig.get("sentiment", "?"),
+                "snap_sr_clearance_pct": sig.get("sr_clearance_pct"),
+                "snap_s5_ob_low":        round(sig["ob_low"],  8) if sig.get("ob_low")  else None,
+                "snap_s5_ob_high":       round(sig["ob_high"], 8) if sig.get("ob_high") else None,
+                "snap_s5_tp":            round(sig["tp"], 8)      if sig.get("tp")      else None,
+                "trade_id": trade_id,
+            })
+            _log_trade(f"S5_{side}", trade)
+            st.add_open_trade(trade)
+            tr.tag_strategy(symbol, "S5")
+            self.active_positions[symbol] = {
+                "side": side, "strategy": "S5",
+                "box_high": sig["trigger"] if side == "LONG" else sig["sl"],
+                "box_low":  sig["sl"]      if side == "LONG" else sig["trigger"],
+                "trade_id": trade_id,
+            }
+            logger.info(
+                f"[S5][{symbol}] ✅ [PAPER] Limit filled {side} @ {fill_price:.5f} | "
+                f"SL={sl_trig} | TP={tp_targ}"
+            )
+            st.add_scan_log(
+                f"[S5][{symbol}] ✅ [PAPER] Limit filled {side} @ {fill_price:.5f} | "
+                f"SL={sl_trig} | TP={tp_price:.5f}", "SIGNAL"
+            )
+            return
+
+        # ── Real trader path ─────────────────────────────────────────── #
         # Compute SL execution price and 1:1 partial TP trigger (mirrors open_long/short with use_s5_exits)
         if side == "LONG":
             sl_trig   = float(tr._round_price(sl_price, symbol))
@@ -1849,8 +1916,6 @@ class MTFBot:
         }
         _log_trade(f"S5_{side}", trade)
         st.add_open_trade(trade)
-        if PAPER_MODE:
-            tr.tag_strategy(symbol, "S5")
         self.active_positions[symbol] = {
             "side": side, "strategy": "S5",
             "box_high": sig["trigger"] if side == "LONG" else sig["sl"],

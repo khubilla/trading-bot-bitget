@@ -392,35 +392,55 @@ def test_watcher_non_s5_signal_uses_price_trigger(monkeypatch):
 # ── Test 9: PAPER_MODE simulates fill via price comparison ────────── #
 
 def test_watcher_paper_mode_simulates_fill_on_trigger(monkeypatch):
-    """In PAPER_MODE with order_id=='PAPER', fill is simulated when mark >= trigger (LONG)."""
+    """In PAPER_MODE with order_id=='PAPER', LONG fills when mark <= trigger (price dropped to limit).
+
+    This test lets _handle_limit_filled run the real PAPER_MODE path (no mock),
+    and asserts that active_positions is populated for the symbol.
+    """
     b = _make_bot(monkeypatch)
     monkeypatch.setattr(bot, "PAPER_MODE", True)
 
     sig = _make_s5_sig(side="LONG", order_id="PAPER")
     b.pending_signals[SYMBOL] = sig
 
-    # mark >= trigger → should simulate fill
-    mark = sig["trigger"]  # exactly at trigger
+    # LONG limit BUY fills when price DROPS to (or below) trigger
+    mark = sig["trigger"]  # exactly at trigger — price has dropped to limit level
 
-    handled = []
-    monkeypatch.setattr(
-        b, "_handle_limit_filled",
-        lambda sym, s, fp, bal: handled.append((sym, fp)),
-    )
+    # Build a minimal fake "paper_trader" module so that the PAPER_MODE path in
+    # _handle_limit_filled gets the paper_trader interface (open_long, tag_strategy)
+    # without hitting the network or file system.
+    import types
+    fake_tr = types.SimpleNamespace()
+    fake_trade = {
+        "symbol": SYMBOL, "side": "LONG",
+        "qty": 100.0, "entry": mark,
+        "sl": sig["sl"], "tp": sig["tp"],
+        "leverage": 10, "margin": 25.0, "tpsl_set": True,
+    }
+    fake_tr.open_long  = lambda *a, **kw: dict(fake_trade)
+    fake_tr.open_short = lambda *a, **kw: dict(fake_trade)
+    fake_tr.tag_strategy = lambda sym, strat: None
+    monkeypatch.setattr(bot, "tr", fake_tr)
+    monkeypatch.setattr(bot, "_log_trade", lambda action, details: None)
 
     # Simulate paper fill logic (what the watcher loop does for PAPER)
+    # LONG: fill when mark <= trigger (price dropped to the limit price)
     order_id = sig.get("order_id")
     fill_price = None
     if order_id == "PAPER":
-        if sig["side"] == "LONG" and mark >= sig["trigger"]:
+        if sig["side"] == "LONG" and mark <= sig["trigger"]:
             fill_price = sig["trigger"]
-        elif sig["side"] == "SHORT" and mark <= sig["trigger"]:
+        elif sig["side"] == "SHORT" and mark >= sig["trigger"]:
             fill_price = sig["trigger"]
 
     if fill_price is not None:
         b._handle_limit_filled(SYMBOL, sig, fill_price, 1000.0)
         b.pending_signals.pop(SYMBOL, None)
 
-    assert len(handled) == 1
-    assert handled[0] == (SYMBOL, sig["trigger"])
+    # Position should have been added via the PAPER_MODE path in _handle_limit_filled
+    assert SYMBOL in b.active_positions, "active_positions should contain symbol after paper fill"
+    ap = b.active_positions[SYMBOL]
+    assert ap["side"] == "LONG"
+    assert ap["strategy"] == "S5"
+    assert "trade_id" in ap
     assert SYMBOL not in b.pending_signals

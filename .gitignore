@@ -20,3 +20,5 @@ ig_bot.log
 .superpowers
 ig_state.json
 .disclaimer_agreed
+ig_trades.csv
+ig_paper_trades.csv

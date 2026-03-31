@@ -1434,6 +1434,13 @@ function render(s) {
             <div class="tg-row"><span class="tg-key">TP</span><span class="tg-val pos">$${fmtPrice(t.tp)}</span></div>
             <div class="tg-row" style="grid-column:1/-1"><span class="tg-key">Margin</span><span class="tg-val">$${fmt(margin,2)} @ ${lev}x</span></div>
           </div>
+          ${t.trade_id ? `<div style="text-align:right;padding:4px 0 0;font-size:11px">
+            <span onclick="openCombinedChart(${JSON.stringify({
+              trade_id: t.trade_id, symbol: t.symbol, strategy: strat,
+              side: t.side, entry: t.entry, sl: t.sl, tp: t.tp,
+              open_at: t.open_at || '',
+            })})" title="Trade chart" style="cursor:pointer;color:var(--muted)">📊</span>
+          </div>` : ''}
         </div>`;
     }).join('');
   }
@@ -1478,7 +1485,7 @@ function render(s) {
           <span class="hist-pnl ${pnlClass}">${fmtUSD(pnl)}</span>
           <span class="hist-time">${relTime(t.closed_at)}</span>
           <span style="font-size:9px;color:var(--muted);margin-left:auto;display:flex;gap:7px;align-items:center">
-            ${canChart ? `<span onclick="openEntryChart(window._histTrades[${i}])" title="Entry chart" style="cursor:pointer">📊</span>` : ''}
+            ${canChart ? `<span onclick="openCombinedChart(window._histTrades[${i}])" title="Trade chart" style="cursor:pointer">📊</span>` : ''}
             <span onclick="openChat(window._histTrades[${i}])" title="AI analysis" style="cursor:pointer">💬</span>
             ${canChart ? `<span onclick="openTradeChart(window._histTrades[${i}])" title="Full chart" style="cursor:pointer">↗</span>` : ''}
           </span>

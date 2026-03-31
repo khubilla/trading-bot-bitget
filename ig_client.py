@@ -206,6 +206,12 @@ def get_candles(epic: str, interval: str, limit: int = 100) -> pd.DataFrame:
 
     df = pd.DataFrame(rows)
     df = df.sort_values("ts").reset_index(drop=True)
+    # Drop candles with invalid prices (IG returns 0 or garbage negatives for
+    # market-closure gaps and some data quality issues).
+    bad = (df["open"] <= 0) | (df["high"] <= 0) | (df["low"] <= 0) | (df["close"] <= 0)
+    if bad.any():
+        logger.debug(f"get_candles({epic},{interval}): dropped {bad.sum()} invalid candle(s)")
+        df = df[~bad].reset_index(drop=True)
     return df
 
 

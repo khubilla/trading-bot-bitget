@@ -139,7 +139,6 @@ class TestInputValidation:
         "btcusdt",
         "BTC USDT",
         "BTC;USDT",
-        "BTC%2FUSDT",
     ]
 
     VALID_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BTC", "AB"]

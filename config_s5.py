@@ -37,9 +37,10 @@ S5_OB_MIN_RANGE_PCT = 0.005  # OB candle range (high-low)/low must be ≥0.5%; f
 S5_CHOCH_LOOKBACK  = 20     # candles to check for OB touch + ChoCH confirmation
 
 # ── Entry / SL ────────────────────────────────────────────── #
-S5_ENTRY_BUFFER_PCT = 0.005  # 0.5% beyond OB boundary for entry trigger
-S5_MAX_ENTRY_BUFFER = 0.04   # skip if price already >4% past entry trigger
+# S5_ENTRY_BUFFER_PCT removed — entry is at ob_high exactly (limit order)
+S5_MAX_ENTRY_BUFFER = 0.04   # HOLD if price already >4% above ob_high at signal time
 S5_SL_BUFFER_PCT    = 0.003  # 0.3% beyond OB outer edge for SL
+S5_OB_INVALIDATION_BUFFER_PCT = 0.001  # cancel limit if mark crosses ob_low by >0.1%
 
 # ── Take Profit (structural) ───────────────────────────────── #
 S5_SWING_LOOKBACK   = 50     # 15m candles to scan for the structural TP swing target

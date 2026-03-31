@@ -40,8 +40,7 @@ S5_OB_MIN_RANGE_PCT = 0.002
 S5_CHOCH_LOOKBACK  = 10
 
 # ── Entry / SL ───────────────────────────────────────────── #
-# Crypto default: 0.005 (0.5%). Slightly tighter on a point-based instrument.
-S5_ENTRY_BUFFER_PCT = 0.003
+# S5_ENTRY_BUFFER_PCT removed — entry is at ob_high exactly (limit order)
 
 # Crypto default: 0.04 (4% = ~720pts — meaningless staleness guard on US30).
 # US30: 1% = ~180pts, meaningful threshold for a stale entry.
@@ -51,6 +50,7 @@ S5_MAX_ENTRY_BUFFER = 0.01
 # Crypto default: 0.003 (0.3% = ~54pts). 0.2% = ~36pts is tighter but
 # sufficient for a 30-50pt average candle range.
 S5_SL_BUFFER_PCT   = 0.002
+S5_OB_INVALIDATION_BUFFER_PCT = 0.001
 
 # ── Structural TP (swing target) ─────────────────────────── #
 # Crypto default: 50 (12.5h — TP targets land in overnight/Asian hours).

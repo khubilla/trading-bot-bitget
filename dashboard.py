@@ -127,6 +127,7 @@ def _load_csv_history(csv_path: str, limit: int = 50) -> list:
 
             rows.append({
                 # existing fields (unchanged contract for dashboard rendering)
+                "trade_id":    tid,
                 "symbol":      r.get("symbol") or open_row.get("symbol", ""),
                 "side":        r.get("side") or open_row.get("side", ""),
                 "pnl":         round(pnl, 4),
@@ -163,6 +164,7 @@ def _load_csv_history(csv_path: str, limit: int = 50) -> list:
             pnl      = _safe_float(r.get("pnl")) or 0.0
             open_row = open_rows.get(tid, {})
             rows.append({
+                "trade_id":    tid,
                 "symbol":      r.get("symbol") or open_row.get("symbol", ""),
                 "side":        r.get("side") or open_row.get("side", ""),
                 "pnl":         round(pnl, 4),

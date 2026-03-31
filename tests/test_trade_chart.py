@@ -146,3 +146,30 @@ def test_load_csv_history_graceful_no_open_row(tmp_path):
     assert t["symbol"] == "BTCUSDT"
     assert t["result"] == "WIN"
     assert t["exit_price"] == 43000.0
+
+
+def test_load_csv_history_includes_trade_id(tmp_path):
+    """trade_id must be present in history entries so the dashboard can send it to /api/entry-chart."""
+    import dashboard
+    csv_rows = [
+        {
+            "timestamp": "2026-03-29T14:22:00+00:00",
+            "trade_id": "abc123", "action": "S5_LONG",
+            "symbol": "BTCUSDT", "side": "LONG",
+            "entry": "42100.0", "sl": "41800.0", "tp": "43200.0",
+        },
+        {
+            "timestamp": "2026-03-29T16:05:00+00:00",
+            "trade_id": "abc123", "action": "S5_CLOSE",
+            "symbol": "BTCUSDT", "side": "LONG",
+            "pnl": "4.2", "result": "WIN", "pnl_pct": "2.1",
+            "exit_reason": "TP", "exit_price": "42680.0",
+        },
+    ]
+    # Reuse the _make_csv helper from this file
+    csv_file = tmp_path / "trades.csv"
+    csv_file.write_text(_make_csv(csv_rows))
+
+    hist = dashboard._load_csv_history(str(csv_file), limit=10)
+    assert len(hist) == 1
+    assert hist[0].get("trade_id") == "abc123", f"trade_id missing or wrong: {hist[0].get('trade_id')}"

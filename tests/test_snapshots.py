@@ -120,3 +120,42 @@ def test_bot_saves_open_snapshot_s3(tmp_path, monkeypatch):
     assert snap["symbol"] == "RIVERUSDT"
     assert len(snap["candles"]) == 25
     assert snap["event_price"] == 15.756
+
+
+def test_bot_saves_scale_in_snapshot(tmp_path, monkeypatch):
+    """_do_scale_in must save a 'scale_in' snapshot after executing scale-in."""
+    import snapshot, pandas as pd, bot
+
+    monkeypatch.setattr(snapshot, "_SNAP_DIR", tmp_path)
+
+    fake_df = pd.DataFrame([
+        {"ts": 1743296100000 + i * 900_000,
+         "open": 15.71, "high": 15.82, "low": 15.68, "close": 15.80, "vol": 100.0}
+        for i in range(25)
+    ])
+    monkeypatch.setattr(bot.tr, "get_candles", lambda sym, interval, limit=100: fake_df)
+    monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: 15.80)
+    monkeypatch.setattr(bot.tr, "scale_in_long", lambda *a, **kw: None)
+    monkeypatch.setattr(bot.tr, "get_all_open_positions", lambda: {"RIVERUSDT": {"margin": 6.0}})
+    monkeypatch.setattr(bot.st, "add_scan_log", lambda *a, **kw: None)
+    monkeypatch.setattr(bot.st, "update_open_trade_margin", lambda *a: None)
+    monkeypatch.setattr(bot, "_log_trade", lambda action, details: None)
+    monkeypatch.setattr(bot, "PAPER_MODE", False)
+
+    b = object.__new__(bot.MTFBot)
+    ap = {
+        "side": "LONG", "strategy": "S2", "trade_id": "tid99",
+        "box_high": 15.80, "box_low": 14.99,
+        "scale_in_pending": True, "scale_in_after": 0,
+        "scale_in_trade_size_pct": 0.02,
+    }
+    b._do_scale_in("RIVERUSDT", ap)
+
+    import json
+    files = list(tmp_path.glob("*_scale_in.json"))
+    assert len(files) == 1, f"Expected 1 scale_in snapshot, found: {files}"
+    snap = json.loads(files[0].read_text(encoding="utf-8"))
+    assert snap["event"] == "scale_in"
+    assert snap["interval"] == "1D"   # S2 uses daily
+    assert snap["event_price"] == 15.80
+    assert len(snap["candles"]) == 25

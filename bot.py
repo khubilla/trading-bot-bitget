@@ -155,6 +155,15 @@ def _df_to_candles(df) -> list[dict]:
     ]
 
 
+_STRATEGY_CANDLE_INTERVAL = {
+    "S1": config_s1.LTF_INTERVAL,    # "3m"
+    "S2": "1D",
+    "S3": config_s3.S3_LTF_INTERVAL, # "15m"
+    "S4": "1D",
+    "S5": config_s5.S5_LTF_INTERVAL, # "15m"
+}
+
+
 def _rebuild_stats_from_csv(csv_path: str):
     """Rebuild win/loss stats in state.py from the CSV so they survive bot restarts."""
     if not os.path.exists(csv_path):
@@ -493,42 +502,23 @@ class MTFBot:
                                 "result": "WIN" if partial_pnl >= 0 else "LOSS",
                                 "pnl_pct": partial_pct, "exit_reason": "PARTIAL_TP",
                             })
+                            try:
+                                interval = _STRATEGY_CANDLE_INTERVAL.get(ap["strategy"], "15m")
+                                _snap_df = tr.get_candles(sym, interval, limit=100)
+                                if not _snap_df.empty:
+                                    snapshot.save_snapshot(
+                                        trade_id=ap.get("trade_id", ""), event="partial",
+                                        symbol=sym, interval=interval,
+                                        candles=_df_to_candles(_snap_df),
+                                        event_price=round(mark_now, 8),
+                                    )
+                            except Exception as e:
+                                logger.warning(f"[{ap['strategy']}][{sym}] partial snapshot failed: {e}")
                             st.update_open_trade_margin(sym, half_margin)
                             logger.info(f"[{ap['strategy']}][{sym}] 📊 Live partial logged: PnL≈{partial_pnl:+.4f} ({partial_pct:+.1f}%)")
                     # Scale-in check (S2/S4 only)
                     if ap.get("scale_in_pending") and time.time() >= ap["scale_in_after"]:
-                        try:
-                            mark_now  = tr.get_mark_price(sym)
-                            in_window = False
-                            if ap["strategy"] == "S2":
-                                in_window = ap["box_high"] <= mark_now <= ap["box_high"] * (1 + config_s2.S2_MAX_ENTRY_BUFFER)
-                            elif ap["strategy"] == "S4":
-                                pl = ap["s4_prev_low"]
-                                in_window = pl * (1 - config_s4.S4_MAX_ENTRY_BUFFER) <= mark_now <= pl * (1 - config_s4.S4_ENTRY_BUFFER)
-                            remaining = ap["scale_in_trade_size_pct"] * 0.5
-                            if in_window:
-                                if ap["strategy"] == "S2":
-                                    tr.scale_in_long(sym, remaining, config_s2.S2_LEVERAGE)
-                                else:
-                                    tr.scale_in_short(sym, remaining, config_s4.S4_LEVERAGE)
-                                logger.info(f"[{ap['strategy']}][{sym}] ✅ Scale-in +{remaining*100:.0f}% @ {mark_now:.5f}")
-                                st.add_scan_log(f"[{ap['strategy']}][{sym}] Scale-in executed @ {mark_now:.5f}", "INFO")
-                                _log_trade(f"{ap['strategy']}_SCALE_IN", {
-                                    "trade_id": ap.get("trade_id", ""),
-                                    "symbol": sym, "side": ap["side"],
-                                    "entry": round(mark_now, 8),
-                                })
-                                # Sync updated margin to state.json for dashboard
-                                if PAPER_MODE:
-                                    updated_pos = tr.get_all_open_positions().get(sym, {})
-                                    if updated_pos.get("margin"):
-                                        st.update_open_trade_margin(sym, updated_pos["margin"])
-                            else:
-                                logger.info(f"[{ap['strategy']}][{sym}] ⏸️ Scale-in skipped — price {mark_now:.5f} outside entry window")
-                            ap["scale_in_pending"] = False
-                        except Exception as e:
-                            logger.error(f"Scale-in error [{sym}]: {e}")
-                            ap["scale_in_pending"] = False
+                        self._do_scale_in(sym, ap)
 
                     # S5 Structural Swing Trail — trail SL to nearest swing high/low (SMC style)
                     if config_s5.S5_USE_CANDLE_STOPS and ap.get("strategy") == "S5":
@@ -671,6 +661,18 @@ class MTFBot:
                         "pnl_pct": pnl_pct, "exit_reason": exit_reason,
                         "exit_price": _exit_price,
                     })
+                    try:
+                        interval = _STRATEGY_CANDLE_INTERVAL.get(ap["strategy"], "15m")
+                        _snap_df = tr.get_candles(sym, interval, limit=100)
+                        if not _snap_df.empty:
+                            snapshot.save_snapshot(
+                                trade_id=ap.get("trade_id", ""), event="close",
+                                symbol=sym, interval=interval,
+                                candles=_df_to_candles(_snap_df),
+                                event_price=round(_exit_price, 8) if _exit_price else 0.0,
+                            )
+                    except Exception as e:
+                        logger.warning(f"[{ap['strategy']}][{sym}] close snapshot failed: {e}")
                     st.clear_position_memory(sym)
                     del self.active_positions[sym]
 
@@ -1045,6 +1047,55 @@ class MTFBot:
                 if balance < min_bal:
                     continue
                 _dispatchers[strategy](candidate, balance)
+
+    # ── Scale-in executor ────────────────────────────────────────── #
+
+    def _do_scale_in(self, sym: str, ap: dict) -> None:
+        """Execute scale-in for S2/S4 and save candle snapshot."""
+        try:
+            mark_now  = tr.get_mark_price(sym)
+            in_window = False
+            if ap["strategy"] == "S2":
+                in_window = ap["box_high"] <= mark_now <= ap["box_high"] * (1 + config_s2.S2_MAX_ENTRY_BUFFER)
+            elif ap["strategy"] == "S4":
+                pl = ap["s4_prev_low"]
+                in_window = pl * (1 - config_s4.S4_MAX_ENTRY_BUFFER) <= mark_now <= pl * (1 - config_s4.S4_ENTRY_BUFFER)
+            remaining = ap["scale_in_trade_size_pct"] * 0.5
+            if in_window:
+                if ap["strategy"] == "S2":
+                    tr.scale_in_long(sym, remaining, config_s2.S2_LEVERAGE)
+                else:
+                    tr.scale_in_short(sym, remaining, config_s4.S4_LEVERAGE)
+                logger.info(f"[{ap['strategy']}][{sym}] ✅ Scale-in +{remaining*100:.0f}% @ {mark_now:.5f}")
+                st.add_scan_log(f"[{ap['strategy']}][{sym}] Scale-in executed @ {mark_now:.5f}", "INFO")
+                _log_trade(f"{ap['strategy']}_SCALE_IN", {
+                    "trade_id": ap.get("trade_id", ""),
+                    "symbol": sym, "side": ap["side"],
+                    "entry": round(mark_now, 8),
+                })
+                if PAPER_MODE:
+                    updated_pos = tr.get_all_open_positions().get(sym, {})
+                    if updated_pos.get("margin"):
+                        st.update_open_trade_margin(sym, updated_pos["margin"])
+                # Save scale-in snapshot
+                try:
+                    interval = _STRATEGY_CANDLE_INTERVAL.get(ap["strategy"], "15m")
+                    _snap_df = tr.get_candles(sym, interval, limit=100)
+                    if not _snap_df.empty:
+                        snapshot.save_snapshot(
+                            trade_id=ap.get("trade_id", ""), event="scale_in",
+                            symbol=sym, interval=interval,
+                            candles=_df_to_candles(_snap_df),
+                            event_price=round(mark_now, 8),
+                        )
+                except Exception as e:
+                    logger.warning(f"[{ap['strategy']}][{sym}] scale_in snapshot failed: {e}")
+            else:
+                logger.info(f"[{ap['strategy']}][{sym}] ⏸️ Scale-in skipped — price {mark_now:.5f} outside entry window")
+            ap["scale_in_pending"] = False
+        except Exception as e:
+            logger.error(f"Scale-in error [{sym}]: {e}")
+            ap["scale_in_pending"] = False
 
     # ── Per-strategy executors ────────────────────────────────────── #
 

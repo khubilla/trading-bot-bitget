@@ -119,3 +119,4 @@ def test_bot_saves_open_snapshot_s3(tmp_path, monkeypatch):
     assert snap["interval"] == config_s3.S3_LTF_INTERVAL
     assert snap["symbol"] == "RIVERUSDT"
     assert len(snap["candles"]) == 25
+    assert snap["event_price"] == 15.756

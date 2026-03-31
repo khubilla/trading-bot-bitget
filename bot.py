@@ -30,6 +30,7 @@ from strategy import (
 )
 from claude_filter import claude_approve
 import snapshot
+
 PAPER_MODE = "--paper" in sys.argv
 if PAPER_MODE:
     import paper_trader as tr

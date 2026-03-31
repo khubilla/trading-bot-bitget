@@ -610,6 +610,79 @@ def cancel_all_orders(symbol: str):
         logger.warning(f"[{symbol}] cancel orders warn: {e}")
 
 
+def place_limit_long(symbol: str, limit_price: float, sl_price: float,
+                     tp_price: float, qty_str: str) -> str:
+    """Place a GTC limit buy order. Returns order_id string."""
+    resp = bc.post("/api/v2/mix/order/place-order", {
+        "symbol":                symbol,
+        "productType":           PRODUCT_TYPE,
+        "marginMode":            "isolated",
+        "marginCoin":            MARGIN_COIN,
+        "side":                  "buy",
+        "tradeSide":             "open",
+        "orderType":             "limit",
+        "timeInForceValue":      "gtc",
+        "price":                 str(round(limit_price, 8)),
+        "size":                  qty_str,
+        "presetStopLossPrice":   str(round(sl_price, 8)),
+        "presetTakeProfitPrice": str(round(tp_price, 8)),
+    })
+    if resp.get("code") != "00000":
+        raise RuntimeError(f"place_limit order failed: {resp}")
+    return str(resp["data"]["orderId"])
+
+
+def place_limit_short(symbol: str, limit_price: float, sl_price: float,
+                      tp_price: float, qty_str: str) -> str:
+    """Place a GTC limit sell order. Returns order_id string."""
+    resp = bc.post("/api/v2/mix/order/place-order", {
+        "symbol":                symbol,
+        "productType":           PRODUCT_TYPE,
+        "marginMode":            "isolated",
+        "marginCoin":            MARGIN_COIN,
+        "side":                  "sell",
+        "tradeSide":             "open",
+        "orderType":             "limit",
+        "timeInForceValue":      "gtc",
+        "price":                 str(round(limit_price, 8)),
+        "size":                  qty_str,
+        "presetStopLossPrice":   str(round(sl_price, 8)),
+        "presetTakeProfitPrice": str(round(tp_price, 8)),
+    })
+    if resp.get("code") != "00000":
+        raise RuntimeError(f"place_limit order failed: {resp}")
+    return str(resp["data"]["orderId"])
+
+
+def cancel_order(symbol: str, order_id: str) -> None:
+    """Cancel an open limit order by order_id."""
+    resp = bc.post("/api/v2/mix/order/cancel-order", {
+        "symbol":      symbol,
+        "productType": PRODUCT_TYPE,
+        "orderId":     order_id,
+    })
+    if resp.get("code") != "00000":
+        raise RuntimeError(f"cancel_order failed: {resp}")
+
+
+def get_order_fill(symbol: str, order_id: str) -> dict:
+    """
+    Returns {"status": "live"|"filled"|"cancelled", "fill_price": float}
+    fill_price is 0.0 when status is "live" or "cancelled".
+    """
+    resp = bc.get("/api/v2/mix/order/detail",
+                  params={"symbol": symbol, "productType": PRODUCT_TYPE, "orderId": order_id})
+    if resp.get("code") != "00000":
+        raise RuntimeError(f"get_order_fill failed: {resp}")
+    data = resp["data"]
+    status = data.get("status", "")
+    if status in ("live", "new"):
+        return {"status": "live", "fill_price": 0.0}
+    if status == "filled":
+        return {"status": "filled", "fill_price": float(data["priceAvg"])}
+    return {"status": "cancelled", "fill_price": 0.0}
+
+
 def is_partial_closed(symbol: str) -> bool:
     """Live mode: bot.py tracks partial via ap['partial_logged']; always returns False here."""
     return False

@@ -250,7 +250,7 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
         import trader as tr
         import config
         import config_s1
-        from strategy import detect_consolidation, calculate_rsi, evaluate_s2, evaluate_s4, find_nearest_resistance, find_nearest_support
+        from strategy import detect_consolidation, calculate_rsi, evaluate_s2, evaluate_s4, find_nearest_resistance, find_nearest_support, find_spike_base
 
         # Fetch extra candles for indicator warmup (EMA/ADX need history to converge)
         # Then trim to display_limit for the chart
@@ -421,19 +421,11 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
                     s4_rsi_peak_val = round(rsi_pk, 1)
             except Exception:
                 pass
-            # Pre-pump base support: open of the biggest spike candle in lookback
+            # Pre-pump base: high of most recent spike candle below current price
             try:
-                from config_s4 import S4_BIG_CANDLE_BODY_PCT, S4_BIG_CANDLE_LOOKBACK
-                lookback_df = df_full.iloc[-(S4_BIG_CANDLE_LOOKBACK + 1):-1]
-                best_bp, best_open = 0.0, None
-                for _, row in lookback_df.iterrows():
-                    o, c = float(row["open"]), float(row["close"])
-                    bp = abs(c - o) / o if o else 0
-                    if bp >= S4_BIG_CANDLE_BODY_PCT and bp > best_bp:
-                        best_bp  = bp
-                        best_open = o
-                if best_open:
-                    s4_base_support = round(best_open, max(2, price_decimals))
+                base = find_spike_base(df_full, price_ceiling=sample_price)
+                if base:
+                    s4_base_support = round(base, max(2, price_decimals))
             except Exception:
                 pass
 
@@ -901,14 +893,18 @@ def get_ig_state():
     if os.path.exists(IG_STATE_FILE):
         bot_running = (time.time() - os.path.getmtime(IG_STATE_FILE)) < 120
 
-    # Position
-    position = None
+    # Read ig_state.json once — position, scan_signals, scan_log
+    ig_state = {}
     if os.path.exists(IG_STATE_FILE):
         try:
             with open(IG_STATE_FILE) as f:
-                position = json.load(f).get("position")
+                ig_state = json.load(f)
         except Exception:
             pass
+
+    position     = ig_state.get("position")
+    scan_signals = ig_state.get("scan_signals", {})
+    scan_log     = ig_state.get("scan_log", [])
 
     # Trade history
     trade_history = []
@@ -952,6 +948,8 @@ def get_ig_state():
         "position":       position,
         "trade_history":  trade_history,
         "stats":          stats,
+        "scan_signals":   scan_signals,
+        "scan_log":       scan_log,
     })
 
 

@@ -148,3 +148,17 @@ def test_startup_restores_scan_fields(monkeypatch):
     bot = ig_bot.IGBot(paper=True)
     assert bot._scan_signals["US30"]["reason"] == "restored"
     assert bot._scan_log[0]["message"] == "restored"
+
+
+import httpx
+
+
+def test_ig_state_endpoint_includes_scan_fields(live_server_url):
+    """/api/ig/state response includes scan_signals and scan_log keys."""
+    r = httpx.get(f"{live_server_url}/api/ig/state", timeout=5.0)
+    assert r.status_code == 200
+    data = r.json()
+    assert "scan_signals" in data, "scan_signals missing from /api/ig/state response"
+    assert "scan_log" in data,     "scan_log missing from /api/ig/state response"
+    assert isinstance(data["scan_signals"], dict)
+    assert isinstance(data["scan_log"], list)

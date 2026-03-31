@@ -159,3 +159,45 @@ def test_bot_saves_scale_in_snapshot(tmp_path, monkeypatch):
     assert snap["interval"] == "1D"   # S2 uses daily
     assert snap["event_price"] == 15.80
     assert len(snap["candles"]) == 25
+
+
+def test_startup_reconcile_partial_saves_snapshot(tmp_path, monkeypatch):
+    """
+    Startup partial reconciliation snapshot save call produces a valid
+    'partial' snapshot in data/snapshots/.
+    """
+    import snapshot, pandas as pd
+
+    monkeypatch.setattr(snapshot, "_SNAP_DIR", tmp_path)
+
+    fake_df = pd.DataFrame([
+        {"ts": 1743296100000 + i * 900_000,
+         "open": 15.71, "high": 15.82, "low": 15.68, "close": 15.80, "vol": 100.0}
+        for i in range(50)
+    ])
+
+    import bot
+    monkeypatch.setattr(bot.tr, "get_candles", lambda sym, interval, limit=100: fake_df)
+
+    # Simulate the Pass A snapshot call
+    trade_id = "reco01"
+    sym = "RIVERUSDT"
+    strategy = "S3"
+    exit_p = 17.332
+
+    _si = bot._STRATEGY_CANDLE_INTERVAL.get(strategy, "15m")
+    _sdf = bot.tr.get_candles(sym, _si, limit=100)
+    snapshot.save_snapshot(
+        trade_id=trade_id, event="partial",
+        symbol=sym, interval=_si,
+        candles=bot._df_to_candles(_sdf),
+        event_price=round(exit_p, 8),
+    )
+
+    import json
+    result = snapshot.load_snapshot(trade_id, "partial")
+    assert result is not None
+    assert result["event"] == "partial"
+    assert result["interval"] == "15m"
+    assert result["event_price"] == 17.332
+    assert len(result["candles"]) == 50

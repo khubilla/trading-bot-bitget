@@ -331,6 +331,18 @@ class MTFBot:
                             "result": "WIN" if partial_pnl >= 0 else "LOSS",
                             "pnl_pct": partial_pct, "exit_reason": "PARTIAL_TP",
                         })
+                        try:
+                            _si = _STRATEGY_CANDLE_INTERVAL.get(ap["strategy"], "15m")
+                            _sdf = tr.get_candles(sym, _si, limit=100)
+                            if not _sdf.empty:
+                                snapshot.save_snapshot(
+                                    trade_id=trade_id, event="partial",
+                                    symbol=sym, interval=_si,
+                                    candles=_df_to_candles(_sdf),
+                                    event_price=round(exit_p, 8),
+                                )
+                        except Exception as e:
+                            logger.warning(f"[{ap['strategy']}][{sym}] startup partial snapshot failed: {e}")
                         logger.warning(
                             f"[{ap['strategy']}][{sym}] ⚠️  Startup reconcile: partial detected | "
                             f"qty {initial_qty}→{current_qty} | PnL≈{partial_pnl:+.4f} ({partial_pct:+.1f}%)"
@@ -366,6 +378,18 @@ class MTFBot:
                         "exit_reason": "RECONCILED",
                         "exit_price":  round(exit_p, 8) if exit_p else None,
                     })
+                    try:
+                        _si = _STRATEGY_CANDLE_INTERVAL.get(strategy, "15m")
+                        _sdf = tr.get_candles(sym, _si, limit=100)
+                        if not _sdf.empty:
+                            snapshot.save_snapshot(
+                                trade_id=trade_id, event="close",
+                                symbol=sym, interval=_si,
+                                candles=_df_to_candles(_sdf),
+                                event_price=round(exit_p, 8) if exit_p else 0.0,
+                            )
+                    except Exception as e:
+                        logger.warning(f"[{strategy}][{sym}] startup close snapshot failed: {e}")
                     st.clear_position_memory(sym)
                     logger.warning(
                         f"[{strategy}][{sym}] ⚠️  Startup reconcile: close detected | "

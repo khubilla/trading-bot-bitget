@@ -14,7 +14,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_SNAP_DIR = Path("data/snapshots")
+_SNAP_DIR = Path(__file__).parent / "data" / "snapshots"
 
 _VALID_EVENTS = frozenset({"open", "scale_in", "partial", "close"})
 

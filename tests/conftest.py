@@ -121,11 +121,14 @@ def live_server_url(tmp_path_factory):
         patch.object(dashboard, "IG_STATE_FILE", ig_state_file),
         patch("trader.get_candles", return_value=mock_df),
         patch("claude_analyst.build_system_prompt", return_value="mock prompt"),
-        patch("claude_analyst.stream_response", return_value=iter([{"role": "assistant", "content": "ok"}])),
+        patch("claude_analyst.stream_response", side_effect=lambda *a, **kw: iter([{"role": "assistant", "content": "ok"}])),
     ]
 
     for p in active_patches:
         p.start()
+
+    import os as _os
+    _os.environ["DASHBOARD_API_KEY"] = "test-token"
 
     config = uvicorn.Config(dashboard.app, host="127.0.0.1", port=8099, log_level="error")
     server = uvicorn.Server(config)

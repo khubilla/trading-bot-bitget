@@ -343,14 +343,18 @@ def test_handle_limit_filled_logs_trade_short(monkeypatch):
 # ── Test 8: non-S5 signals still use price-trigger logic ─────────── #
 
 def test_watcher_non_s5_signal_uses_price_trigger(monkeypatch):
-    """A signal with strategy='S3' must NOT call get_order_fill; uses price-trigger path."""
+    """A signal with strategy='S3' must NOT call get_order_fill; uses price-trigger path.
+
+    This test actually runs _entry_watcher_loop for one iteration by mocking
+    time.sleep to flip b.running=False after the first call (ending the loop).
+    """
     b = _make_bot(monkeypatch)
 
     # S3-style pending signal (no order_id field, no strategy="S5")
     s3_sig = {
         "strategy": "S3",
         "side": "LONG",
-        "trigger": 0.0800,
+        "trigger": 0.0900,   # trigger above mark — NOT triggered this iteration
         "sl": 0.0750,
         "tp": 0.0950,
         "expires": time.time() + 7200,
@@ -364,14 +368,25 @@ def test_watcher_non_s5_signal_uses_price_trigger(monkeypatch):
         lambda sym, oid: get_order_fill_calls.append((sym, oid)) or {"status": "live", "fill_price": 0.0},
     )
 
-    # Verify that get_order_fill is NOT called for this signal by checking
-    # that the S5-specific path is guarded by strategy check
-    assert s3_sig.get("strategy") != "S5"
-    # In the watcher, we only call get_order_fill when strategy == "S5"
-    if s3_sig.get("strategy") == "S5":
-        bot.tr.get_order_fill(SYMBOL, s3_sig.get("order_id"))
+    # mark < trigger so the S3 price-trigger path does NOT fire _fire_pending either
+    monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: 0.0800)
+    monkeypatch.setattr(bot.tr, "get_usdt_balance", lambda: 1000.0)
+    monkeypatch.setattr(bot.st, "is_pair_paused", lambda sym: False)
+    monkeypatch.setattr(bot.config, "MAX_CONCURRENT_TRADES", 5)
 
-    assert len(get_order_fill_calls) == 0, "get_order_fill must NOT be called for non-S5 signals"
+    # Patch time.sleep so that after the first call the loop exits cleanly
+    def _stop_after_sleep(_duration):
+        b.running = False
+
+    monkeypatch.setattr(bot.time, "sleep", _stop_after_sleep)
+
+    # Run the real watcher loop (executes exactly one iteration then exits)
+    t = threading.Thread(target=b._entry_watcher_loop, daemon=True)
+    t.start()
+    t.join(timeout=5)
+
+    assert not t.is_alive(), "watcher loop did not exit within timeout"
+    assert get_order_fill_calls == [], "get_order_fill must NOT be called for non-S5 signals"
 
 
 # ── Test 9: PAPER_MODE simulates fill via price comparison ────────── #

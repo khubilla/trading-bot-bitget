@@ -10,6 +10,7 @@ Strategy 2: 30-Day Breakout + 3m Consolidation (long candle, squeeze, 3m coil+br
 
 import time, signal, sys, logging, csv, os, threading, uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 import config
 import config_s1
@@ -30,6 +31,47 @@ from strategy import (
 )
 from claude_filter import claude_approve
 import snapshot
+
+def _check_disclaimer():
+    agreed = Path(__file__).parent / ".disclaimer_agreed"
+    if agreed.exists():
+        return
+    if os.environ.get("PYTEST_CURRENT_TEST") or "--test" in sys.argv:
+        return
+    print("""
+╔══════════════════════════════════════════════════════════════════════╗
+║            RISK DISCLAIMER — PLEASE READ BEFORE PROCEEDING          ║
+╠══════════════════════════════════════════════════════════════════════╣
+║                                                                      ║
+║  This software is provided for EDUCATIONAL AND INFORMATIONAL         ║
+║  PURPOSES ONLY. Algorithmic trading involves SUBSTANTIAL RISK        ║
+║  OF LOSS and is NOT suitable for all investors.                      ║
+║                                                                      ║
+║  • Past performance does not guarantee future results                ║
+║  • You may lose some or all of your invested capital                 ║
+║  • The creator accepts NO LIABILITY for any financial losses,        ║
+║    damages, or consequences arising from use of this software        ║
+║  • This is NOT financial advice                                      ║
+║  • Use entirely at your own risk                                     ║
+║                                                                      ║
+║  By continuing you confirm that you:                                 ║
+║    (1) understand and accept all risks of algorithmic trading        ║
+║    (2) release the creator from any liability for losses             ║
+║    (3) are solely responsible for all trading decisions              ║
+║                                                                      ║
+╚══════════════════════════════════════════════════════════════════════╝
+""")
+    try:
+        resp = input('Type "I AGREE" to continue: ').strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nDisclaimer not accepted. Exiting.")
+        sys.exit(0)
+    if resp != "I AGREE":
+        print("Disclaimer not accepted. Exiting.")
+        sys.exit(0)
+    agreed.write_text("agreed\n", encoding="utf-8")
+    print("Disclaimer accepted. Starting bot...\n")
+
 
 PAPER_MODE = "--paper" in sys.argv
 if PAPER_MODE:
@@ -1957,4 +1999,5 @@ class MTFBot:
 
 
 if __name__ == "__main__":
+    _check_disclaimer()
     MTFBot().run()

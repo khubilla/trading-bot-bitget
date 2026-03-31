@@ -18,6 +18,7 @@ import time
 import uuid
 import zoneinfo
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 import ig_client as ig
@@ -43,6 +44,48 @@ from config_ig_s5 import (
     S5_LTF_INTERVAL, S5_OB_INVALIDATION_BUFFER_PCT,
 )
 from strategy import evaluate_s5, find_swing_low_target, find_swing_high_target, calculate_ema
+
+
+def _check_disclaimer():
+    agreed = Path(__file__).parent / ".disclaimer_agreed"
+    if agreed.exists():
+        return
+    if os.environ.get("PYTEST_CURRENT_TEST") or "--test" in sys.argv:
+        return
+    print("""
+╔══════════════════════════════════════════════════════════════════════╗
+║            RISK DISCLAIMER — PLEASE READ BEFORE PROCEEDING          ║
+╠══════════════════════════════════════════════════════════════════════╣
+║                                                                      ║
+║  This software is provided for EDUCATIONAL AND INFORMATIONAL         ║
+║  PURPOSES ONLY. Algorithmic trading involves SUBSTANTIAL RISK        ║
+║  OF LOSS and is NOT suitable for all investors.                      ║
+║                                                                      ║
+║  • Past performance does not guarantee future results                ║
+║  • You may lose some or all of your invested capital                 ║
+║  • The creator accepts NO LIABILITY for any financial losses,        ║
+║    damages, or consequences arising from use of this software        ║
+║  • This is NOT financial advice                                      ║
+║  • Use entirely at your own risk                                     ║
+║                                                                      ║
+║  By continuing you confirm that you:                                 ║
+║    (1) understand and accept all risks of algorithmic trading        ║
+║    (2) release the creator from any liability for losses             ║
+║    (3) are solely responsible for all trading decisions              ║
+║                                                                      ║
+╚══════════════════════════════════════════════════════════════════════╝
+""")
+    try:
+        resp = input('Type "I AGREE" to continue: ').strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nDisclaimer not accepted. Exiting.")
+        sys.exit(0)
+    if resp != "I AGREE":
+        print("Disclaimer not accepted. Exiting.")
+        sys.exit(0)
+    agreed.write_text("agreed\n", encoding="utf-8")
+    print("Disclaimer accepted. Starting bot...\n")
+
 
 # ── Logging ──────────────────────────────────────────────────── #
 logging.basicConfig(
@@ -918,6 +961,7 @@ class IGBot:
 # ── Entry point ──────────────────────────────────────────────── #
 
 if __name__ == "__main__":
+    _check_disclaimer()
     paper_mode = "--paper" in sys.argv
     config_ig.PAPER_MODE = paper_mode
 

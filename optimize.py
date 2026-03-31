@@ -68,7 +68,6 @@ CURRENT_PARAMS = {
         "S5_OB_LOOKBACK":        50,
         "S5_OB_MIN_IMPULSE":     "1%",
         "S5_CHOCH_LOOKBACK":     20,
-        "S5_ENTRY_BUFFER_PCT":   "0.5%",
         "S5_MAX_ENTRY_BUFFER":   "4%",
         "S5_SL_BUFFER_PCT":      "0.3%",
         "S5_MIN_SR_CLEARANCE":   "10%",

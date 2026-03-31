@@ -50,7 +50,7 @@ S5_MAX_ENTRY_BUFFER = 0.01
 # Crypto default: 0.003 (0.3% = ~54pts). 0.2% = ~36pts is tighter but
 # sufficient for a 30-50pt average candle range.
 S5_SL_BUFFER_PCT   = 0.002
-S5_OB_INVALIDATION_BUFFER_PCT = 0.001
+S5_OB_INVALIDATION_BUFFER_PCT = 0.001  # cancel limit if mark crosses ob_low by >0.1%
 
 # ── Structural TP (swing target) ─────────────────────────── #
 # Crypto default: 50 (12.5h — TP targets land in overnight/Asian hours).

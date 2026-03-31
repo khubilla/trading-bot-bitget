@@ -6,7 +6,7 @@ Run in a separate terminal alongside bot.py:
     python dashboard.py
 """
 
-import csv, json, os, sys, time, zoneinfo
+import csv, json, os, re, sys, time, zoneinfo
 from pathlib import Path
 from datetime import datetime
 from fastapi import FastAPI, Request
@@ -23,6 +23,28 @@ IG_STATE_FILE  = str(_DATA_DIR / "ig_state.json")
 IG_TRADES_FILE = str(_DATA_DIR / "ig_trades.csv")
 PORT       = int(_os.environ.get("PORT", 8081 if PAPER_MODE else 8080))
 app = FastAPI(title="MTF Bot Dashboard" + (" [PAPER]" if PAPER_MODE else ""))
+
+# Middleware to validate symbols before Starlette's router rejects path traversal attempts
+@app.middleware("http")
+async def validate_symbol_middleware(request: Request, call_next):
+    """
+    Intercept /api/candles/{symbol} requests before router processing.
+    Validates symbol against allowlist and returns 400 for invalid symbols.
+    This catches path traversal attempts (../etc/passwd, etc.) that Starlette
+    would otherwise reject with 404.
+    """
+    # Use raw_path from ASGI scope to detect path traversal attempts before normalization
+    raw_path = request.scope.get("raw_path", b"").decode("utf-8", errors="replace")
+    if raw_path.startswith("/api/candles/"):
+        # Extract the symbol part after /api/candles/
+        from urllib.parse import unquote
+        symbol_part = raw_path[len("/api/candles/"):]
+        symbol = unquote(symbol_part)
+        if not re.fullmatch(r"^[A-Z0-9]{2,20}$", symbol):
+            return JSONResponse({"error": "invalid symbol"}, status_code=400)
+
+    response = await call_next(request)
+    return response
 
 # Add bot directory to path so we can import trader + config
 sys.path.insert(0, str(Path(__file__).parent))
@@ -246,6 +268,8 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
     For 1D (S2): uses daily RSI + S2 consolidation + entry trigger logic.
     For 15m (S3): uses Slow Stochastics + MACD + S3 pullback evaluation.
     """
+    if not re.fullmatch(r"^[A-Z0-9]{2,20}$", symbol):
+        return JSONResponse({"error": "invalid symbol"}, status_code=400)
     try:
         import trader as tr
         import config

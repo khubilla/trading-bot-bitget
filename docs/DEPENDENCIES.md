@@ -591,7 +591,29 @@ grep -n "_log_trade" ig_bot.py
     "trigger": float,
     "size": float,
     "expires": float,   # Unix timestamp
-  } | None
+  } | None,
+  "scan_signals": {
+    "<DISPLAY_NAME>": {   # e.g. "US30"
+      "signal":        str,   # "PENDING_LONG" | "PENDING_SHORT" | "HOLD"
+      "reason":        str,   # full evaluate_s5 reason string
+      "ema_ok":        bool,
+      "bos_ok":        bool,
+      "ob_ok":         bool,
+      "ob_low":        float | None,
+      "ob_high":       float | None,
+      "entry_trigger": float | None,
+      "sl":            float | None,
+      "tp":            float | None,
+      "updated_at":    str,   # ISO timestamp (UTC)
+    }
+  },
+  "scan_log": [           # last 20 entries, newest first
+    {
+      "ts":         str,  # "HH:MM" in ET timezone
+      "instrument": str,  # e.g. "US30"
+      "message":    str,  # evaluate_s5 reason string
+    }
+  ]
 }
 ```
 
@@ -605,6 +627,15 @@ grep -n "_log_trade" ig_bot.py
 
 3. **Removing or renaming "pending_order" key** → ig_bot.py fails to restore pending orders after restart
    - Fix: Update ig_bot.py _save_state() and _sync_live_position() load paths
+
+4. **Renaming "scan_signals" key** → Dashboard IG scanner panel shows no cards
+   - Fix: Update dashboard.py get_ig_state() `.get("scan_signals", {})` and renderIGScanner() call
+
+5. **Changing scan_signals entry field names** → Dashboard cards show wrong or missing check values
+   - Fix: Update renderIGScanner() in dashboard.html to match new field names
+
+6. **Renaming "scan_log" key** → Dashboard scan log panel stays empty
+   - Fix: Update dashboard.py get_ig_state() `.get("scan_log", [])` and renderIGScanLog() call
 
 **Verification commands:**
 
@@ -1007,3 +1038,4 @@ head -1 ig_trades.csv
 - 2026-03-31: Added Section 2.2 (snapshot.py); added exit_price to Section 4.2 trades.csv columns (38 fields, was 37)
 - 2026-03-31: Updated Section 2.2 — dashboard.py now also calls list_snapshots() + load_snapshot() for all events via /api/trade-chart
 - 2026-03-31: S5 SMC Limit Order Entry — evaluate_s5() now returns PENDING_LONG/SHORT (not LONG/SHORT); removed S5_ENTRY_BUFFER_PCT from config import (replaced by S5_MAX_ENTRY_BUFFER as stale OB guard); ig_state.json gained pending_order field; ChoCH removed from S5 strategy logic
+- 2026-03-31: Updated Section 4.4 — ig_state.json gained scan_signals (per-instrument S5 signal state) and scan_log (last 20 scan entries, newest first) fields. Written by ig_bot.py _update_scan_state() after each evaluate_s5() call; read by dashboard.py /api/ig/state and rendered by renderIGScanner() + renderIGScanLog() in dashboard.html.

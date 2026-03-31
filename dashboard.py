@@ -642,6 +642,7 @@ def get_entry_chart(
         import numpy as np
         import pandas as pd
         import bitget_client as bc
+        import snapshot as _snap
         from datetime import datetime
         from strategy import calculate_stoch
 
@@ -653,12 +654,10 @@ def get_entry_chart(
 
         # ── Snapshot fast-path ────────────────────────────────────── #
         if trade_id:
-            import snapshot as _snap
             snap = _snap.load_snapshot(trade_id, "open")
             if snap:
                 _df = pd.DataFrame(snap["candles"])
                 _df = _df.rename(columns={"t": "ts"})
-                interval_ms = {"3m": 180_000, "15m": 900_000, "1D": 86_400_000}.get(snap["interval"], 900_000)
                 entry_idx = len(_df) - 1
                 for i, row in _df.iterrows():
                     if int(row["ts"]) >= open_ts_ms:

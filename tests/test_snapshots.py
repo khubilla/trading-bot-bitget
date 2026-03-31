@@ -223,7 +223,7 @@ def test_entry_chart_uses_snapshot_when_available(tmp_path, monkeypatch):
         trade_id="snap01", event="open",
         symbol="RIVERUSDT", interval="15m",
         candles=candles, event_price=15.756,
-        captured_at="2026-03-30T18:21:18+00:00",
+        captured_at="2025-03-30T05:55:00+00:00",
     )
 
     # Ensure bc.get_public is NOT called
@@ -234,7 +234,7 @@ def test_entry_chart_uses_snapshot_when_available(tmp_path, monkeypatch):
     client = TestClient(dashboard.app)
     resp = client.get("/api/entry-chart", params={
         "symbol": "RIVERUSDT",
-        "open_at": "2026-03-30T18:21:18+00:00",
+        "open_at": "2025-03-30T05:55:00+00:00",
         "strategy": "S3",
         "entry": 15.756,
         "trade_id": "snap01",
@@ -243,6 +243,6 @@ def test_entry_chart_uses_snapshot_when_available(tmp_path, monkeypatch):
     assert resp.status_code == 200, f"status: {resp.status_code}, body: {resp.text}"
     data = resp.json()
     assert "candles" in data, f"missing candles key: {data}"
-    assert len(data["candles"]) > 0
+    assert len(data["candles"]) == 25
     assert data.get("from_snapshot") is True, "should be from snapshot"
     assert exchange_called == [], f"exchange must NOT be called when snapshot exists, was called {len(exchange_called)} times"

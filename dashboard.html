@@ -1906,15 +1906,15 @@ function _drawTradeChart(canvas, data) {
       ctx.fillRect(PAD_L + i * candleW, PAD_T, candleW, chartH);
     }
 
-    ctx.strokeStyle = sty ? sty.wick : (bull ? '#2ea043' : '#da3633');
+    ctx.strokeStyle = bull ? '#2ea043' : '#da3633';
     ctx.lineWidth = 1; ctx.setLineDash([]);
     ctx.beginPath(); ctx.moveTo(x, p2y(c.h)); ctx.lineTo(x, p2y(c.l)); ctx.stroke();
 
     const yO   = p2y(c.o), yC = p2y(c.c);
     const bTop = Math.min(yO, yC);
     const bH   = Math.max(Math.abs(yC - yO), 1);
-    ctx.fillStyle   = sty ? sty.body : (bull ? '#3fb950' : '#f85149');
-    ctx.globalAlpha = sty ? 0.9 : (bull ? 0.75 : 0.6);
+    ctx.fillStyle   = bull ? '#3fb950' : '#f85149';
+    ctx.globalAlpha = bull ? 0.75 : 0.6;
     ctx.fillRect(PAD_L + i * candleW + gap, bTop, bodyW, bH);
     ctx.globalAlpha = 1;
 
@@ -1935,30 +1935,34 @@ function _drawTradeChart(canvas, data) {
   const isLong  = (side || '').toUpperCase() === 'LONG';
   const opensEntry = t => t === 'open' || t === 'scale_in';
 
-  const arrowUp = (i, color, label) => {
+  const arrowUp = (i, color, label, lblOff) => {
     const x   = idxToX(i);
     const tip = p2y(candles[i].l) + ARROW_GAP + ARROW_H;
     ctx.fillStyle = color;
     ctx.beginPath(); ctx.moveTo(x, tip - ARROW_H); ctx.lineTo(x - ARROW_W/2, tip); ctx.lineTo(x + ARROW_W/2, tip); ctx.closePath(); ctx.fill();
     ctx.fillStyle = color; ctx.font = 'bold 8px monospace'; ctx.textAlign = 'center';
-    ctx.fillText(label, x, tip + 10);
+    ctx.fillText(label, x, tip + 10 + lblOff);
   };
-  const arrowDown = (i, color, label) => {
+  const arrowDown = (i, color, label, lblOff) => {
     const x   = idxToX(i);
     const tip = p2y(candles[i].h) - ARROW_GAP - ARROW_H;
     ctx.fillStyle = color;
     ctx.beginPath(); ctx.moveTo(x, tip + ARROW_H); ctx.lineTo(x - ARROW_W/2, tip); ctx.lineTo(x + ARROW_W/2, tip); ctx.closePath(); ctx.fill();
     ctx.fillStyle = color; ctx.font = 'bold 8px monospace'; ctx.textAlign = 'center';
-    ctx.fillText(label, x, tip - 4);
+    ctx.fillText(label, x, tip - 4 - lblOff);
   };
 
   const LABELS = { open: 'ENTRY', scale_in: 'SCALE', partial: 'PARTIAL', close: 'CLOSE' };
+  const lblCounts = {};
   events.forEach(e => {
     if (e.candle_idx >= n) return;
     const sty  = EV_STYLE[e.type] || { body: '#ffffff' };
     const goUp = isLong ? opensEntry(e.type) : !opensEntry(e.type);
-    if (goUp) arrowUp  (e.candle_idx, sty.body, LABELS[e.type] || e.type.toUpperCase());
-    else      arrowDown(e.candle_idx, sty.body, LABELS[e.type] || e.type.toUpperCase());
+    const key  = `${e.candle_idx}${goUp}`;
+    const cnt  = lblCounts[key] || 0;
+    lblCounts[key] = cnt + 1;
+    if (goUp) arrowUp  (e.candle_idx, sty.body, LABELS[e.type] || e.type.toUpperCase(), cnt * 11);
+    else      arrowDown(e.candle_idx, sty.body, LABELS[e.type] || e.type.toUpperCase(), cnt * 11);
   });
 
   ctx.fillStyle = '#6e7681'; ctx.font = '9px monospace'; ctx.textAlign = 'center';

@@ -21,4 +21,5 @@ ig_bot.log
 ig_state.json
 .disclaimer_agreed
 ig_trades.csv
-ig_paper_trades.csv.worktrees/
+ig_paper_trades.csv
+.worktrees/

@@ -1146,14 +1146,13 @@
   <!-- Position + Scan Log -->
   <div class="ig-grid">
 
-    <!-- Position card -->
+    <!-- Positions panel -->
     <div class="panel">
       <div class="panel-header">
-        <span class="panel-title">Open Position</span>
-        <span class="panel-sub" style="font-size:9px; color:var(--muted);">Wall Street Cash · US30</span>
+        <span class="panel-title">IG Positions</span>
       </div>
       <div id="ig-pos-body" class="panel-body">
-        <div style="color:var(--muted); text-align:center; padding:40px 0; font-size:11px;">No open position</div>
+        <div style="color:var(--muted); text-align:center; padding:40px 0; font-size:11px;">No open positions</div>
       </div>
     </div>
 
@@ -3461,7 +3460,7 @@ function renderIG(d) {
 
   renderIGScanner(d.scan_signals || {});
   renderIGScanLog(d.scan_log || []);
-  renderIGPosition(d.position);
+  renderIGPositions(d.positions || {});
   renderIGHistory(d.trade_history);
 }
 
@@ -3536,26 +3535,40 @@ function renderIGScanLog(scanLog) {
   }).join('');
 }
 
-function renderIGPosition(pos) {
-  const body = $('ig-pos-body');
+function renderIGPositionCard(name, pos) {
   if (!pos) {
-    body.innerHTML = '<div style="color:var(--muted);text-align:center;padding:40px 0;font-size:11px;">No open position</div>';
-    return;
+    return `<div style="padding:10px 14px;border-bottom:1px solid var(--border);">
+      <span style="font-weight:700;font-size:11px;color:var(--muted-fg);">${name}</span>
+      <span style="color:var(--muted);font-size:11px;margin-left:10px;">— no position</span>
+    </div>`;
   }
   const sc = pos.side === 'LONG' ? 'var(--emerald)' : 'var(--rose)';
   const partial = pos.partial_done
     ? '<span style="background:rgba(240,165,0,0.12);color:var(--amber);padding:1px 6px;font-size:9px;border:1px solid rgba(240,165,0,0.3);margin-left:6px;">PARTIAL ✓</span>'
     : '';
-  body.innerHTML = `<div class="ig-pos-row">
-    <div class="ig-pos-item"><div class="stat-label">Side</div><div style="color:${sc};font-weight:700;font-size:15px;">${pos.side}</div></div>
-    <div class="ig-pos-item"><div class="stat-label">Entry</div><div style="font-size:15px;">${(+pos.entry).toFixed(1)}</div></div>
-    <div class="ig-pos-item"><div class="stat-label">Stop Loss</div><div style="color:var(--rose);">${pos.sl ? (+pos.sl).toFixed(1) : '—'}</div></div>
-    <div class="ig-pos-item"><div class="stat-label">TP1 (1:1 R)</div><div style="color:var(--amber);">${pos.tp1 ? (+pos.tp1).toFixed(1) : '—'}</div></div>
-    <div class="ig-pos-item"><div class="stat-label">Final TP</div><div style="color:var(--emerald);">${pos.tp ? (+pos.tp).toFixed(1) : '—'}</div></div>
-    <div class="ig-pos-item"><div class="stat-label">Qty</div><div>${pos.current_qty} contracts${partial}</div></div>
-    <div class="ig-pos-item" style="grid-column:1/-1;"><div class="stat-label">OB Zone</div><div style="color:var(--muted);font-size:10px;">${pos.ob_low ? (+pos.ob_low).toFixed(1) + ' – ' + (+pos.ob_high).toFixed(1) : '—'}</div></div>
-    <div class="ig-pos-item" style="grid-column:1/-1;"><div class="stat-label">Opened</div><div style="color:var(--muted);font-size:9px;">${pos.opened_at || '—'}</div></div>
+  return `<div style="border-bottom:1px solid var(--border);">
+    <div style="padding:8px 14px 2px;font-weight:700;font-size:11px;color:var(--muted-fg);">${name}</div>
+    <div class="ig-pos-row">
+      <div class="ig-pos-item"><div class="stat-label">Side</div><div style="color:${sc};font-weight:700;font-size:15px;">${pos.side}</div></div>
+      <div class="ig-pos-item"><div class="stat-label">Entry</div><div style="font-size:15px;">${(+pos.entry).toFixed(1)}</div></div>
+      <div class="ig-pos-item"><div class="stat-label">Stop Loss</div><div style="color:var(--rose);">${pos.sl ? (+pos.sl).toFixed(1) : '—'}</div></div>
+      <div class="ig-pos-item"><div class="stat-label">TP1 (1:1 R)</div><div style="color:var(--amber);">${pos.tp1 ? (+pos.tp1).toFixed(1) : '—'}</div></div>
+      <div class="ig-pos-item"><div class="stat-label">Final TP</div><div style="color:var(--emerald);">${pos.tp ? (+pos.tp).toFixed(1) : '—'}</div></div>
+      <div class="ig-pos-item"><div class="stat-label">Qty</div><div>${pos.current_qty} contracts${partial}</div></div>
+      <div class="ig-pos-item" style="grid-column:1/-1;"><div class="stat-label">OB Zone</div><div style="color:var(--muted);font-size:10px;">${pos.ob_low ? (+pos.ob_low).toFixed(1) + ' – ' + (+pos.ob_high).toFixed(1) : '—'}</div></div>
+      <div class="ig-pos-item" style="grid-column:1/-1;"><div class="stat-label">Opened</div><div style="color:var(--muted);font-size:9px;">${pos.opened_at || '—'}</div></div>
+    </div>
   </div>`;
+}
+
+function renderIGPositions(positions) {
+  const body = $('ig-pos-body');
+  const entries = Object.entries(positions || {});
+  if (!entries.length) {
+    body.innerHTML = '<div style="color:var(--muted);text-align:center;padding:40px 0;font-size:11px;">No open positions</div>';
+    return;
+  }
+  body.innerHTML = entries.map(([name, pos]) => renderIGPositionCard(name, pos)).join('');
 }
 
 function renderIGHistory(history) {

@@ -517,8 +517,9 @@ def open_short(
 ) -> dict:
     """
     Opens a SHORT position.
-    SL = sl_floor if provided, else box_high * 1.001 (just above the consolidation box)
-    TP = entry * (1 - take_profit_pct)
+    SL = sl_floor if provided, else box_high * 1.001 (structural level, not fill-relative).
+    TP/trail trigger computed from actual fill price fetched after the market order fills
+    (falls back to pre-order mark if position not yet visible).
     use_s4_exits: trailing stop — 50% close at -10%, trailing stop on remainder.
     """
     import time as _t
@@ -528,6 +529,7 @@ def open_short(
     notional = equity * trade_size_pct * leverage
     qty      = _round_qty(notional / mark, symbol)
 
+    # SL is structural (box_high or sl_floor), not entry-relative — compute before order
     if sl_floor > 0:
         sl_trig = float(_round_price(sl_floor, symbol))
     else:
@@ -545,24 +547,28 @@ def open_short(
 
     _t.sleep(2.0)
 
+    # Re-fetch actual fill price; fall back to pre-order mark if position not yet visible.
+    _pos_after = get_all_open_positions()
+    fill = _pos_after.get(symbol, {}).get("entry_price", 0) or mark
+
     if use_s5_exits:
         from config_s5 import S5_TRAIL_RANGE_PCT
-        one_r     = sl_trig - mark
-        part_trig = float(_round_price(mark - one_r, symbol))    # 1:1 R:R below entry
-        tp_targ   = float(_round_price(tp_price_abs, symbol)) if 0 < tp_price_abs < mark else 0.0
+        one_r     = sl_trig - fill
+        part_trig = float(_round_price(fill - one_r, symbol))    # 1:1 R:R below entry
+        tp_targ   = float(_round_price(tp_price_abs, symbol)) if 0 < tp_price_abs < fill else 0.0
         ok = _place_s5_exits(symbol, "short", qty,
                              sl_trig, sl_exec,
                              part_trig, tp_targ, S5_TRAIL_RANGE_PCT)
         tp_trig = tp_targ if tp_targ > 0 else part_trig
     elif use_s4_exits:
         from config_s4 import S4_TRAILING_TRIGGER_PCT, S4_TRAILING_RANGE_PCT
-        trail_trig = float(_round_price(mark * (1 - S4_TRAILING_TRIGGER_PCT), symbol))
+        trail_trig = float(_round_price(fill * (1 - S4_TRAILING_TRIGGER_PCT), symbol))
         ok = _place_s2_exits(symbol, "short", qty,
                              sl_trig, sl_exec,
                              trail_trig, S4_TRAILING_RANGE_PCT)
         tp_trig = trail_trig  # For dashboard display
     else:
-        tp_trig = float(_round_price(mark * (1 - take_profit_pct), symbol))
+        tp_trig = float(_round_price(fill * (1 - take_profit_pct), symbol))
         tp_exec = float(_round_price(tp_trig * 0.995, symbol))
         ok = _place_tpsl(symbol, "short", tp_trig, tp_exec, sl_trig, sl_exec)
 
@@ -571,12 +577,12 @@ def open_short(
 
     result = {
         "symbol": symbol, "side": "SHORT", "qty": qty,
-        "entry": mark, "sl": sl_trig, "tp": tp_trig,
+        "entry": fill, "sl": sl_trig, "tp": tp_trig,
         "box_high": box_high, "leverage": leverage,
         "margin": round(equity * trade_size_pct, 4), "tpsl_set": ok,
     }
     logger.info(
-        f"[{symbol}] 🔴 SHORT {leverage}x | qty={qty} entry≈{mark:.5f} "
+        f"[{symbol}] 🔴 SHORT {leverage}x | qty={qty} entry≈{fill:.5f} "
         f"SL={sl_trig} | {'✅ S5 exits' if use_s5_exits else '✅ S4 exits' if use_s4_exits else 'TP='+str(tp_trig)} | {'✅' if ok else '❌ SET MANUALLY'}"
     )
     return result

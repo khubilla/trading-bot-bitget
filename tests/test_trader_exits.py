@@ -342,3 +342,72 @@ class TestRefreshPlanExits:
 
         for p in place_calls:
             assert p.get("triggerPrice") == "0.17"
+
+
+# ── open_short fill price ─────────────────────────────────────────── #
+
+class TestOpenShortFillPrice:
+    """open_short must use actual fill price for TP/trail calculations."""
+
+    def _setup_short(self, monkeypatch, mark=0.340, box_high=0.345, fill=None,
+                     use_s4_exits=False, take_profit_pct=0.10):
+        calls = []
+        monkeypatch.setattr(trader, "_sym_info", _sym_info_stousdt)
+        monkeypatch.setattr(trader, "get_usdt_balance", lambda: 100.0)
+        monkeypatch.setattr(trader, "_get_total_equity", lambda: 100.0)
+        monkeypatch.setattr(trader, "get_mark_price", lambda sym: mark)
+        monkeypatch.setattr(trader, "set_leverage", lambda *a: None)
+        monkeypatch.setattr(bc, "post", lambda path, p: calls.append(p) or {})
+
+        _fill = fill if fill is not None else mark
+        monkeypatch.setattr(trader, "get_all_open_positions",
+            lambda: {"STOUSDT": {"entry_price": _fill, "qty": 65.0}})
+
+        import time
+        monkeypatch.setattr(time, "sleep", lambda s: None)
+
+        if use_s4_exits:
+            import config_s4
+            monkeypatch.setattr(config_s4, "S4_TRAILING_TRIGGER_PCT", 0.10)
+            monkeypatch.setattr(config_s4, "S4_TRAILING_RANGE_PCT", 10)
+
+        result = trader.open_short(
+            "STOUSDT", box_high=box_high,
+            leverage=10, trade_size_pct=0.1,
+            take_profit_pct=take_profit_pct,
+            use_s4_exits=use_s4_exits,
+        )
+        return result, calls
+
+    def test_s4_trail_trigger_uses_fill_price(self, monkeypatch):
+        """S4 trail trigger must be fill * (1 - S4_TRAILING_TRIGGER_PCT)."""
+        result, calls = self._setup_short(
+            monkeypatch, mark=0.340, fill=0.338, use_s4_exits=True
+        )
+        expected_trail = round(0.338 * (1 - 0.10), 5)
+        profit_plan = next(c for c in calls if c.get("planType") == "profit_plan")
+        actual_trig = float(profit_plan["triggerPrice"])
+        assert abs(actual_trig - expected_trail) < 0.0001, (
+            f"trail trigger {actual_trig} != expected {expected_trail}"
+        )
+
+    def test_default_tp_uses_fill_price(self, monkeypatch):
+        """Default TP (no special exits) must be fill * (1 - take_profit_pct)."""
+        result, _ = self._setup_short(monkeypatch, mark=0.340, fill=0.338, take_profit_pct=0.10)
+        expected_tp = round(0.338 * (1 - 0.10), 5)
+        assert abs(result["tp"] - expected_tp) < 0.001, (
+            f"tp {result['tp']} != expected {expected_tp}"
+        )
+
+    def test_fill_returned_as_entry(self, monkeypatch):
+        """Return dict entry field must equal fill price."""
+        result, _ = self._setup_short(monkeypatch, mark=0.340, fill=0.337)
+        assert result["entry"] == 0.337
+
+    def test_sl_still_based_on_box_high(self, monkeypatch):
+        """SL is a structural level (box_high * 1.001) — must not change with fill price."""
+        result, _ = self._setup_short(monkeypatch, mark=0.340, box_high=0.345, fill=0.337)
+        expected_sl = round(0.345 * 1.001, 5)
+        assert abs(result["sl"] - expected_sl) < 0.001, (
+            f"SL {result['sl']} should be near box_high*1.001={expected_sl}"
+        )

@@ -693,31 +693,35 @@ Places 3 exit orders for S5 strategy:
 #### `open_long(symbol, box_low, sl_floor, leverage, trade_size_pct, take_profit_pct, stop_loss_pct, use_s2_exits, use_s5_exits, tp_price_abs)`
 Opens a LONG market order then places exits based on the `use_*_exits` flag.
 
-**SL cap (S2 path):** `sl_trig = max(box_low * 0.999, mark * (1 - stop_loss_pct))` — prevents box_low from being so far below entry that the SL exceeds the intended max loss (e.g. `-50%` at 10x for `S2_STOP_LOSS_PCT=0.05`).
+**Fill price:** After placing the market order and sleeping 2s, calls `get_all_open_positions()` to get `openPriceAvg` as the actual fill price. All exit-level calculations (SL, TP, trail trigger, partial TP) use this fill price. Falls back to the pre-order mark price if the position is not yet visible. The pre-order mark is still used for qty sizing.
 
-**Returns:** dict with `{symbol, side, qty, entry, sl, tp, box_low, leverage, margin, tpsl_set}` — `entry` is mark price at function call time, **not** actual fill price.
+**SL cap (S2 path):** `sl_trig = max(box_low * 0.999, fill * (1 - stop_loss_pct))` — prevents box_low from being so far below entry that the SL exceeds the intended max loss (e.g. `-50%` at 10x for `S2_STOP_LOSS_PCT=0.05`).
+
+**Returns:** dict with `{symbol, side, qty, entry, sl, tp, box_low, leverage, margin, tpsl_set}` — `entry` is the actual fill price from `get_all_open_positions()` (falls back to pre-order mark if position not yet visible).
 
 **Called from:** `bot.py` — `_execute_s2`, `_execute_s3`, `_execute_s5` (paper path)
 
 ---
 
 #### `scale_in_long(symbol, additional_trade_size_pct, leverage)` / `scale_in_short(...)`
-Places a market order to add to an existing position. Does **not** update exit orders.
+Places a market order to add to an existing position. Does **not** update exit orders directly.
 
 **Called from:** `bot.py` — `_do_scale_in` (S2 uses `scale_in_long`, S4 uses `scale_in_short`)
 
-**Note:** After scale-in, `_do_scale_in` calls `refresh_plan_exits()` to update plan orders. The position-level SL (`place-pos-tpsl`) auto-scales on Bitget and is not touched.
+**Note:** After scale-in, `_do_scale_in` fetches the new average entry price, recomputes the trail trigger and (for S2 LONG) the SL cap, then calls `refresh_plan_exits()` with the updated trigger. The position-level SL (`place-pos-tpsl`) auto-scales on Bitget for qty; for S2, `update_position_sl()` is additionally called if the new SL cap is higher than the current SL.
 
 ---
 
-#### `refresh_plan_exits(symbol, hold_side) → bool`
+#### `refresh_plan_exits(symbol, hold_side, new_trail_trigger=0) → bool`
 After scale-in, resizes `profit_plan` and `moving_plan` orders to the current total position qty.
+
+**new_trail_trigger** (optional, default 0): If > 0, the re-placed orders use this as the trigger price instead of preserving the existing order's trigger. Used by `_do_scale_in` to recalculate the trigger from the new average entry after a scale-in fill.
 
 **Steps:**
 1. Fetch pending `profit_plan` + `moving_plan` for `hold_side` via `GET /api/v2/mix/order/plan-orders`
 2. Cancel both via `POST /api/v2/mix/order/cancel-plan-order`
 3. Read current total qty via `get_all_open_positions()`
-4. Re-place both at the same trigger prices, split with `_round_qty`
+4. Re-place both — at `new_trail_trigger` if provided (> 0), else at the original trigger from the existing `profit_plan`, split with `_round_qty`
 
 **Does NOT touch:** Position-level SL (`place-pos-tpsl`) — it auto-scales.
 
@@ -1107,3 +1111,4 @@ head -1 ig_trades.csv
 - 2026-03-31: Updated Section 2.2 — dashboard.py now also calls list_snapshots() + load_snapshot() for all events via /api/trade-chart
 - 2026-03-31: S5 SMC Limit Order Entry — evaluate_s5() now returns PENDING_LONG/SHORT (not LONG/SHORT); removed S5_ENTRY_BUFFER_PCT from config import (replaced by S5_MAX_ENTRY_BUFFER as stale OB guard); ig_state.json gained pending_order field; ChoCH removed from S5 strategy logic
 - 2026-03-31: Updated Section 4.4 — ig_state.json gained scan_signals (per-instrument S5 signal state) and scan_log (last 20 scan entries, newest first) fields. Written by ig_bot.py _update_scan_state() after each evaluate_s5() call; read by dashboard.py /api/ig/state and rendered by renderIGScanner() + renderIGScanLog() in dashboard.html.
+- 2026-04-02: Updated Section 6.1 — open_long/open_short now fetch actual fill price (openPriceAvg) after market order and use it for all exit-level calculations; `entry` in return dict is now fill price not pre-order mark. refresh_plan_exits gained optional new_trail_trigger param. _do_scale_in now recomputes trail trigger and SL (S2 only) from new avg entry after scale-in.

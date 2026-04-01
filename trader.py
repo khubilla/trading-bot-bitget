@@ -197,17 +197,20 @@ def _place_tpsl(symbol: str, hold_side: str,
     return False
 
 
-def refresh_plan_exits(symbol: str, hold_side: str) -> bool:
+def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0) -> bool:
     """
     Called after a scale-in to resize profit_plan and moving_plan orders to the
     current total position qty.  The SL (place-pos-tpsl) is position-level on
     Bitget and auto-scales — this function only touches plan orders.
 
+    new_trail_trigger: if > 0, re-placed orders use this trigger price instead of
+    preserving the existing profit_plan trigger (used after scale-in changes avg entry).
+
     Steps:
     1. Fetch pending profit_plan + moving_plan for this hold_side.
     2. Cancel them.
     3. Read current total position qty from the exchange.
-    4. Re-place both orders at the same trigger prices, split half / rest.
+    4. Re-place both orders — at new_trail_trigger if provided, else original trigger.
     """
     import time as _t
 
@@ -223,7 +226,7 @@ def refresh_plan_exits(symbol: str, hold_side: str) -> bool:
         logger.warning(f"[{symbol}] refresh_plan_exits: profit_plan or moving_plan not found — exits unchanged")
         return False
 
-    trail_trigger = float(profit["triggerPrice"])
+    trail_trigger = new_trail_trigger if new_trail_trigger > 0 else float(profit["triggerPrice"])
     trail_range   = str(moving.get("rangeRate", "10"))
 
     for o in [profit, moving]:

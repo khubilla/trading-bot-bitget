@@ -239,3 +239,57 @@ class TestRefreshPlanExits:
 
         for p in place_calls:
             assert p.get("triggerPrice") == "0.17"
+
+
+    def test_new_trail_trigger_overrides_existing_order_trigger(self, monkeypatch):
+        """When new_trail_trigger is passed, placed orders must use it, not the old order's trigger."""
+        monkeypatch.setattr(trader, "_sym_info", _sym_info_stousdt)
+        monkeypatch.setattr(bc, "get",
+            lambda path, params=None: self._make_plan_orders() if "plan-orders" in path else {})
+        monkeypatch.setattr(trader, "get_all_open_positions",
+            lambda: {"STOUSDT": {"qty": 200.0}})
+
+        import time
+        monkeypatch.setattr(time, "sleep", lambda s: None)
+
+        place_calls = []
+
+        def fake_post(path, payload):
+            if "cancel" not in path:
+                place_calls.append(payload)
+            return {}
+
+        monkeypatch.setattr(bc, "post", fake_post)
+
+        # Pass a new trigger (0.19) — existing profit_plan has 0.17
+        trader.refresh_plan_exits("STOUSDT", "long", new_trail_trigger=0.19)
+
+        for p in place_calls:
+            assert p.get("triggerPrice") == "0.19", (
+                f"Expected triggerPrice 0.19 but got {p.get('triggerPrice')}"
+            )
+
+    def test_zero_new_trail_trigger_preserves_existing_trigger(self, monkeypatch):
+        """new_trail_trigger=0 (default) must fall back to the existing profit_plan trigger."""
+        monkeypatch.setattr(trader, "_sym_info", _sym_info_stousdt)
+        monkeypatch.setattr(bc, "get",
+            lambda path, params=None: self._make_plan_orders() if "plan-orders" in path else {})
+        monkeypatch.setattr(trader, "get_all_open_positions",
+            lambda: {"STOUSDT": {"qty": 200.0}})
+
+        import time
+        monkeypatch.setattr(time, "sleep", lambda s: None)
+
+        place_calls = []
+
+        def fake_post(path, payload):
+            if "cancel" not in path:
+                place_calls.append(payload)
+            return {}
+
+        monkeypatch.setattr(bc, "post", fake_post)
+
+        trader.refresh_plan_exits("STOUSDT", "long")  # no new_trail_trigger
+
+        for p in place_calls:
+            assert p.get("triggerPrice") == "0.17"

@@ -12,6 +12,9 @@ from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import uvicorn
 
 import os as _os
@@ -24,6 +27,10 @@ IG_STATE_FILE  = str(_DATA_DIR / "ig_state.json")
 IG_TRADES_FILE = str(_DATA_DIR / "ig_trades.csv")
 PORT       = int(_os.environ.get("PORT", 8081 if PAPER_MODE else 8080))
 app = FastAPI(title="MTF Bot Dashboard" + (" [PAPER]" if PAPER_MODE else ""))
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -303,6 +310,7 @@ def _json_depth(obj, current=0):
 
 
 @app.post("/api/chat")
+@limiter.limit("10/minute")
 async def chat(request: Request):
     """Stream a Claude trade analysis response via SSE."""
     import claude_analyst

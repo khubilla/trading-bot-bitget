@@ -157,6 +157,10 @@ Add to your `.env` file:
 BITGET_API_KEY=your_api_key
 BITGET_API_SECRET=your_api_secret
 BITGET_API_PASSPHRASE=your_passphrase
+
+# Optional — protects the dashboard when deployed on a public server
+# Generate with: openssl rand -hex 32
+DASHBOARD_API_KEY=
 ```
 
 **4. Tune strategy parameters (optional)**
@@ -265,6 +269,11 @@ cp .env.example .env   # fill in API keys
 docker compose up -d
 ```
 Dashboard at [http://your-server-ip:8080](http://your-server-ip:8080).
+
+> **Security:** If the dashboard is publicly accessible, set `DASHBOARD_API_KEY` in `.env` to protect it. The dashboard will prompt for the key on first load and store it in the browser.
+> ```
+> DASHBOARD_API_KEY=<output of: openssl rand -hex 32>
+> ```
 
 **3. Paper trading**
 ```bash

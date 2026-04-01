@@ -147,8 +147,7 @@ def _now_et() -> datetime:
 def _in_trading_window(now: datetime) -> bool:
     """True if current ET time is within [SESSION_START, SESSION_END) for the first instrument.
 
-    Module-level function kept as 1-arg for backward compatibility and test patching.
-    _tick_instrument uses this function directly.
+    Module-level function kept for test-patching only; _tick_instrument uses the _for variants.
     """
     inst = config_ig.INSTRUMENTS[0]
     start = now.replace(hour=inst["session_start"][0],
@@ -163,8 +162,7 @@ def _in_trading_window(now: datetime) -> bool:
 def _is_session_end(now: datetime) -> bool:
     """True once we hit or pass SESSION_END on a weekday for the first instrument.
 
-    Module-level function kept as 1-arg for backward compatibility and test patching.
-    _tick_instrument uses this function directly.
+    Module-level function kept for test-patching only; _tick_instrument uses the _for variants.
     """
     inst = config_ig.INSTRUMENTS[0]
     return (now.weekday() < 5 and
@@ -585,7 +583,12 @@ class IGBot:
         self._heartbeat()
         now = _now_et()
         for instrument in config_ig.INSTRUMENTS:
-            self._tick_instrument(instrument, now)
+            try:
+                self._tick_instrument(instrument, now)
+            except Exception:
+                logger.exception("tick error for %s", instrument.get("display_name", "?"))
+            finally:
+                self._current_instrument = None
 
     def _tick_instrument(self, instrument: dict, now: datetime) -> None:
         # Set current instrument so _get_candles and helpers can resolve epic/config
@@ -597,7 +600,7 @@ class IGBot:
         po   = self._pending_orders.get(name)
 
         # 1. Session-end force close (handles both open position and pending order)
-        if (pos or po) and _is_session_end(now):
+        if (pos or po) and _is_session_end_for(instrument, now):
             self._session_end_close(instrument)
             return
 
@@ -606,7 +609,7 @@ class IGBot:
             self._monitor_position(instrument)
 
         # 3. Outside session window or weekend → no new entries
-        if not _in_trading_window(now):
+        if not _in_trading_window_for(instrument, now):
             logger.debug(f"[{name}] Outside trading window ({now.strftime('%H:%M')} ET)")
             return
         if now.weekday() >= 5:
@@ -667,9 +670,9 @@ class IGBot:
         contract_size = instrument["contract_size"]
         try:
             if side == "LONG":
-                deal_id = ig.place_limit_long(epic, trigger, sl, tp, contract_size)
+                deal_id = ig.place_limit_long(epic, trigger, sl, tp, contract_size, currency=instrument["currency"])
             else:
-                deal_id = ig.place_limit_short(epic, trigger, sl, tp, contract_size)
+                deal_id = ig.place_limit_short(epic, trigger, sl, tp, contract_size, currency=instrument["currency"])
         except Exception as e:
             logger.error(f"[{name}] [S5] Failed to place limit {side}: {e}")
             return
@@ -717,9 +720,9 @@ class IGBot:
             else:
                 epic = instrument["epic"]
                 if sig == "LONG":
-                    trade = ig.open_long(epic, sl, tp1, tp)
+                    trade = ig.open_long(epic, sl, tp1, tp, currency=instrument["currency"])
                 else:
-                    trade = ig.open_short(epic, sl, tp1, tp)
+                    trade = ig.open_short(epic, sl, tp1, tp, currency=instrument["currency"])
                 self._positions[name] = {
                     "side":         sig,
                     "deal_id":      trade["deal_id"],

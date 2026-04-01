@@ -1146,7 +1146,28 @@ class MTFBot:
                         import time as _si_t
                         _si_t.sleep(1.5)  # allow fill to settle
                         hold_side = "long" if ap["side"] == "LONG" else "short"
-                        if not tr.refresh_plan_exits(sym, hold_side):
+                        # Recompute trail trigger and SL from new average entry after scale-in
+                        new_trig = 0.0
+                        _scale_pos = tr.get_all_open_positions().get(sym, {})
+                        new_avg = _scale_pos.get("entry_price", 0)
+                        if new_avg > 0:
+                            if ap["strategy"] == "S2":
+                                new_trig = new_avg * (1 + config_s2.S2_TRAILING_TRIGGER_PCT)
+                                # Recompute SL cap from new avg (S2 scale-in is above box_high,
+                                # so new_avg > original entry → sl_cap moves up → SL tightens)
+                                new_sl = max(
+                                    ap.get("box_low", 0) * 0.999,
+                                    new_avg * (1 - config_s2.S2_STOP_LOSS_PCT),
+                                )
+                                if new_sl > ap.get("sl", 0):
+                                    if tr.update_position_sl(sym, new_sl, hold_side="long"):
+                                        ap["sl"] = new_sl
+                                        st.update_open_trade_sl(sym, new_sl)
+                            elif ap["strategy"] == "S4":
+                                new_trig = new_avg * (1 - config_s4.S4_TRAILING_TRIGGER_PCT)
+                                # S4 SL is structural (box_high * 1.001) — no percentage cap,
+                                # no SL update needed after scale-in
+                        if not tr.refresh_plan_exits(sym, hold_side, new_trig):
                             logger.warning(f"[{ap['strategy']}][{sym}] ⚠️ Scale-in exits refresh failed — verify plan orders manually")
                             st.add_scan_log(f"[{ap['strategy']}][{sym}] ⚠️ Scale-in exits refresh failed", "WARN")
                     except Exception as _ref_e:

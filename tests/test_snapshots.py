@@ -161,6 +161,166 @@ def test_bot_saves_scale_in_snapshot(tmp_path, monkeypatch):
     assert len(snap["candles"]) == 25
 
 
+def test_do_scale_in_passes_new_trail_trigger_to_refresh(monkeypatch):
+    """After S2 scale-in, refresh_plan_exits must receive a trail trigger derived
+    from the new average entry price, not the old profit_plan trigger price."""
+    import bot, config_s2
+
+    monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: 15.80)
+    monkeypatch.setattr(bot.tr, "scale_in_long", lambda *a, **kw: None)
+    monkeypatch.setattr(bot.tr, "get_candles",
+        lambda sym, interval, limit=100: __import__("pandas").DataFrame())
+    monkeypatch.setattr(bot.st, "add_scan_log", lambda *a, **kw: None)
+    monkeypatch.setattr(bot, "_log_trade", lambda action, details: None)
+    monkeypatch.setattr(bot, "PAPER_MODE", False)
+
+    # avg entry after scale-in is 15.50; S2_TRAILING_TRIGGER_PCT=0.10
+    # expected new_trail_trigger = 15.50 * 1.10 = 17.05
+    monkeypatch.setattr(config_s2, "S2_TRAILING_TRIGGER_PCT", 0.10)
+    monkeypatch.setattr(bot.tr, "get_all_open_positions",
+        lambda: {"RIVERUSDT": {"entry_price": 15.50, "qty": 200.0, "margin": 6.0}})
+
+    captured = {}
+
+    def fake_refresh(symbol, hold_side, new_trail_trigger=0):
+        captured["new_trail_trigger"] = new_trail_trigger
+        return True
+
+    monkeypatch.setattr(bot.tr, "refresh_plan_exits", fake_refresh)
+    monkeypatch.setattr(bot.tr, "update_position_sl", lambda *a, **kw: True)
+    monkeypatch.setattr(bot.st, "update_open_trade_sl", lambda *a: None)
+
+    import time
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+    b = object.__new__(bot.MTFBot)
+    ap = {
+        "side": "LONG", "strategy": "S2", "trade_id": "tid_s2",
+        "box_high": 15.80, "box_low": 14.99,
+        "sl": 13.50,
+        "scale_in_pending": True, "scale_in_after": 0,
+        "scale_in_trade_size_pct": 0.02,
+    }
+    b._do_scale_in("RIVERUSDT", ap)
+
+    assert "new_trail_trigger" in captured, "refresh_plan_exits was not called"
+    expected = round(15.50 * 1.10, 8)
+    assert abs(captured["new_trail_trigger"] - expected) < 1e-6, (
+        f"Expected {expected}, got {captured['new_trail_trigger']}"
+    )
+
+
+def test_do_scale_in_s4_short_passes_new_trail_trigger(monkeypatch):
+    """After S4 SHORT scale-in, trail trigger is new_avg * (1 - S4_TRAILING_TRIGGER_PCT)."""
+    import bot, config_s4
+
+    # S4 window: prev_low*(1-MAX_ENTRY_BUFFER) <= mark <= prev_low*(1-ENTRY_BUFFER)
+    # = 0.340*0.99=0.3366 to 0.340*0.998=0.33932 — mark=0.338 is in window
+    monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: 0.338)
+    monkeypatch.setattr(bot.tr, "scale_in_short", lambda *a, **kw: None)
+    monkeypatch.setattr(bot.tr, "get_candles",
+        lambda sym, interval, limit=100: __import__("pandas").DataFrame())
+    monkeypatch.setattr(bot.st, "add_scan_log", lambda *a, **kw: None)
+    monkeypatch.setattr(bot, "_log_trade", lambda action, details: None)
+    monkeypatch.setattr(bot, "PAPER_MODE", False)
+
+    monkeypatch.setattr(config_s4, "S4_TRAILING_TRIGGER_PCT", 0.10)
+    monkeypatch.setattr(config_s4, "S4_MAX_ENTRY_BUFFER", 0.01)
+    monkeypatch.setattr(config_s4, "S4_ENTRY_BUFFER", 0.002)
+    monkeypatch.setattr(bot.tr, "get_all_open_positions",
+        lambda: {"STOUSDT": {"entry_price": 0.345, "qty": 200.0, "margin": 3.0}})
+
+    captured = {}
+
+    def fake_refresh(symbol, hold_side, new_trail_trigger=0):
+        captured["new_trail_trigger"] = new_trail_trigger
+        return True
+
+    monkeypatch.setattr(bot.tr, "refresh_plan_exits", fake_refresh)
+
+    import time
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+    b = object.__new__(bot.MTFBot)
+    # S4 scale-in window: prev_low * (1 - MAX_ENTRY_BUFFER=0.01) <= mark <= prev_low * (1 - ENTRY_BUFFER=0.002)
+    # = 0.340 * 0.99 = 0.3366 to 0.340 * 0.998 = 0.33932 — use 0.338
+    prev_low = 0.340
+    ap = {
+        "side": "SHORT", "strategy": "S4", "trade_id": "tid_s4",
+        "s4_prev_low": prev_low,
+        "scale_in_pending": True, "scale_in_after": 0,
+        "scale_in_trade_size_pct": 0.02,
+    }
+    b._do_scale_in("STOUSDT", ap)
+
+    assert "new_trail_trigger" in captured, "refresh_plan_exits was not called"
+    expected = round(0.345 * (1 - 0.10), 8)
+    assert abs(captured["new_trail_trigger"] - expected) < 1e-6, (
+        f"Expected {expected}, got {captured['new_trail_trigger']}"
+    )
+
+
+def test_do_scale_in_s2_updates_sl_from_new_avg(monkeypatch):
+    """After S2 LONG scale-in, SL must be recomputed from new avg entry and pushed to exchange.
+    Expected new SL = max(box_low * 0.999, new_avg * (1 - S2_STOP_LOSS_PCT))
+    """
+    import bot, config_s2
+
+    # S2 window: box_high=0.160 <= mark <= 0.160*1.01=0.1616 — use 0.161
+    monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: 0.161)
+    monkeypatch.setattr(bot.tr, "scale_in_long", lambda *a, **kw: None)
+    monkeypatch.setattr(bot.tr, "get_candles",
+        lambda sym, interval, limit=100: __import__("pandas").DataFrame())
+    monkeypatch.setattr(bot.st, "add_scan_log", lambda *a, **kw: None)
+    monkeypatch.setattr(bot, "_log_trade", lambda action, details: None)
+    monkeypatch.setattr(bot, "PAPER_MODE", False)
+
+    monkeypatch.setattr(config_s2, "S2_STOP_LOSS_PCT", 0.05)
+    monkeypatch.setattr(config_s2, "S2_TRAILING_TRIGGER_PCT", 0.10)
+    monkeypatch.setattr(config_s2, "S2_MAX_ENTRY_BUFFER", 0.01)
+
+    # S2 window: box_high <= mark <= box_high*(1+MAX_ENTRY_BUFFER)
+    # = 0.160 to 0.160*1.01=0.1616 — mark=0.161 is in window
+    # new_avg=0.158, box_low=0.140
+    # new sl_cap = 0.158 * 0.95 = 0.1501
+    # box_low * 0.999 = 0.13986
+    # expected new SL = max(0.13986, 0.1501) = 0.1501
+    new_avg = 0.158
+    monkeypatch.setattr(bot.tr, "get_all_open_positions",
+        lambda: {"STOUSDT": {"entry_price": new_avg, "qty": 200.0, "margin": 6.0}})
+
+    monkeypatch.setattr(bot.tr, "refresh_plan_exits", lambda *a, **kw: True)
+
+    sl_update_calls = []
+    monkeypatch.setattr(bot.tr, "update_position_sl",
+        lambda sym, new_sl, hold_side="long": sl_update_calls.append(new_sl) or True)
+
+    state_sl_updates = []
+    monkeypatch.setattr(bot.st, "update_open_trade_sl",
+        lambda sym, new_sl: state_sl_updates.append(new_sl))
+
+    import time
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+    b = object.__new__(bot.MTFBot)
+    ap = {
+        "side": "LONG", "strategy": "S2", "trade_id": "tid_s2_sl",
+        "box_high": 0.160, "box_low": 0.140,
+        "sl": 0.132,
+        "scale_in_pending": True, "scale_in_after": 0,
+        "scale_in_trade_size_pct": 0.02,
+    }
+    b._do_scale_in("STOUSDT", ap)
+
+    expected_new_sl = max(0.140 * 0.999, new_avg * (1 - 0.05))
+    assert len(sl_update_calls) == 1, "update_position_sl should be called once"
+    assert abs(sl_update_calls[0] - expected_new_sl) < 1e-6, (
+        f"SL sent to exchange {sl_update_calls[0]} != expected {expected_new_sl}"
+    )
+    assert len(state_sl_updates) == 1, "update_open_trade_sl (state) should be called once"
+    assert abs(ap["sl"] - expected_new_sl) < 1e-6, "ap['sl'] should be updated in-memory"
+
+
 def test_startup_reconcile_partial_saves_snapshot(tmp_path, monkeypatch):
     """
     Validates the snapshot module contract used by Pass A startup reconciliation:

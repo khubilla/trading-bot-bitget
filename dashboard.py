@@ -94,6 +94,8 @@ async def require_api_key(request: Request, call_next):
     Token is read from DASHBOARD_API_KEY environment variable.
     If env var is not set, auth is bypassed (allows existing deployments without token to work).
     """
+    if request.url.path == "/":
+        return await call_next(request)
     api_key = os.environ.get("DASHBOARD_API_KEY", "")
     if api_key:
         auth = request.headers.get("Authorization", "")

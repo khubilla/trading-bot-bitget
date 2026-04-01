@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>MTF Bot — Live Dashboard</title>
+<title>Bitget Bot — Live Dashboard</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=Syne:wght@400;700;800&display=swap" rel="stylesheet">
 <style>
@@ -924,7 +924,7 @@
   <header>
     <div class="logo">
       <div class="logo-icon">▲</div>
-      MTF Bot
+      Bitget Bot
     </div>
 
     <div class="header-center">
@@ -1276,6 +1276,42 @@
 
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <script>
+// ── Auth ───────────────────────────────────────────────────
+function _authKey() {
+  return localStorage.getItem('dashboard_api_key') || '';
+}
+
+async function _apiFetch(url, opts = {}) {
+  const key = _authKey();
+  const headers = { ...(opts.headers || {}) };
+  if (key) headers['Authorization'] = `Bearer ${key}`;
+  const resp = await fetch(url, { ...opts, headers });
+  if (resp.status === 401) {
+    showAuthPrompt();
+    throw new Error('Unauthorized');
+  }
+  return resp;
+}
+
+function showAuthPrompt() {
+  document.getElementById('authOverlay').classList.add('open');
+  setTimeout(() => document.getElementById('authInput').focus(), 50);
+}
+
+function submitAuthKey() {
+  const key = document.getElementById('authInput').value.trim();
+  if (!key) return;
+  localStorage.setItem('dashboard_api_key', key);
+  document.getElementById('authOverlay').classList.remove('open');
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  if (!_authKey()) showAuthPrompt();
+  document.getElementById('authInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') submitAuthKey();
+  });
+});
+
 // ── Helpers ────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 
@@ -1548,7 +1584,7 @@ async function openCombinedChart(trade) {
   });
 
   try {
-    const resp = await fetch(`/api/trade-chart?${params}`);
+    const resp = await _apiFetch(`/api/trade-chart?${params}`);
 
     if (resp.status === 404) {
       document.getElementById('entryChartOverlay').classList.remove('open');
@@ -1616,7 +1652,7 @@ async function openEntryChart(trade) {
   });
 
   try {
-    const resp = await fetch(`/api/entry-chart?${params}`);
+    const resp = await _apiFetch(`/api/entry-chart?${params}`);
     const data = await resp.json();
 
     if (data.error) {
@@ -2124,7 +2160,7 @@ async function sendChat() {
   let streamDone = false;
 
   try {
-    const resp = await fetch('/api/chat', {
+    const resp = await _apiFetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ trade: _chatTrade, messages: _chatMessages }),
@@ -2173,7 +2209,7 @@ let failCount = 0;
 
 async function poll() {
   try {
-    const res = await fetch('/api/state');
+    const res = await _apiFetch('/api/state');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     $('connBanner').classList.remove('visible');
@@ -2777,7 +2813,7 @@ async function loadChart(symbol, interval, fitOnLoad = false) {
   const savedRange = !fitOnLoad ? candleChart.timeScale().getVisibleLogicalRange() : null;
 
   try {
-    const res  = await fetch(`/api/candles/${symbol}?interval=${interval}&limit=80`);
+    const res  = await _apiFetch(`/api/candles/${symbol}?interval=${interval}&limit=80`);
     const data = await res.json();
     if (data.error) { ageEl.textContent = 'Error: ' + data.error; return; }
 
@@ -3400,7 +3436,7 @@ function switchExchange(ex) {
 async function pollIG() {
   if (activeExchange !== 'ig') return;
   try {
-    const res = await fetch('/api/ig/state');
+    const res = await _apiFetch('/api/ig/state');
     if (!res.ok) return;
     renderIG(await res.json());
   } catch(e) { console.warn('IG poll:', e.message); }
@@ -3551,5 +3587,53 @@ function renderIGHistory(history) {
 
 setInterval(pollIG, 5000);
 </script>
+
+<!-- ── Auth Overlay ──────────────────────────────────────── -->
+<style>
+#authOverlay {
+  display: none;
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(8,11,15,0.92);
+  backdrop-filter: blur(6px);
+  align-items: center; justify-content: center;
+}
+#authOverlay.open { display: flex; }
+#authBox {
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 10px;
+  padding: 32px 28px;
+  width: 340px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+#authBox h2 {
+  margin: 0; font-size: 14px; color: var(--text);
+  font-family: 'Syne', sans-serif; font-weight: 700; letter-spacing: .04em;
+}
+#authBox p { margin: 0; font-size: 11px; color: var(--muted); line-height: 1.5; }
+#authInput {
+  background: var(--bg3); border: 1px solid var(--border2);
+  border-radius: 6px; color: var(--text);
+  font-family: 'IBM Plex Mono', monospace; font-size: 12px;
+  padding: 9px 11px; outline: none; width: 100%; box-sizing: border-box;
+}
+#authInput:focus { border-color: var(--amber); }
+#authSubmit {
+  background: var(--amber); color: #000; border: none; border-radius: 6px;
+  font-family: 'Syne', sans-serif; font-weight: 700; font-size: 12px;
+  padding: 9px; cursor: pointer; letter-spacing: .04em;
+}
+#authSubmit:hover { background: var(--amber2); }
+</style>
+
+<div id="authOverlay">
+  <div id="authBox">
+    <h2>DASHBOARD ACCESS</h2>
+    <p>Enter your API key to continue. It will be saved in your browser for this session.</p>
+    <input id="authInput" type="password" placeholder="API key" autocomplete="current-password" />
+    <button id="authSubmit" onclick="submitAuthKey()">ENTER</button>
+  </div>
+</div>
+
 </body>
 </html>

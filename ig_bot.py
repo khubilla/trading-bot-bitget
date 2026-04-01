@@ -24,25 +24,6 @@ import pandas as pd
 import ig_client as ig
 import config_ig
 
-# Apply US30-specific S5 params — must happen before strategy.evaluate_s5() is imported
-# or called, since evaluate_s5() does `from config_s5 import ...` at call time.
-import config_s5 as _cs5_orig
-import config_ig_s5 as _cs5_ig
-_base_attrs = {a for a in dir(_cs5_orig) if not a.startswith('_')}
-for _attr in [a for a in dir(_cs5_ig) if not a.startswith('_')]:
-    if _attr not in _base_attrs:
-        raise AttributeError(
-            f"config_ig_s5.{_attr} has no matching attribute in config_s5 — "
-            f"check for a typo in config_ig_s5.py"
-        )
-    setattr(_cs5_orig, _attr, getattr(_cs5_ig, _attr))
-del _cs5_orig, _cs5_ig, _attr, _base_attrs
-
-from config_ig_s5 import (
-    S5_DAILY_EMA_FAST, S5_DAILY_EMA_SLOW,
-    S5_USE_CANDLE_STOPS, S5_SL_BUFFER_PCT, S5_SWING_LOOKBACK, S5_MAX_ENTRY_BUFFER,
-    S5_LTF_INTERVAL, S5_OB_INVALIDATION_BUFFER_PCT,
-)
 from strategy import evaluate_s5, find_swing_low_target, find_swing_high_target, calculate_ema
 
 
@@ -112,13 +93,39 @@ ET            = zoneinfo.ZoneInfo("America/New_York")
 
 # ── CSV fields ───────────────────────────────────────────────── #
 _TRADE_FIELDS = [
-    "timestamp", "trade_id", "action",
+    "timestamp", "trade_id", "action", "symbol",
     "side", "qty", "entry", "sl", "tp",
     "snap_entry_trigger", "snap_sl", "snap_rr",
     "snap_s5_ob_low", "snap_s5_ob_high", "snap_s5_tp",
     "result", "pnl", "exit_reason",
     "session_date", "mode",
 ]
+
+_REQUIRED_INSTRUMENT_KEYS = {
+    "epic", "display_name", "currency",
+    "contract_size", "partial_size", "point_value",
+    "session_start", "session_end",
+    "daily_limit", "htf_limit", "m15_limit",
+    "s5_enabled", "s5_daily_ema_fast", "s5_daily_ema_med", "s5_daily_ema_slow",
+    "s5_htf_bos_lookback", "s5_ltf_interval", "s5_ob_lookback",
+    "s5_ob_min_impulse", "s5_ob_min_range_pct", "s5_choch_lookback",
+    "s5_max_entry_buffer", "s5_sl_buffer_pct", "s5_ob_invalidation_buffer_pct",
+    "s5_swing_lookback", "s5_smc_fvg_filter", "s5_smc_fvg_lookback",
+    "s5_leverage", "s5_trade_size_pct", "s5_min_rr",
+    "s5_trail_range_pct", "s5_use_candle_stops", "s5_min_sr_clearance",
+}
+
+
+def _validate_instruments() -> None:
+    for inst in config_ig.INSTRUMENTS:
+        missing = _REQUIRED_INSTRUMENT_KEYS - inst.keys()
+        if missing:
+            raise KeyError(
+                f"Instrument config '{inst.get('display_name', '?')}' missing keys: {missing}"
+            )
+
+
+_validate_instruments()
 
 
 def _log_trade(action: str, details: dict, paper: bool = False) -> None:
@@ -168,14 +175,14 @@ def _entry_in_window(sig: str, mark: float, trigger: float) -> bool:
         if mark < trigger:
             logger.info(f"[S5] LONG stale — mark {mark:.1f} < trigger {trigger:.1f}")
             return False
-        if mark > trigger * (1 + S5_MAX_ENTRY_BUFFER):
+        if mark > trigger * (1 + _CFG["s5_max_entry_buffer"]):
             logger.info(f"[S5] LONG entry missed — price {mark:.1f} too far past trigger {trigger:.1f}")
             return False
     else:
         if mark > trigger:
             logger.info(f"[S5] SHORT stale — mark {mark:.1f} > trigger {trigger:.1f}")
             return False
-        if mark < trigger * (1 - S5_MAX_ENTRY_BUFFER):
+        if mark < trigger * (1 - _CFG["s5_max_entry_buffer"]):
             logger.info(f"[S5] SHORT entry missed — price {mark:.1f} too far past trigger {trigger:.1f}")
             return False
     return True
@@ -534,8 +541,8 @@ class IGBot:
         # 6. Derive allowed_direction from daily EMA
         #    (go_short = allowed_direction == "BEARISH" in strategy.py line 1089
         #     so NEUTRAL only enables LONG — we must set explicitly)
-        ema_fast = float(calculate_ema(daily_df["close"].astype(float), S5_DAILY_EMA_FAST).iloc[-1])
-        ema_slow = float(calculate_ema(daily_df["close"].astype(float), S5_DAILY_EMA_SLOW).iloc[-1])
+        ema_fast = float(calculate_ema(daily_df["close"].astype(float), _CFG["s5_daily_ema_fast"]).iloc[-1])
+        ema_slow = float(calculate_ema(daily_df["close"].astype(float), _CFG["s5_daily_ema_slow"]).iloc[-1])
         allowed_direction = "BULLISH" if ema_fast > ema_slow else "BEARISH"
 
         # 7. Evaluate S5
@@ -686,7 +693,7 @@ class IGBot:
 
         elif status == "open":
             # Check OB invalidation
-            if side == "LONG" and mark < self.pending_order["ob_low"] * (1 - S5_OB_INVALIDATION_BUFFER_PCT):
+            if side == "LONG" and mark < self.pending_order["ob_low"] * (1 - _CFG["s5_ob_invalidation_buffer_pct"]):
                 try:
                     ig.cancel_working_order(deal_id)
                 except Exception as e:
@@ -694,7 +701,7 @@ class IGBot:
                 logger.info(f"[S5] OB invalidated — cancelled limit order {deal_id}")
                 self.pending_order = None
                 self._save_state()
-            elif side == "SHORT" and mark > self.pending_order["ob_high"] * (1 + S5_OB_INVALIDATION_BUFFER_PCT):
+            elif side == "SHORT" and mark > self.pending_order["ob_high"] * (1 + _CFG["s5_ob_invalidation_buffer_pct"]):
                 try:
                     ig.cancel_working_order(deal_id)
                 except Exception as e:
@@ -809,7 +816,7 @@ class IGBot:
                 return
 
             # Swing trail after partial
-            if pos["partial_done"] and S5_USE_CANDLE_STOPS:
+            if pos["partial_done"] and _CFG["s5_use_candle_stops"]:
                 self._trail_sl_candle(mark)
 
         else:
@@ -828,7 +835,7 @@ class IGBot:
                     return
 
             # Swing trail after partial
-            if pos["partial_done"] and S5_USE_CANDLE_STOPS:
+            if pos["partial_done"] and _CFG["s5_use_candle_stops"]:
                 self._trail_sl_candle(mark)
 
         upnl = _calc_pnl(pos, mark)
@@ -876,17 +883,17 @@ class IGBot:
         """Trail SL to previous completed 15m candle low (LONG) or high (SHORT)."""
         pos = self.position
         try:
-            cs_df = ig.get_candles(EPIC, S5_LTF_INTERVAL, limit=S5_SWING_LOOKBACK + 5)
+            cs_df = ig.get_candles(EPIC, _CFG["s5_ltf_interval"], limit=_CFG["s5_swing_lookback"] + 5)
             if cs_df.empty or len(cs_df) < 3:
                 return
 
             if pos["side"] == "LONG":
-                raw      = find_swing_low_target(cs_df, mark, lookback=S5_SWING_LOOKBACK)
-                new_sl   = round(raw * (1 - S5_SL_BUFFER_PCT), 1) if raw else None
+                raw      = find_swing_low_target(cs_df, mark, lookback=_CFG["s5_swing_lookback"])
+                new_sl   = round(raw * (1 - _CFG["s5_sl_buffer_pct"]), 1) if raw else None
                 improves = new_sl is not None and new_sl > pos["sl"]
             else:
-                raw      = find_swing_high_target(cs_df, mark, lookback=S5_SWING_LOOKBACK)
-                new_sl   = round(raw * (1 + S5_SL_BUFFER_PCT), 1) if raw else None
+                raw      = find_swing_high_target(cs_df, mark, lookback=_CFG["s5_swing_lookback"])
+                new_sl   = round(raw * (1 + _CFG["s5_sl_buffer_pct"]), 1) if raw else None
                 improves = new_sl is not None and new_sl < pos["sl"]
 
             if not improves:
@@ -903,7 +910,7 @@ class IGBot:
             logger.info(
                 f"[S5] Swing trail: SL → {new_sl:.1f} "
                 f"(was {pos['sl']:.1f}, "
-                f"{'low' if pos['side'] == 'LONG' else 'high'} ±{S5_SL_BUFFER_PCT*100:.1f}%)"
+                f"{'low' if pos['side'] == 'LONG' else 'high'} ±{_CFG['s5_sl_buffer_pct']*100:.1f}%)"
             )
         except Exception as e:
             logger.error(f"Swing trail error: {e}")

@@ -1924,11 +1924,17 @@ function _drawTradeChart(canvas, data) {
     ctx.fillRect(PAD_L + i * candleW + gap, vBase - vh, bodyW, vh);
   });
 
+  const TICK_COLOR = {
+    open:     '#1e6b2e',  // dark green
+    scale_in: '#c8860a',  // dark amber
+    partial:  '#7c3aed',  // dark purple
+    close:    '#9b2020',  // dark red
+  };
   events.forEach(e => {
     if (e.candle_idx >= n) return;
     const x1 = PAD_L + e.candle_idx * candleW;
-    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.setLineDash([]);
-    ctx.beginPath(); ctx.moveTo(x1 + 1, p2y(e.price)); ctx.lineTo(x1 + candleW - 1, p2y(e.price)); ctx.stroke();
+    ctx.strokeStyle = TICK_COLOR[e.type] || '#ffffff'; ctx.lineWidth = 2; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(x1, p2y(e.price)); ctx.lineTo(x1 + candleW, p2y(e.price)); ctx.stroke();
   });
 
   const ARROW_H = 10, ARROW_W = 9, ARROW_GAP = 5;

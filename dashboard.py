@@ -79,6 +79,21 @@ async def add_security_headers(request: Request, call_next):
         del response.headers["server"]
     return response
 
+# Bearer token authentication middleware
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    """
+    Require Authorization: Bearer <token> header on all endpoints.
+    Token is read from DASHBOARD_API_KEY environment variable.
+    If env var is not set, auth is bypassed (allows existing deployments without token to work).
+    """
+    api_key = os.environ.get("DASHBOARD_API_KEY", "")
+    if api_key:
+        auth = request.headers.get("Authorization", "")
+        if auth != f"Bearer {api_key}":
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return await call_next(request)
+
 # Add bot directory to path so we can import trader + config
 sys.path.insert(0, str(Path(__file__).parent))
 

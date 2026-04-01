@@ -1,7 +1,7 @@
 """
 optimize_ig.py — Claude-powered optimizer for the IG S5 / US30 bot
 
-Reads ig_trades.csv, sends completed trades + current config_ig_s5 params
+Reads ig_trades.csv, sends completed trades + current instrument S5 params
 to Claude, and prints parameter change suggestions tuned for US30.
 
 Usage:
@@ -16,22 +16,22 @@ import config_ig
 MODEL      = "claude-sonnet-4-6"
 MIN_TRADES = 5   # US30 session is limited to 3h/day — fewer trades than crypto
 
-# ── Current params (read from config_ig_s5 at runtime) ─────── #
+# ── Current params (read from INSTRUMENTS[0] at runtime) ─────── #
 
 def _load_current_params() -> dict:
-    import config_ig_s5 as c
+    c = config_ig.INSTRUMENTS[0]
     return {
-        "HTF_BOS_LOOKBACK":  c.S5_HTF_BOS_LOOKBACK,
-        "OB_LOOKBACK":       c.S5_OB_LOOKBACK,
-        "OB_MIN_IMPULSE":    f"{c.S5_OB_MIN_IMPULSE * 100:.1f}%",
-        "OB_MIN_RANGE_PCT":  f"{c.S5_OB_MIN_RANGE_PCT * 100:.1f}%",
-        "CHOCH_LOOKBACK":    c.S5_CHOCH_LOOKBACK,
-        "MAX_ENTRY_BUFFER":  f"{c.S5_MAX_ENTRY_BUFFER * 100:.0f}%",
-        "SL_BUFFER_PCT":     f"{c.S5_SL_BUFFER_PCT * 100:.1f}%",
-        "SWING_LOOKBACK":    c.S5_SWING_LOOKBACK,
-        "MIN_RR":            c.S5_MIN_RR,
-        "TRAIL_RANGE_PCT":   f"{c.S5_TRAIL_RANGE_PCT}%",
-        "USE_CANDLE_STOPS":  c.S5_USE_CANDLE_STOPS,
+        "HTF_BOS_LOOKBACK":  c["s5_htf_bos_lookback"],
+        "OB_LOOKBACK":       c["s5_ob_lookback"],
+        "OB_MIN_IMPULSE":    f"{c['s5_ob_min_impulse'] * 100:.1f}%",
+        "OB_MIN_RANGE_PCT":  f"{c['s5_ob_min_range_pct'] * 100:.1f}%",
+        "CHOCH_LOOKBACK":    c["s5_choch_lookback"],
+        "MAX_ENTRY_BUFFER":  f"{c['s5_max_entry_buffer'] * 100:.0f}%",
+        "SL_BUFFER_PCT":     f"{c['s5_sl_buffer_pct'] * 100:.1f}%",
+        "SWING_LOOKBACK":    c["s5_swing_lookback"],
+        "MIN_RR":            c["s5_min_rr"],
+        "TRAIL_RANGE_PCT":   f"{c['s5_trail_range_pct']}%",
+        "USE_CANDLE_STOPS":  c["s5_use_candle_stops"],
     }
 
 
@@ -152,7 +152,7 @@ Total trades: {len(trades)} | Wins: {wins} | Losses: {losses} | Win rate: {wins/
 {avg_pnl}{total_pnl}
 Exit breakdown: {exit_summary}
 
-Current parameters (from config_ig_s5.py):
+Current parameters (from config_ig_us30.py):
 {params_str}
 
 Trade history (oldest to newest):

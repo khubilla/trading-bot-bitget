@@ -85,7 +85,8 @@ def test_tick_places_limit_on_pending_long(monkeypatch):
 
     placed_calls = []
     monkeypatch.setattr(ig, "place_limit_long",
-                        lambda epic, lp, sl, tp, size: (placed_calls.append((lp, sl, tp, size)), "DEAL001")[1])
+                        lambda epic, lp, sl, tp, size, **kwargs: (placed_calls.append((lp, sl, tp, size)), "DEAL001")[1])
+    monkeypatch.setattr(config_ig, "INSTRUMENTS", [config_ig.INSTRUMENTS[0]])
 
     bot._tick()
 
@@ -115,7 +116,8 @@ def test_tick_places_limit_on_pending_short(monkeypatch):
 
     placed_calls = []
     monkeypatch.setattr(ig, "place_limit_short",
-                        lambda epic, lp, sl, tp, size: (placed_calls.append((lp, sl, tp, size)), "DEAL002")[1])
+                        lambda epic, lp, sl, tp, size, **kwargs: (placed_calls.append((lp, sl, tp, size)), "DEAL002")[1])
+    monkeypatch.setattr(config_ig, "INSTRUMENTS", [config_ig.INSTRUMENTS[0]])
 
     bot._tick()
 
@@ -182,9 +184,9 @@ def test_check_pending_cancels_on_ob_invalidation_long(monkeypatch):
     monkeypatch.setattr(ig, "cancel_working_order",
                         lambda deal_id: cancelled.append(deal_id))
 
-    from config_ig_s5 import S5_OB_INVALIDATION_BUFFER_PCT
+    buf = config_ig.INSTRUMENTS[0]["s5_ob_invalidation_buffer_pct"]
     # Mark below ob_low * (1 - buffer) = 40000 * (1 - 0.001) = 39960
-    invalidating_mark = po["ob_low"] * (1 - S5_OB_INVALIDATION_BUFFER_PCT) - 1.0  # well below
+    invalidating_mark = po["ob_low"] * (1 - buf) - 1.0  # well below
 
     result = bot._check_pending_order(invalidating_mark)
 
@@ -209,9 +211,9 @@ def test_check_pending_cancels_on_ob_invalidation_short(monkeypatch):
     monkeypatch.setattr(ig, "cancel_working_order",
                         lambda deal_id: cancelled.append(deal_id))
 
-    from config_ig_s5 import S5_OB_INVALIDATION_BUFFER_PCT
+    buf = config_ig.INSTRUMENTS[0]["s5_ob_invalidation_buffer_pct"]
     # Mark above ob_high * (1 + buffer) = 40500 * 1.001 = 40540.5
-    invalidating_mark = po["ob_high"] * (1 + S5_OB_INVALIDATION_BUFFER_PCT) + 1.0
+    invalidating_mark = po["ob_high"] * (1 + buf) + 1.0
 
     result = bot._check_pending_order(invalidating_mark)
 

@@ -153,11 +153,11 @@ def _now_et() -> datetime:
 
 def _in_trading_window(now: datetime) -> bool:
     """True if current ET time is within [SESSION_START, SESSION_END)."""
-    start = now.replace(hour=config_ig.SESSION_START[0],
-                        minute=config_ig.SESSION_START[1],
+    start = now.replace(hour=_CFG["session_start"][0],
+                        minute=_CFG["session_start"][1],
                         second=0, microsecond=0)
-    end   = now.replace(hour=config_ig.SESSION_END[0],
-                        minute=config_ig.SESSION_END[1],
+    end   = now.replace(hour=_CFG["session_end"][0],
+                        minute=_CFG["session_end"][1],
                         second=0, microsecond=0)
     return start <= now < end
 
@@ -165,8 +165,8 @@ def _in_trading_window(now: datetime) -> bool:
 def _is_session_end(now: datetime) -> bool:
     """True once we hit or pass SESSION_END on a weekday."""
     return (now.weekday() < 5 and
-            now.hour == config_ig.SESSION_END[0] and
-            now.minute >= config_ig.SESSION_END[1])
+            now.hour == _CFG["session_end"][0] and
+            now.minute >= _CFG["session_end"][1])
 
 
 def _entry_in_window(sig: str, mark: float, trigger: float) -> bool:
@@ -547,7 +547,7 @@ class IGBot:
 
         # 7. Evaluate S5
         sig, trigger, sl, tp, ob_low, ob_high, reason = evaluate_s5(
-            EPIC, daily_df, htf_df, m15_df, allowed_direction,
+            EPIC, daily_df, htf_df, m15_df, allowed_direction, cfg=_CFG
         )
         logger.info(f"[S5] {reason}")
 
@@ -644,6 +644,7 @@ class IGBot:
         rr    = round(abs(tp - entry) / risk, 2) if risk > 0 else 0
 
         _log_trade(f"S5_{sig}", {
+            "symbol":             _CFG["display_name"],
             "trade_id":           trade_id,
             "side":               sig,
             "qty":                CONTRACT_SIZE,
@@ -776,6 +777,7 @@ class IGBot:
         rr = round(abs(tp - fill_price) / risk, 2) if risk > 0 else 0
 
         _log_trade(f"S5_{side}", {
+            "symbol":             _CFG["display_name"],
             "trade_id":           trade_id,
             "side":               side,
             "qty":                size,
@@ -865,6 +867,7 @@ class IGBot:
             self._save_state()
 
         _log_trade("S5_PARTIAL", {
+            "symbol":      _CFG["display_name"],
             "trade_id":    pos["trade_id"],
             "side":        pos["side"],
             "qty":         PARTIAL_SIZE,
@@ -935,6 +938,7 @@ class IGBot:
         result = "WIN" if realized >= 0 else "LOSS"
 
         _log_trade("S5_CLOSE", {
+            "symbol":      _CFG["display_name"],
             "trade_id":    pos["trade_id"],
             "side":        pos["side"],
             "qty":         pos["current_qty"],
@@ -1007,6 +1011,7 @@ class IGBot:
         result = "WIN" if realized >= 0 else "LOSS"
 
         _log_trade("S5_CLOSE", {
+            "symbol":      _CFG["display_name"],
             "trade_id":    pos["trade_id"],
             "side":        pos["side"],
             "qty":         pos["current_qty"],

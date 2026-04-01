@@ -331,11 +331,11 @@ def test_pending_order_persisted_in_state(monkeypatch):
 
     bot._save_state()
 
-    # Read raw JSON to verify it's there
+    # Read raw JSON to verify it's there (new format uses pending_orders dict)
     with open(tmp.name) as f:
         raw = json.load(f)
-    assert raw.get("pending_order") is not None
-    assert raw["pending_order"]["deal_id"] == "DEAL_PENDING_001"
+    assert raw.get("pending_orders") is not None
+    assert raw["pending_orders"]["US30"]["deal_id"] == "DEAL_PENDING_001"
 
     # Now simulate a fresh bot loading from that state file
     bot2 = ig_bot.IGBot(paper=True)

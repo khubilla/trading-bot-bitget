@@ -320,16 +320,18 @@ class IGBot:
     def __init__(self, paper: bool = False):
         self.paper       = paper
         self.running     = True
-        self.position: dict | None = None   # live position state dict
-        self.pending_order: dict | None = None
-        # Structure: {"deal_id": str, "side": str, "ob_low": float, "ob_high": float,
-        #              "sl": float, "tp": float, "trigger": float, "size": float,
-        #              "expires": float}
+        # Per-instrument state dicts — keyed by display_name (e.g. "US30")
+        self._positions: dict      = {}
+        self._pending_orders: dict = {}
+        # Structure of each pending_orders value:
+        #   {"deal_id": str, "side": str, "ob_low": float, "ob_high": float,
+        #    "sl": float, "tp": float, "trigger": float, "size": float, "expires": float}
         self._paper      = _PaperState() if paper else None
         # Candle cache: fetch full history once, then append new candles only.
         # IG limits historical price data to 10,000 points/week — fetching 550
         # points every 45s would exceed that in ~4 minutes.
-        self._candle_cache: dict[str, pd.DataFrame] = {}
+        # Cache key is (epic, interval) tuple to support multiple instruments.
+        self._candle_cache: dict[tuple, pd.DataFrame] = {}
         self._scan_signals: dict = {}   # keyed by DISPLAY_NAME; latest evaluate_s5 output per instrument
         self._scan_log: list     = []   # last 20 scan entries, newest first
 
@@ -343,21 +345,66 @@ class IGBot:
 
         if paper:
             # Restore position from paper state if any
-            self.position = self._paper.position
+            if self._paper.position is not None:
+                self._positions[_CFG["display_name"]] = self._paper.position
             # Restore pending order and scan state from state file if present
-            if os.path.exists(config_ig.STATE_FILE):
-                try:
-                    with open(config_ig.STATE_FILE) as _f:
-                        _data = json.load(_f)
-                    self.pending_order  = _data.get("pending_order")
-                    self._scan_signals  = _data.get("scan_signals", {})
-                    self._scan_log      = _data.get("scan_log", [])
-                except Exception:
-                    pass
+            self._load_state()
         else:
             self._sync_live_position()
 
-    def _get_candles(self, interval: str, limit: int) -> pd.DataFrame:
+    # ── Property shims for backward-compat (single-instrument) ──── #
+
+    @property
+    def position(self) -> dict | None:
+        return self._positions.get(_CFG["display_name"])
+
+    @position.setter
+    def position(self, value: dict | None) -> None:
+        self._positions[_CFG["display_name"]] = value
+
+    @property
+    def pending_order(self) -> dict | None:
+        return self._pending_orders.get(_CFG["display_name"])
+
+    @pending_order.setter
+    def pending_order(self, value: dict | None) -> None:
+        self._pending_orders[_CFG["display_name"]] = value
+
+    # ── State persistence ────────────────────────────────────────── #
+
+    def _load_state(self) -> None:
+        """Load state from STATE_FILE, migrating old single-instrument format if needed."""
+        if not os.path.exists(config_ig.STATE_FILE):
+            return
+        try:
+            with open(config_ig.STATE_FILE) as f:
+                raw = json.load(f)
+        except Exception:
+            return
+
+        # Migrate old single-instrument format
+        if "position" in raw and "positions" not in raw:
+            raw["positions"] = {_CFG["display_name"]: raw.pop("position")}
+            raw["pending_orders"] = {_CFG["display_name"]: raw.pop("pending_order", None)}
+
+        saved_positions = raw.get("positions", {})
+        saved_pending   = raw.get("pending_orders", {})
+
+        # For paper mode, paper state owns the position — only restore pending/scan
+        if not self.paper:
+            self._positions = saved_positions
+        else:
+            # Merge: paper state is authoritative for position, but restore pending
+            pass
+
+        for name, po in saved_pending.items():
+            if po is not None:
+                self._pending_orders[name] = po
+
+        self._scan_signals = raw.get("scan_signals", {})
+        self._scan_log     = raw.get("scan_log", [])
+
+    def _get_candles(self, interval: str, limit: int, epic: str = None) -> pd.DataFrame:
         """
         Return candles from in-memory cache.  Only calls IG's price history API
         when a new candle has formed since the last fetch — keeping weekly data
@@ -366,15 +413,21 @@ class IGBot:
         Cold start (cache empty): fetches full history (one-time cost).
         Subsequent ticks: fetches 3 candles only when the next candle period
         has opened, then appends & deduplicates.
+
+        The cache key is a (epic, interval) tuple so multiple instruments can
+        share the same cache dict without collisions.
         """
+        if epic is None:
+            epic = _CFG["epic"]
+        cache_key   = (epic, interval)
         interval_ms = {"1D": 86_400_000, "1H": 3_600_000, "15m": 900_000}.get(interval, 60_000)
         now_ms      = int(time.time() * 1000)
-        cached      = self._candle_cache.get(interval)
+        cached      = self._candle_cache.get(cache_key)
 
         if cached is None or cached.empty:
-            df = ig.get_candles(EPIC, interval, limit)
+            df = ig.get_candles(epic, interval, limit)
             if not df.empty:
-                self._candle_cache[interval] = df
+                self._candle_cache[cache_key] = df
             return df
 
         last_candle_ts = int(cached["ts"].iloc[-1])
@@ -382,7 +435,7 @@ class IGBot:
             return cached   # current candle still open — no new data
 
         # A new candle period has started — fetch the last 3 to catch any missed
-        fresh = ig.get_candles(EPIC, interval, 3)
+        fresh = ig.get_candles(epic, interval, 3)
         if fresh.empty:
             return cached
         combined = (
@@ -393,47 +446,40 @@ class IGBot:
             .tail(limit)
             .reset_index(drop=True)
         )
-        self._candle_cache[interval] = combined
+        self._candle_cache[cache_key] = combined
         return combined
 
     def _sync_live_position(self) -> None:
-        """On startup, restore position and pending_order from STATE_FILE."""
-        if not os.path.exists(config_ig.STATE_FILE):
-            return
-        try:
-            with open(config_ig.STATE_FILE) as f:
-                data = json.load(f)
-            saved = data.get("position")
-            if saved:
-                deal_id = saved.get("deal_id", "")
-                live    = ig.get_open_position(deal_id)
-                if live:
-                    self.position = saved
-                    logger.info(f"Restored position from state file: {deal_id}")
-                else:
-                    logger.info("State file has position but it's no longer open — clearing")
-                    self._clear_state()
-            saved_pending = data.get("pending_order")
-            if saved_pending:
-                self.pending_order = saved_pending
-                logger.info(f"Restored pending order from state file: {saved_pending.get('deal_id')}")
-            self._scan_signals = data.get("scan_signals", {})
-            self._scan_log     = data.get("scan_log", [])
-        except Exception as e:
-            logger.warning(f"Could not restore state: {e}")
+        """On startup, restore positions and pending_orders from STATE_FILE."""
+        self._load_state()
+        # Validate restored live positions against exchange
+        name  = _CFG["display_name"]
+        saved = self._positions.get(name)
+        if saved:
+            deal_id = saved.get("deal_id", "")
+            live    = ig.get_open_position(deal_id)
+            if live:
+                logger.info(f"Restored position from state file: {deal_id}")
+            else:
+                logger.info("State file has position but it's no longer open — clearing")
+                self._positions[name] = None
+                self._save_state()
+        saved_pending = self._pending_orders.get(name)
+        if saved_pending:
+            logger.info(f"Restored pending order from state file: {saved_pending.get('deal_id')}")
 
     def _save_state(self) -> None:
         with open(config_ig.STATE_FILE, "w") as f:
             json.dump({
-                "position":      self.position,
-                "pending_order": self.pending_order,
-                "scan_signals":  self._scan_signals,
-                "scan_log":      self._scan_log,
+                "positions":      self._positions,
+                "pending_orders": self._pending_orders,
+                "scan_signals":   self._scan_signals,
+                "scan_log":       self._scan_log,
             }, f, indent=2)
 
     def _clear_state(self) -> None:
         self.position = None
-        self._save_state()  # write {"position": null} so dashboard heartbeat stays fresh
+        self._save_state()  # persist cleared position so dashboard heartbeat stays fresh
 
     def _heartbeat(self) -> None:
         """Touch state file every tick so dashboard knows the bot is alive."""

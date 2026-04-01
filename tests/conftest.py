@@ -4,6 +4,23 @@ import sys
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def reset_rate_limiter():
+    """Reset slowapi in-memory rate limit counters before each test.
+
+    The live_server_url fixture uses a session-scoped server, so rate limit
+    state persists across tests.  TestRateLimiting::test_chat_rate_limit_enforced
+    exhausts the 10/minute window for 127.0.0.1; without a reset the next test
+    (test_chat_within_limit_succeeds) would immediately receive 429.
+    """
+    import dashboard
+    try:
+        dashboard.limiter._storage.reset()
+    except Exception:
+        pass
+    yield
+
+
 def _load_fresh_config_s5():
     """Load config_s5 from source, bypassing sys.modules, to get the original values."""
     spec = importlib.util.find_spec("config_s5")
@@ -130,7 +147,7 @@ def live_server_url(tmp_path_factory):
     import os as _os
     _os.environ["DASHBOARD_API_KEY"] = "test-token"
 
-    config = uvicorn.Config(dashboard.app, host="127.0.0.1", port=8099, log_level="error")
+    config = uvicorn.Config(dashboard.app, host="127.0.0.1", port=8099, log_level="error", server_header=False)
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()

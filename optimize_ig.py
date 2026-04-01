@@ -5,8 +5,9 @@ Reads ig_trades.csv, sends completed trades + current instrument S5 params
 to Claude, and prints parameter change suggestions tuned for US30.
 
 Usage:
-  python optimize_ig.py           # analyze ig_trades.csv
-  python optimize_ig.py --min 3   # lower minimum trades threshold (default 5)
+  python optimize_ig.py              # analyze all trades in ig_trades.csv
+  python optimize_ig.py --min 3      # lower minimum trades threshold (default 5)
+  python optimize_ig.py --symbol GOLD  # filter to a specific instrument
 """
 
 import os, csv, sys, argparse
@@ -16,10 +17,17 @@ import config_ig
 MODEL      = "claude-sonnet-4-6"
 MIN_TRADES = 5   # US30 session is limited to 3h/day — fewer trades than crypto
 
-# ── Current params (read from INSTRUMENTS[0] at runtime) ─────── #
+# ── Current params (read from INSTRUMENTS at runtime) ─────────── #
 
-def _load_current_params() -> dict:
+def _load_current_params(symbol: str | None = None) -> dict:
+    """Return S5 params for *symbol*'s instrument, or INSTRUMENTS[0] if not found."""
     c = config_ig.INSTRUMENTS[0]
+    if symbol:
+        for inst in config_ig.INSTRUMENTS:
+            if inst.get("epic", "").upper() == symbol.upper() or inst.get("symbol", "").upper() == symbol.upper():
+                c = inst
+                break
+        # TODO: consider keying INSTRUMENTS by symbol for O(1) lookup
     return {
         "HTF_BOS_LOOKBACK":  c["s5_htf_bos_lookback"],
         "OB_LOOKBACK":       c["s5_ob_lookback"],
@@ -58,6 +66,10 @@ def load_trades(csv_path: str) -> list[dict]:
         trade_id = r.get("trade_id", "")
         if not action or not trade_id:
             continue
+
+        # Backfill symbol for rows written before the symbol column existed
+        if not r.get("symbol"):
+            r["symbol"] = "US30"
 
         if action in ("S5_OPEN",):
             opens[trade_id] = r
@@ -182,11 +194,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--min", type=int, default=MIN_TRADES,
                         help=f"Min completed trades before analyzing (default {MIN_TRADES})")
+    parser.add_argument("--symbol", default=None,
+                        help="Filter analysis to a specific instrument (e.g. US30, GOLD). Omit to analyse all.")
     args = parser.parse_args()
 
     csv_path = config_ig.TRADE_LOG
     print(f"\n📊 Loading IG trades from: {csv_path}")
     trades = load_trades(csv_path)
+
+    if args.symbol:
+        sym_upper = args.symbol.upper()
+        trades = [t for t in trades if t.get("symbol", "US30").upper() == sym_upper]
+        print(f"   Filtered to symbol: {args.symbol}")
 
     if not trades:
         print("❌ No completed trades found in", csv_path)
@@ -199,7 +218,7 @@ def main():
         print(f"⏭️  Only {len(trades)} trades (min {args.min}) — run more sessions first.")
         sys.exit(0)
 
-    params = _load_current_params()
+    params = _load_current_params(args.symbol)
     prompt = build_prompt(trades, params)
 
     print("=" * 60)

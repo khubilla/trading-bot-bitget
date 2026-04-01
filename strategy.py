@@ -1107,6 +1107,7 @@ def evaluate_s5(
     htf_df: pd.DataFrame,
     m15_df: pd.DataFrame,
     allowed_direction: str,
+    cfg=None,   # instrument config dict; None = Bitget path (config_s5 module)
 ) -> tuple[Signal, float, float, float, float, float, str]:
     """
     Strategy 5 — SMC Order Block Pullback.
@@ -1119,15 +1120,32 @@ def evaluate_s5(
       ob_high       : Order Block upper bound (for chart display)
       reason        : debug string
     """
-    from config_s5 import (
-        S5_ENABLED,
-        S5_DAILY_EMA_FAST, S5_DAILY_EMA_MED, S5_DAILY_EMA_SLOW,
-        S5_HTF_BOS_LOOKBACK,
-        S5_OB_LOOKBACK, S5_OB_MIN_IMPULSE, S5_CHOCH_LOOKBACK,
-        S5_MAX_ENTRY_BUFFER, S5_SL_BUFFER_PCT,
-        S5_MIN_RR, S5_SWING_LOOKBACK,
-        S5_OB_MIN_RANGE_PCT, S5_SMC_FVG_FILTER, S5_SMC_FVG_LOOKBACK,
-    )
+    if cfg is not None:
+        S5_ENABLED                    = cfg["s5_enabled"]
+        S5_DAILY_EMA_FAST             = cfg["s5_daily_ema_fast"]
+        S5_DAILY_EMA_MED              = cfg["s5_daily_ema_med"]
+        S5_DAILY_EMA_SLOW             = cfg["s5_daily_ema_slow"]
+        S5_HTF_BOS_LOOKBACK           = cfg["s5_htf_bos_lookback"]
+        S5_OB_LOOKBACK                = cfg["s5_ob_lookback"]
+        S5_OB_MIN_IMPULSE             = cfg["s5_ob_min_impulse"]
+        S5_OB_MIN_RANGE_PCT           = cfg["s5_ob_min_range_pct"]
+        S5_CHOCH_LOOKBACK             = cfg["s5_choch_lookback"]
+        S5_MAX_ENTRY_BUFFER           = cfg["s5_max_entry_buffer"]
+        S5_SL_BUFFER_PCT              = cfg["s5_sl_buffer_pct"]
+        S5_MIN_RR                     = cfg["s5_min_rr"]
+        S5_SWING_LOOKBACK             = cfg["s5_swing_lookback"]
+        S5_SMC_FVG_FILTER             = cfg["s5_smc_fvg_filter"]
+        S5_SMC_FVG_LOOKBACK           = cfg["s5_smc_fvg_lookback"]
+    else:
+        from config_s5 import (          # noqa: PLC0415
+            S5_ENABLED,
+            S5_DAILY_EMA_FAST, S5_DAILY_EMA_MED, S5_DAILY_EMA_SLOW,
+            S5_HTF_BOS_LOOKBACK,
+            S5_OB_LOOKBACK, S5_OB_MIN_IMPULSE, S5_CHOCH_LOOKBACK,
+            S5_MAX_ENTRY_BUFFER, S5_SL_BUFFER_PCT,
+            S5_MIN_RR, S5_SWING_LOOKBACK,
+            S5_OB_MIN_RANGE_PCT, S5_SMC_FVG_FILTER, S5_SMC_FVG_LOOKBACK,
+        )
 
     if not S5_ENABLED:
         return "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, "S5 disabled"

@@ -101,11 +101,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────── #
-EPIC          = config_ig.EPIC
-CONTRACT_SIZE = config_ig.CONTRACT_SIZE
-DISPLAY_NAME  = "US30"          # Human-readable instrument label used in scan_signals keys
-PARTIAL_SIZE  = config_ig.PARTIAL_SIZE
-POINT_VALUE   = config_ig.POINT_VALUE
+# TODO(multi-instrument): these will become per-instrument when the bot loops over INSTRUMENTS
+_CFG          = config_ig.INSTRUMENTS[0]   # US30 — single-instrument until multi-instrument loop
+EPIC          = _CFG["epic"]
+CONTRACT_SIZE = _CFG["contract_size"]
+DISPLAY_NAME  = _CFG["display_name"]
+PARTIAL_SIZE  = _CFG["partial_size"]
+POINT_VALUE   = _CFG["point_value"]
 ET            = zoneinfo.ZoneInfo("America/New_York")
 
 # ── CSV fields ───────────────────────────────────────────────── #
@@ -521,9 +523,9 @@ class IGBot:
             return
 
         # 5. Fetch candles (cached — only hits API when new candle has formed)
-        daily_df = self._get_candles("1D",  config_ig.DAILY_LIMIT)
-        htf_df   = self._get_candles("1H",  config_ig.HTF_LIMIT)
-        m15_df   = self._get_candles("15m", config_ig.M15_LIMIT)
+        daily_df = self._get_candles("1D",  _CFG["daily_limit"])
+        htf_df   = self._get_candles("1H",  _CFG["htf_limit"])
+        m15_df   = self._get_candles("15m", _CFG["m15_limit"])
 
         if daily_df.empty or htf_df.empty or m15_df.empty:
             logger.warning("Candle fetch returned empty — skipping tick")

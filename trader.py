@@ -426,7 +426,9 @@ def open_long(
 ) -> dict:
     """
     Opens a LONG position.
-    SL = mark * (1 - stop_loss_pct)  default
+    Exit levels (SL, TP, trail trigger) are computed from the actual fill price
+    fetched after the market order fills (falls back to pre-order mark if the
+    position is not yet visible).
     S2/S3: partial TP at +100% margin + trailing stop on remaining 50%
       S2 uses box_low for SL; S3 passes sl_floor (pre-computed pivot SL)
     """
@@ -436,11 +438,6 @@ def open_long(
     mark     = get_mark_price(symbol)
     notional = equity * trade_size_pct * leverage
     qty      = _round_qty(notional / mark, symbol)
-
-    tp_trig  = float(_round_price(mark * (1 + take_profit_pct), symbol))
-    tp_exec  = float(_round_price(tp_trig * 1.005, symbol))
-    sl_trig  = float(_round_price(mark * (1 - stop_loss_pct), symbol))
-    sl_exec  = float(_round_price(sl_trig * 0.995, symbol))
 
     set_leverage(symbol, leverage)
 
@@ -453,22 +450,27 @@ def open_long(
 
     _t.sleep(2.0)
 
+    # Re-fetch actual fill price from exchange; fall back to pre-order mark if
+    # the position is not yet visible (e.g. very fast execution or API lag).
+    _pos_after = get_all_open_positions()
+    fill = _pos_after.get(symbol, {}).get("entry_price", 0) or mark
+
     if use_s5_exits:
         from config_s5 import S5_TRAIL_RANGE_PCT
         sl_trig     = float(_round_price(sl_floor, symbol))
         sl_exec     = float(_round_price(sl_trig * 0.995, symbol))
-        one_r       = mark - sl_trig
-        part_trig   = float(_round_price(mark + one_r, symbol))   # 1:1 R:R
-        tp_targ     = float(_round_price(tp_price_abs, symbol)) if tp_price_abs > mark else 0.0
+        one_r       = fill - sl_trig
+        part_trig   = float(_round_price(fill + one_r, symbol))   # 1:1 R:R
+        tp_targ     = float(_round_price(tp_price_abs, symbol)) if tp_price_abs > fill else 0.0
         ok = _place_s5_exits(symbol, "long", qty,
                              sl_trig, sl_exec,
                              part_trig, tp_targ, S5_TRAIL_RANGE_PCT)
         tp_trig = tp_targ if tp_targ > 0 else part_trig
     elif use_s2_exits:
         from config_s2 import S2_TRAILING_TRIGGER_PCT, S2_TRAILING_RANGE_PCT
-        trail_trig = float(_round_price(mark * (1 + S2_TRAILING_TRIGGER_PCT), symbol))
+        trail_trig = float(_round_price(fill * (1 + S2_TRAILING_TRIGGER_PCT), symbol))
         raw_sl = sl_floor if sl_floor > 0 else box_low * 0.999
-        sl_cap = mark * (1 - stop_loss_pct)   # cap: never risk more than stop_loss_pct (e.g. 5% = -50% at 10x)
+        sl_cap = fill * (1 - stop_loss_pct)   # cap: never risk more than stop_loss_pct (e.g. 5% = -50% at 10x)
         sl_trig = float(_round_price(max(raw_sl, sl_cap), symbol))
         sl_exec = float(_round_price(sl_trig * 0.995, symbol))
         ok = _place_s2_exits(symbol, "long", qty,
@@ -476,9 +478,14 @@ def open_long(
                              trail_trig, S2_TRAILING_RANGE_PCT)
         tp_trig = trail_trig  # For dashboard display: show where partial TP triggers
     else:
+        tp_trig = float(_round_price(fill * (1 + take_profit_pct), symbol))
+        tp_exec = float(_round_price(tp_trig * 1.005, symbol))
         if sl_floor > 0:
             sl_trig = float(_round_price(sl_floor, symbol))
             sl_exec = float(_round_price(sl_floor * 0.995, symbol))
+        else:
+            sl_trig = float(_round_price(fill * (1 - stop_loss_pct), symbol))
+            sl_exec = float(_round_price(sl_trig * 0.995, symbol))
         ok = _place_tpsl(symbol, "long", tp_trig, tp_exec, sl_trig, sl_exec)
 
     if not ok:
@@ -486,12 +493,12 @@ def open_long(
 
     result = {
         "symbol": symbol, "side": "LONG", "qty": qty,
-        "entry": mark, "sl": sl_trig, "tp": tp_trig,
+        "entry": fill, "sl": sl_trig, "tp": tp_trig,
         "box_low": box_low, "leverage": leverage,
         "margin": round(equity * trade_size_pct, 4), "tpsl_set": ok,
     }
     logger.info(
-        f"[{symbol}] 🟢 LONG {leverage}x | qty={qty} entry≈{mark:.5f} "
+        f"[{symbol}] 🟢 LONG {leverage}x | qty={qty} entry≈{fill:.5f} "
         f"SL={sl_trig} | {'✅ S2 exits' if use_s2_exits else 'TP='+str(tp_trig)} | {'✅' if ok else '❌ SET MANUALLY'}"
     )
     return result

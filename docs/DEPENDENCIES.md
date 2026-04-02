@@ -1,6 +1,6 @@
 # Codebase Dependency Map
 
-**Last updated:** 2026-03-31
+**Last updated:** 2026-04-02
 **Update frequency:** After every PR that changes interfaces, data contracts, or cross-file dependencies
 
 ---
@@ -34,13 +34,15 @@
                               ↓
                     ┌─────────────────┐
                     │  strategy.py    │ ← SHARED
-                    │  config_s5.py   │ ← SHARED (patched by IG)
+                    │  config_s5.py   │ ← SHARED (Bitget only)
                     │  paper_trader.py│ ← SHARED
                     └─────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                      IG BOT (ig_bot.py)                     │
-│  US30/Dow CFD · S5 only · 09:30-12:30 ET session          │
+│  Multi-instrument CFD · S5 only                            │
+│  Instruments: US30 (IX.D.DOW) + GOLD (CS.D.CFDGOLD)       │
+│  Each tick: loops over INSTRUMENTS, one position per epic   │
 │  Output: ig_state.json, ig_trades.csv                      │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -49,13 +51,13 @@
 
 **Files shared between bots:**
 - `strategy.py` — all evaluate_s1 through evaluate_s5 functions
-- `config_s5.py` — S5 parameters (Bitget direct, IG patched with config_ig_s5)
+- `config_s5.py` — S5 parameters (Bitget only; IG now uses per-instrument CONFIG dicts)
 - `paper_trader.py` — simulation engine (used by Bitget bot only in paper mode)
 
 **Separation rules:**
 - Changes to shared files require testing BOTH bots
 - Bitget and IG must work independently (no cross-bot state)
-- config_s5 changes affect Bitget immediately; IG overrides via config_ig_s5
+- config_s5 changes affect Bitget only; IG uses `cfg=instrument` param to `evaluate_s5()`
 
 ### Data Flow
 
@@ -94,29 +96,43 @@ def evaluate_s5(
     htf_df: pd.DataFrame,
     m15_df: pd.DataFrame,
     allowed_direction: str,
+    cfg=None,   # NEW: instrument CONFIG dict; None = Bitget/backtest path
 ) -> tuple[Signal, float, float, float, float, float, str]:
 ```
 
 **Defined:** `strategy.py` line 1067
 
 **Called by:**
-- `bot.py` line 585 — `s5_sig, s5_trigger, s5_sl, s5_tp, s5_ob_low, s5_ob_high, s5_reason = evaluate_s5(...)`
-- `ig_bot.py` line 415 — `sig, trigger, sl, tp, ob_low, ob_high, reason = evaluate_s5(...)`
+- `bot.py` — `s5_sig, s5_trigger, s5_sl, s5_tp, s5_ob_low, s5_ob_high, s5_reason = evaluate_s5(...)` (no `cfg`)
+- `backtest.py` — calls evaluate_s5 without `cfg` (Bitget/backtest path)
+- `ig_bot.py` — `sig, trigger, sl, tp, ob_low, ob_high, reason = evaluate_s5(..., cfg=instrument)` for each instrument in the loop
 
-**Dependencies:**
-- Line 1085: Performs LATE import of config_s5 module
+**Dependencies (config resolution):**
+
+The function resolves S5 parameters via one of two paths depending on the `cfg` argument:
+
+- **When `cfg` is not None** (IG path): reads all S5 params from the instrument CONFIG dict
   ```python
-  from config_s5 import (
-      S5_ENABLED,
-      S5_DAILY_EMA_FAST, S5_DAILY_EMA_MED, S5_DAILY_EMA_SLOW,
-      S5_HTF_BOS_LOOKBACK,
-      S5_OB_LOOKBACK, S5_OB_MIN_IMPULSE, S5_CHOCH_LOOKBACK,
-      S5_MAX_ENTRY_BUFFER, S5_SL_BUFFER_PCT,
-      S5_MIN_RR, S5_SWING_LOOKBACK,
-      S5_OB_MIN_RANGE_PCT, S5_SMC_FVG_FILTER, S5_SMC_FVG_LOOKBACK,
-  )
+  if cfg is not None:
+      S5_ENABLED        = cfg["s5_enabled"]
+      S5_DAILY_EMA_FAST = cfg["s5_daily_ema_fast"]
+      # ... all S5 keys from instrument CONFIG dict
   ```
-  This import happens at CALL TIME, not module load time.
+
+- **When `cfg` is None** (Bitget/backtest path): performs LATE import of config_s5 module
+  ```python
+  else:
+      from config_s5 import (
+          S5_ENABLED,
+          S5_DAILY_EMA_FAST, S5_DAILY_EMA_MED, S5_DAILY_EMA_SLOW,
+          S5_HTF_BOS_LOOKBACK,
+          S5_OB_LOOKBACK, S5_OB_MIN_IMPULSE, S5_CHOCH_LOOKBACK,
+          S5_MAX_ENTRY_BUFFER, S5_SL_BUFFER_PCT,
+          S5_MIN_RR, S5_SWING_LOOKBACK,
+          S5_OB_MIN_RANGE_PCT, S5_SMC_FVG_FILTER, S5_SMC_FVG_LOOKBACK,
+      )
+  ```
+  This import happens at CALL TIME (not module load time) to remain compatible with any existing tooling that relies on late binding.
 
 **Return values:**
 ```python
@@ -132,52 +148,16 @@ def evaluate_s5(
 
 **Breaking scenarios:**
 1. Changing function signature (parameters or return tuple order)
-2. Modifying config_s5 parameter names without updating the import statement
-3. Moving the config_s5 import to module-level (breaks IG patching mechanism)
+2. Modifying config_s5 parameter names without updating the import statement (Bitget path)
+3. Renaming S5 keys in an instrument CONFIG dict without updating the `cfg is not None` block (IG path)
 4. Changing return tuple structure (adding/removing/reordering elements)
-
-#### Config Import Timing — CRITICAL
-
-**Why the import is inside the function:**
-
-The `from config_s5 import ...` statement occurs at LINE 1085, INSIDE the function body. This is NOT a refactoring oversight — it's an intentional design that enables `ig_bot.py` to patch config_s5 parameters before evaluate_s5() reads them.
-
-**Patching mechanism in ig_bot.py (lines 25-37):**
-
-```python
-# Apply US30-specific S5 params — must happen before strategy.evaluate_s5() is imported
-# or called, since evaluate_s5() does `from config_s5 import ...` at call time.
-import config_s5 as _cs5_orig
-import config_ig_s5 as _cs5_ig
-_base_attrs = {a for a in dir(_cs5_orig) if not a.startswith('_')}
-for _attr in [a for a in dir(_cs5_ig) if not a.startswith('_')]:
-    if _attr not in _base_attrs:
-        raise AttributeError(
-            f"config_ig_s5.{_attr} has no matching attribute in config_s5 — "
-            f"check for a typo in config_ig_s5.py"
-        )
-    setattr(_cs5_orig, _attr, getattr(_cs5_ig, _attr))
-del _cs5_orig, _cs5_ig, _attr, _base_attrs
-```
-
-**Flow:**
-1. ig_bot.py imports config_s5 module
-2. ig_bot.py patches config_s5's attributes with config_ig_s5 values using setattr()
-3. ig_bot.py imports evaluate_s5 from strategy.py
-4. When evaluate_s5() is called, it performs `from config_s5 import ...` and receives the PATCHED values
-
-**If you move the import to module-level:**
-- strategy.py would import config_s5 when the module loads
-- ig_bot.py's patching would happen AFTER strategy.py has already imported the original values
-- evaluate_s5() would see Bitget parameters, not US30-tuned IG parameters
-- IG bot would use wrong parameters → trades fail
 
 #### Critical Invariants
 
-1. The config_s5 import MUST remain inside evaluate_s5() at call time
-2. All bots must call evaluate_s5() with the same signature
+1. The config_s5 import MUST remain inside evaluate_s5() at call time (Bitget path)
+2. All callers must use the same signature; `cfg` is optional and defaults to None
 3. Return tuple order must remain stable: (signal, trigger, sl, tp, ob_low, ob_high, reason)
-4. config_ig_s5 must be a SUBSET of config_s5 attributes (enforced by ig_bot.py)
+4. Instrument CONFIG dicts must include all S5 keys consumed in the `cfg is not None` block
 
 #### Verification Commands
 
@@ -511,22 +491,28 @@ head -1 trades_paper.csv | tr ',' '\n' | wc -l
 - `optimize_ig.py` line 43: "Load completed trades from ig_trades.csv"
 - Sends closed trades to Claude API for S5 parameter optimization
 
-**Columns (19 fields):**
+**Columns (20 fields):**
 
 ```csv
-timestamp,trade_id,action,
-side,qty,entry,sl,tp,
-snap_entry_trigger,snap_sl,snap_rr,
-snap_s5_ob_low,snap_s5_ob_high,snap_s5_tp,
-result,pnl,exit_reason,
-session_date,mode
+timestamp, trade_id, action, symbol,
+side, qty, entry, sl, tp,
+snap_entry_trigger, snap_sl, snap_rr,
+snap_s5_ob_low, snap_s5_ob_high, snap_s5_tp,
+result, pnl, exit_reason,
+session_date, mode
 ```
+
+`symbol` is at index 3 (after `action`). Column count increased from 19 → 20.
 
 **Key differences from Bitget CSV:**
 - **Fewer columns:** IG only uses S5 strategy, so S1-S4 snapshot fields are omitted
 - **Additional fields:** `session_date` (YYYY-MM-DD), `mode` (PAPER | LIVE)
-- **No symbol column:** IG bot only trades US30 (single instrument)
-- **No leverage/margin:** IG uses fixed position sizing via config_ig
+- **Multi-instrument:** `symbol` column identifies which instrument the trade is for (e.g. "US30", "GOLD")
+- **No leverage/margin:** IG uses fixed position sizing via per-instrument CONFIG dicts
+
+**Backward compatibility:**
+
+Rows written before the multi-instrument migration have an empty `symbol` field. `optimize_ig.py` treats an empty `symbol` as "US30".
 
 **Breaking scenarios:**
 
@@ -539,8 +525,11 @@ session_date,mode
 3. **Renaming columns** → Claude API optimization prompts break
    - Fix: Update optimize_ig.py prompt template
 
+4. **Adding a new instrument without updating optimize_ig.py** → new symbol silently treated as US30
+   - Fix: Update optimize_ig.py to handle the `symbol` column properly; use `--symbol` flag to filter by instrument
+
 **Reader:**
-- `optimize_ig.py` — sends completed trades to Claude API for parameter tuning
+- `optimize_ig.py` — sends completed trades to Claude API for parameter tuning; supports optional `--symbol` flag to filter by instrument
 
 **Verification commands:**
 
@@ -553,6 +542,9 @@ sed -n '65,72p' ig_bot.py
 
 # Find _log_trade callers in IG bot
 grep -n "_log_trade" ig_bot.py
+
+# Count columns (should be 20)
+head -1 ig_trades.csv | tr ',' '\n' | wc -l
 ```
 
 ---
@@ -563,69 +555,82 @@ grep -n "_log_trade" ig_bot.py
 
 **Write chain:**
 - `ig_bot.py`: Direct JSON writes (no state.py abstraction)
-- IG bot manages state manually due to single-instrument simplicity
+- State is keyed per-instrument to support multiple simultaneous positions
 
 **Read chain:**
-- `dashboard.py` line 494: `position = json.load(f).get("position")` — loads current US30 position
-- `ig_bot.py`: Loads position on startup to resume after restart
+- `dashboard.py`: reads `positions` dict to display IG positions panel
+- `ig_bot.py`: Loads positions and pending_orders on startup to resume after restart
 
 **Structure:**
-```python
+```json
 {
-  "position": {
-    "trade_id": str,
-    "side": "LONG" | "SHORT",
-    "qty": float,
-    "entry": float,
-    "sl": float,
-    "tp": float,
-    "opened_at": str,  # ISO timestamp
-  } | None,
-  "pending_order": {
-    "deal_id": str,
-    "side": "LONG" | "SHORT",
-    "ob_low": float,
-    "ob_high": float,
-    "sl": float,
-    "tp": float,
-    "trigger": float,
-    "size": float,
-    "expires": float,   # Unix timestamp
-  } | None,
-  "scan_signals": {
-    "<DISPLAY_NAME>": {   # e.g. "US30"
-      "signal":        str,   # "PENDING_LONG" | "PENDING_SHORT" | "HOLD"
-      "reason":        str,   # full evaluate_s5 reason string
-      "ema_ok":        bool,
-      "bos_ok":        bool,
-      "ob_ok":         bool,
-      "ob_low":        float | None,
-      "ob_high":       float | None,
-      "entry_trigger": float | None,
-      "sl":            float | None,
-      "tp":            float | None,
-      "updated_at":    str,   # ISO timestamp (UTC)
+  "positions": {
+    "US30": {
+      "trade_id": "abc123",
+      "side": "LONG",
+      "qty": 1.0,
+      "entry": 44200.0,
+      "sl": 44100.0,
+      "tp": 44400.0,
+      "opened_at": "2026-04-01T10:00:00+00:00"
+    },
+    "GOLD": null
+  },
+  "pending_orders": {
+    "US30": null,
+    "GOLD": {
+      "deal_id": "def456",
+      "side": "LONG",
+      "ob_low": 3180.0,
+      "ob_high": 3195.0,
+      "sl": 3170.0,
+      "tp": 3230.0,
+      "trigger": 3195.0,
+      "size": 1.0,
+      "expires": 1743500000
     }
   },
-  "scan_log": [           # last 20 entries, newest first
+  "scan_signals": {
+    "<DISPLAY_NAME>": {
+      "signal":        "PENDING_LONG | PENDING_SHORT | HOLD",
+      "reason":        "full evaluate_s5 reason string",
+      "ema_ok":        true,
+      "bos_ok":        true,
+      "ob_ok":         false,
+      "ob_low":        null,
+      "ob_high":       null,
+      "entry_trigger": null,
+      "sl":            null,
+      "tp":            null,
+      "updated_at":    "ISO timestamp (UTC)"
+    }
+  },
+  "scan_log": [
     {
-      "ts":         str,  # "HH:MM" in ET timezone
-      "instrument": str,  # e.g. "US30"
-      "message":    str,  # evaluate_s5 reason string
+      "ts":         "HH:MM in ET timezone",
+      "instrument": "US30",
+      "message":    "evaluate_s5 reason string"
     }
   ]
 }
 ```
 
+**Startup migration:**
+
+On startup, `ig_bot.py` detects the old single-instrument format (has `"position"` key, not `"positions"`) and migrates in-place:
+- Wraps old `position` value under `positions["US30"]`
+- Wraps old `pending_order` value under `pending_orders["US30"]`
+- Writes migrated state back to file before proceeding
+
 **Breaking scenarios:**
 
-1. **Renaming "position" key** → Dashboard IG panel crashes
-   - Fix: Update dashboard.py line 494
+1. **Renaming "positions" key** → Dashboard IG panel crashes; ig_bot.py fails to load state
+   - Fix: Update dashboard.py and all ig_bot.py state reads/writes
 
 2. **Changing position field names** → IG bot fails to resume position after restart
    - Fix: Update all ig_bot.py position reads/writes
 
-3. **Removing or renaming "pending_order" key** → ig_bot.py fails to restore pending orders after restart
+3. **Removing or renaming "pending_orders" key** → ig_bot.py fails to restore pending orders after restart
    - Fix: Update ig_bot.py _save_state() and _sync_live_position() load paths
 
 4. **Renaming "scan_signals" key** → Dashboard IG scanner panel shows no cards
@@ -636,6 +641,9 @@ grep -n "_log_trade" ig_bot.py
 
 6. **Renaming "scan_log" key** → Dashboard scan log panel stays empty
    - Fix: Update dashboard.py get_ig_state() `.get("scan_log", [])` and renderIGScanLog() call
+
+7. **Adding a new instrument without the startup migration guard** → Old state file missing the new key causes KeyError
+   - Fix: Always access positions/pending_orders with `.get(display_name)` or ensure migration populates all known instruments
 
 **Verification commands:**
 
@@ -651,7 +659,117 @@ grep -n "ig_state.json" dashboard.py
 
 ## 5. Config Dependencies
 
-[To be populated in Task 8]
+### 5.1 IG Config Architecture
+
+`config_ig.py` is now a **registry** — it imports per-instrument CONFIG dicts and exposes them as the `INSTRUMENTS` list consumed by `ig_bot.py`.
+
+```python
+# config_ig.py
+from config_ig_us30 import CONFIG as US30
+from config_ig_gold  import CONFIG as GOLD
+
+INSTRUMENTS = [US30, GOLD]
+
+# Shared non-instrument settings
+LOG_FILE          = "ig_bot.log"
+TRADE_LOG         = "ig_trades.csv"
+STATE_FILE        = "ig_state.json"
+POLL_INTERVAL_SEC = 45
+PAPER_MODE        = False
+```
+
+### 5.2 Per-Instrument CONFIG Shape
+
+Each instrument file (`config_ig_us30.py`, `config_ig_gold.py`, etc.) exports a single flat `CONFIG` dict. All 33 keys are required:
+
+```python
+CONFIG = {
+    # Instrument identity
+    "epic":          str,   # IG epic ID (e.g. "IX.D.DOW.IFD.IP")
+    "display_name":  str,   # Short name used as state key (e.g. "US30")
+    "currency":      str,   # Account currency (e.g. "USD")
+
+    # Contract sizing
+    "contract_size": float, # Opening size in contracts
+    "partial_size":  float, # Contracts to close at TP1
+    "point_value":   float, # USD per point per contract
+
+    # Session window (hour, minute) in ET timezone
+    "session_start": tuple, # e.g. (9, 30)
+    "session_end":   tuple, # e.g. (12, 30)
+
+    # Candle fetch limits
+    "daily_limit":   int,
+    "htf_limit":     int,
+    "m15_limit":     int,
+
+    # S5 strategy parameters (lowercase versions of S5_* names)
+    "s5_enabled":                    bool,
+    "s5_daily_ema_fast":             int,
+    "s5_daily_ema_med":              int,
+    "s5_daily_ema_slow":             int,
+    "s5_htf_bos_lookback":           int,
+    "s5_ltf_interval":               str,   # e.g. "15m"
+    "s5_ob_lookback":                int,
+    "s5_ob_min_impulse":             float,
+    "s5_ob_min_range_pct":           float,
+    "s5_choch_lookback":             int,
+    "s5_max_entry_buffer":           float,
+    "s5_sl_buffer_pct":              float,
+    "s5_ob_invalidation_buffer_pct": float,
+    "s5_swing_lookback":             int,
+    "s5_smc_fvg_filter":             bool,
+    "s5_smc_fvg_lookback":           int,
+    "s5_leverage":                   int,
+    "s5_trade_size_pct":             float,
+    "s5_min_rr":                     float,
+    "s5_trail_range_pct":            float,
+    "s5_use_candle_stops":           bool,
+    "s5_min_sr_clearance":           float,
+}
+```
+
+### 5.3 Startup Validation
+
+`ig_bot.py` calls `_validate_instruments()` at startup, which checks every instrument in `INSTRUMENTS` against the full required-keys set. A missing key raises a clear `KeyError` before any API calls are made:
+
+```python
+missing = _REQUIRED_KEYS - inst.keys()
+if missing:
+    raise KeyError(f"Instrument config '{inst.get('display_name', '?')}' missing keys: {missing}")
+```
+
+### 5.4 Adding a New Instrument
+
+1. Create `config_ig_<name>.py` with the CONFIG dict (copy an existing file, tune values)
+2. Add two lines in `config_ig.py`:
+   ```python
+   from config_ig_nasdaq import CONFIG as NASDAQ
+   INSTRUMENTS = [US30, GOLD, NASDAQ]
+   ```
+3. No other files need updating — `ig_bot.py` loops over `INSTRUMENTS` dynamically
+
+### 5.5 File Inventory
+
+| File | Role |
+|------|------|
+| `config_ig.py` | Registry: imports instrument configs, exposes `INSTRUMENTS` list + shared settings |
+| `config_ig_us30.py` | US30 CONFIG dict (instrument params + S5 params) |
+| `config_ig_gold.py` | GOLD CONFIG dict (instrument params + S5 params) |
+| `config_ig_s5.py` | **Deleted** — absorbed into `config_ig_us30.py` in the multi-instrument migration |
+
+**Verification commands:**
+
+```bash
+# Confirm INSTRUMENTS list contents
+python -c "from config_ig import INSTRUMENTS; print([i['display_name'] for i in INSTRUMENTS])"
+
+# Check all required keys present in each instrument config
+python -c "import ig_bot"  # raises KeyError at startup if any key missing
+
+# Check config_ig_s5.py is gone
+ls config_ig_s5.py 2>/dev/null && echo "WARNING: should be deleted" || echo "Correctly absent"
+```
 
 ---
 
@@ -839,10 +957,10 @@ Each strategy (S2, S3, S5) has its own minimum reward:risk ratio parameter, and 
    - Fix: Understand that S3 and S5 are independent (edit config_s3.py for S3)
    - Impact: Changes don't take effect; performance doesn't improve
 
-3. **Forgetting to sync between config_s5.py and config_ig_s5.py**
-   - Mistake: Updating S5_MIN_RR in config_s5.py but not config_ig_s5.py
-   - Fix: If changing S5_MIN_RR, update BOTH files if IG override is intended
-   - Impact: Bitget bot uses new value; IG bot uses old default (or vice versa)
+3. **Forgetting to update IG instrument configs when changing S5 defaults**
+   - Mistake: Updating S5_MIN_RR in config_s5.py expecting IG to pick it up automatically
+   - Fix: IG reads S5 params from per-instrument CONFIG dicts (`config_ig_us30.py`, `config_ig_gold.py`), not from `config_s5.py`. Update each instrument file separately.
+   - Impact: Bitget bot uses new value; IG bot continues using old value from its CONFIG dict
 
 **Verification:**
 
@@ -865,93 +983,69 @@ grep -n "MIN_RR" strategy.py
 
 #### Module-Level vs Function-Level Config Imports
 
-**The Problem:**
+**Current approach (post multi-instrument migration):**
 
-`strategy.py`'s `evaluate_s5()` function imports config_s5 INSIDE the function body (line 1085), not at module load time. This is intentional but fragile.
+The `setattr`-based config_s5 patching mechanism that previously existed in `ig_bot.py` has been **removed**. `config_ig_s5.py` has also been **deleted** (its values were absorbed into `config_ig_us30.py`).
 
-**Why it matters:**
+IG now passes S5 parameters via the `cfg=instrument` argument to `evaluate_s5()`. Each instrument carries its own complete set of S5 params in its CONFIG dict, eliminating any need to mutate the shared `config_s5` module.
 
-The IG bot patches `config_s5` module attributes at startup (ig_bot.py lines 27-36):
+**Why the Bitget-path import remains inside the function:**
 
-```python
-# ig_bot.py: Patch config_s5 before calling evaluate_s5()
-import config_s5 as _cs5_orig
-import config_ig_s5 as _cs5_ig
-_base_attrs = {a for a in dir(_cs5_orig) if not a.startswith('_')}
-for _attr in [a for a in dir(_cs5_ig) if not a.startswith('_')]:
-    if _attr not in _base_attrs:
-        raise AttributeError(
-            f"config_ig_s5.{_attr} has no matching attribute in config_s5 — "
-            f"check for a typo in config_ig_s5.py"
-        )
-    setattr(_cs5_orig, _attr, getattr(_cs5_ig, _attr))
-del _cs5_orig, _cs5_ig, _attr, _base_attrs
-```
+`strategy.py`'s `evaluate_s5()` still performs `from config_s5 import ...` INSIDE the function body when `cfg is None`. This is intentional — it preserves the late-binding behaviour for the Bitget and backtest paths (though the IG patching use case no longer applies).
 
-If the import moved to module-level, the patching would fail because the local binding would be cached:
+**Common mistakes (updated):**
 
-```
-BAD (module-level import):
-─────────────────────────
-strategy.py module loads
-  → executes: from config_s5 import S5_MIN_RR
-  → creates local binding: S5_MIN_RR = 2.0 (Bitget default)
+1. **"Refactoring" the config_s5 import to module-level**
+   - Mistake: Moving `from config_s5 import ...` outside the `else:` branch
+   - Impact: Technically harmless for IG (IG now uses `cfg`), but breaks any tooling that relied on late-binding for Bitget
+   - Why hard to debug: Both bots run without errors; parameter overrides silently stop working
 
-ig_bot.py starts
-  → patches config_s5 module
-  → config_s5.S5_MIN_RR = 1.5 (IG override)
+2. **Adding new S5 keys to config_s5.py without adding them to the instrument CONFIG dicts**
+   - Mistake: Extending the `cfg is not None` branch in strategy.py but not updating `config_ig_us30.py` / `config_ig_gold.py`
+   - Impact: `KeyError` at runtime when IG bot calls evaluate_s5 with the instrument config
+   - Fix: Always add new S5 keys to both `config_s5.py` AND each instrument CONFIG file; `_validate_instruments()` will catch missing keys at startup
 
-evaluate_s5() called
-  → uses already-cached local binding (2.0)
-  → IG override ignored because the import created a local name binding
+3. **Expecting config_ig_s5.py to exist**
+   - Mistake: Referencing `config_ig_s5.py` in a script or import
+   - Impact: `ModuleNotFoundError`
+   - Fix: S5 params for IG are now in `config_ig_us30.py` (and `config_ig_gold.py`, etc.)
 
-Note: `import config_s5` (module reference) would work, but `from config_s5
-import X` (local binding) would fail. The issue is specifically with the
-local binding being cached before patching occurs.
-```
-
-**Common mistakes:**
-
-1. **"Refactoring" the import to module-level**
-   - Mistake: Moving `from config_s5 import ...` outside the function
-   - Impact: IG bot stops using IG parameters; uses Bitget defaults instead
-   - Why hard to debug: Both bots run without errors, but IG trades fail silently
-
-2. **Calling evaluate_s5() before patching (IG bot only)**
-   - Mistake: Importing `from strategy import evaluate_s5` before ig_bot.py patches
-   - Impact: IG bot sees Bitget parameters on first call
-   - Why hard to debug: Works fine on second call (after patching); fails intermittently
-
-3. **Forgetting the patching mechanism exists**
-   - Mistake: Wondering why IG config_ig_s5.py seems ignored
-   - Fix: Check ig_bot.py lines 25-37 to see patching in action
-   - Why hard to debug: Parameter changes in config_ig_s5.py mysteriously don't take effect
-
-**Control flow (correct):**
+**Control flow (current):**
 
 ```
 ig_bot.py startup:
-  1. import config_s5 as _cs5_orig
-  2. import config_ig_s5 as _cs5_ig
-  3. Loop: setattr(config_s5, attr, config_ig_s5_value)
-  4. from strategy import evaluate_s5
-  5. Call evaluate_s5(...)
-     → evaluate_s5() executes: from config_s5 import ...
-     → Reads PATCHED values
+  1. from config_ig import INSTRUMENTS
+  2. _validate_instruments()  — KeyError if any required key missing
+  3. from strategy import evaluate_s5
+
+ig_bot.py poll loop (per instrument):
+  4. Call evaluate_s5(..., cfg=instrument)
+     → cfg is not None branch executes
+     → reads S5 params from instrument CONFIG dict
+     → no config_s5 module involvement
+
+bot.py (Bitget path, unchanged):
+  5. Call evaluate_s5(...) — no cfg
+     → cfg is None branch executes
+     → from config_s5 import ... (late binding, as before)
 ```
 
 **Verification:**
 
 ```bash
-# Confirm evaluate_s5 has function-level import
-sed -n '1067,1095p' strategy.py | grep -A 20 "def evaluate_s5"
+# Confirm evaluate_s5 has function-level import for None path
+grep -n "from config_s5 import" strategy.py
+# Expected: inside the function body (not at top of file)
 
-# Expected: line 1085 should show "from config_s5 import"
+# Confirm IG patching block is gone
+grep -n "setattr.*_cs5_orig\|config_ig_s5" ig_bot.py
+# Expected: no matches
 
-# Verify IG bot patching happens first
-sed -n '1,50p' ig_bot.py | grep -A 15 "import config_s5 as"
+# Confirm config_ig_s5.py is deleted
+ls config_ig_s5.py 2>/dev/null && echo "WARNING: should be deleted" || echo "Correctly absent"
 
-# Expected: ig_bot patching at lines 25-37, import evaluate_s5 at line 39+
+# Confirm each instrument has its own CONFIG dict
+python -c "from config_ig import INSTRUMENTS; [print(i['display_name'], 's5_min_rr:', i['s5_min_rr']) for i in INSTRUMENTS]"
 ```
 
 ### 10.4 CSV Action Name Inconsistency
@@ -1012,7 +1106,7 @@ Lifecycle actions:
 
 3. **Mixing Bitget and IG CSV columns**
    - Mistake: Copying ig_trades.csv columns into trades_paper.csv
-   - Bitget has 37 columns; IG has 19 columns
+   - Bitget has 38 columns; IG has 20 columns
    - Impact: CSV parser crashes or silent data loss
    - Fix: Keep CSV formats separate; never merge them
 
@@ -1035,7 +1129,7 @@ head -1 trades_paper.csv | tr ',' '\n' | wc -l
 
 # Check IG CSV column count
 head -1 ig_trades.csv | tr ',' '\n' | wc -l
-# Expected: 19 columns
+# Expected: 20 columns
 
 # Verify action names are different
 head -20 trades_paper.csv | grep "action" | cut -d, -f1-3
@@ -1053,7 +1147,7 @@ head -20 ig_trades.csv | grep "S5_" | cut -d, -f1-3
 |---------|---------|-----|--------------|
 | Confusing state files | Dashboard shows no signals | Check `state_paper.json`, not `paper_state.json` | `python -c "import json; print(json.load(open('state_paper.json'))['pair_states'])"` |
 | Tuning wrong MIN_RR | Parameter changes don't help | Update correct config file (S3 vs S5) | `grep MIN_RR config_*.py` |
-| Evaluate_s5 import moved | IG bot ignores config_ig_s5 | Keep import inside function | `sed -n '1085p' strategy.py` |
+| Evaluate_s5 cfg not passed | IG bot uses Bitget config_s5 defaults | Pass `cfg=instrument` in ig_bot.py | `grep "evaluate_s5" ig_bot.py` |
 | Wrong CSV tool | optimize.py crashes on ig_trades.csv | Use optimize_ig.py for IG | `ls -lh optimize.py optimize_ig.py` |
 
 ---
@@ -1112,3 +1206,4 @@ head -1 ig_trades.csv
 - 2026-03-31: S5 SMC Limit Order Entry — evaluate_s5() now returns PENDING_LONG/SHORT (not LONG/SHORT); removed S5_ENTRY_BUFFER_PCT from config import (replaced by S5_MAX_ENTRY_BUFFER as stale OB guard); ig_state.json gained pending_order field; ChoCH removed from S5 strategy logic
 - 2026-03-31: Updated Section 4.4 — ig_state.json gained scan_signals (per-instrument S5 signal state) and scan_log (last 20 scan entries, newest first) fields. Written by ig_bot.py _update_scan_state() after each evaluate_s5() call; read by dashboard.py /api/ig/state and rendered by renderIGScanner() + renderIGScanLog() in dashboard.html.
 - 2026-04-02: Updated Section 6.1 — open_long/open_short now fetch actual fill price (openPriceAvg) after market order and use it for all exit-level calculations; `entry` in return dict is now fill price not pre-order mark. refresh_plan_exits gained optional new_trail_trigger param. _do_scale_in now recomputes trail trigger and SL (S2 only) from new avg entry after scale-in.
+- 2026-04-02: Multi-instrument IG bot — updated Section 1 (architecture diagram shows US30+GOLD loop); Section 2.1 (evaluate_s5 cfg param, dual config resolution paths); Section 4.3 (ig_trades.csv 19→20 columns, symbol at index 3, backward-compat note); Section 4.4 (ig_state.json positions/pending_orders dicts, startup migration); Section 5 (new — per-instrument config architecture, CONFIG shape, _validate_instruments()); Section 10.2 (updated config sync guidance); Section 10.3 (patching mechanism removed, cfg=instrument is the new approach, config_ig_s5.py deleted); Section 10.4 (IG CSV column count 19→20).

@@ -1018,7 +1018,11 @@ def get_ig_state():
         except Exception:
             pass
 
-    position     = ig_state.get("position")
+    if "position" in ig_state and "positions" not in ig_state:
+        import config_ig as _cfg_ig_inst
+        positions = {_cfg_ig_inst.INSTRUMENTS[0]["display_name"]: ig_state.get("position")}
+    else:
+        positions = ig_state.get("positions", {})
     scan_signals = ig_state.get("scan_signals", {})
     scan_log     = ig_state.get("scan_log", [])
 
@@ -1061,7 +1065,7 @@ def get_ig_state():
         "bot_running":    bot_running,
         "session_active": session_active,
         "et_time":        now_et.strftime("%H:%M ET"),
-        "position":       position,
+        "positions":      positions,
         "trade_history":  trade_history,
         "stats":          stats,
         "scan_signals":   scan_signals,

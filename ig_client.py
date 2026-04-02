@@ -310,29 +310,34 @@ def _poll_confirm(deal_ref: str, max_attempts: int = 12,
 # ── Order placement ──────────────────────────────────────────── #
 
 def open_long(epic: str, sl_price: float, tp1_price: float,
-              tp_price: float, size: float = None) -> dict:
+              tp_price: float, size: float = None,
+              currency: str = None) -> dict:
     """
     Place a BUY market order with SL and TP.
     Returns {deal_id, entry, side, qty, sl, tp, tp1, tpsl_set}
     """
     if size is None:
-        size = config_ig.CONTRACT_SIZE
-    return _place_order(epic, "BUY", sl_price, tp_price, size, tp1_price)
+        size = config_ig.INSTRUMENTS[0]["contract_size"]
+    return _place_order(epic, "BUY", sl_price, tp_price, size, tp1_price, currency=currency)
 
 
 def open_short(epic: str, sl_price: float, tp1_price: float,
-               tp_price: float, size: float = None) -> dict:
+               tp_price: float, size: float = None,
+               currency: str = None) -> dict:
     """
     Place a SELL market order with SL and TP.
     Returns {deal_id, entry, side, qty, sl, tp, tp1, tpsl_set}
     """
     if size is None:
-        size = config_ig.CONTRACT_SIZE
-    return _place_order(epic, "SELL", sl_price, tp_price, size, tp1_price)
+        size = config_ig.INSTRUMENTS[0]["contract_size"]
+    return _place_order(epic, "SELL", sl_price, tp_price, size, tp1_price, currency=currency)
 
 
 def _place_order(epic: str, direction: str, sl_price: float,
-                 tp_price: float, size: float, tp1_price: float) -> dict:
+                 tp_price: float, size: float, tp1_price: float,
+                 currency: str = None) -> dict:
+    if currency is None:
+        currency = config_ig.INSTRUMENTS[0]["currency"]
     body = {
         "epic":            epic,
         "expiry":          "-",
@@ -342,7 +347,7 @@ def _place_order(epic: str, direction: str, sl_price: float,
         "timeInForce":     "FILL_OR_KILL",
         "stopLevel":       round(sl_price, 1) if sl_price else None,
         "limitLevel":      round(tp_price, 1) if tp_price else None,
-        "currencyCode":    config_ig.CURRENCY,
+        "currencyCode":    currency,
         "forceOpen":       True,
         "guaranteedStop":  False,
         "trailingStop":    False,
@@ -430,11 +435,14 @@ def close_position(deal_id: str, size: float, direction: str) -> bool:
 # ── Working / limit orders ───────────────────────────────────────── #
 
 def _place_working_order(epic: str, direction: str, limit_price: float,
-                         sl_price: float, tp_price: float, size: float) -> str:
+                         sl_price: float, tp_price: float, size: float,
+                         currency: str = None) -> str:
     """
     POST /workingorders/otc to create a GTC LIMIT working order.
     Returns the deal_id string.
     """
+    if currency is None:
+        currency = config_ig.INSTRUMENTS[0]["currency"]
     body = {
         "epic":          epic,
         "direction":     direction,
@@ -444,7 +452,7 @@ def _place_working_order(epic: str, direction: str, limit_price: float,
         "timeInForce":   "GOOD_TILL_CANCELLED",
         "stopLevel":     sl_price,
         "limitLevel":    tp_price,
-        "currencyCode":  config_ig.CURRENCY,
+        "currencyCode":  currency,
         "expiry":        "-",
     }
     try:
@@ -458,15 +466,17 @@ def _place_working_order(epic: str, direction: str, limit_price: float,
 
 
 def place_limit_long(epic: str, limit_price: float, sl_price: float,
-                     tp_price: float, size: float) -> str:
+                     tp_price: float, size: float,
+                     currency: str = None) -> str:
     """Place a GTC limit buy working order. Returns deal_id string."""
-    return _place_working_order(epic, "BUY", limit_price, sl_price, tp_price, size)
+    return _place_working_order(epic, "BUY", limit_price, sl_price, tp_price, size, currency=currency)
 
 
 def place_limit_short(epic: str, limit_price: float, sl_price: float,
-                      tp_price: float, size: float) -> str:
+                      tp_price: float, size: float,
+                      currency: str = None) -> str:
     """Place a GTC limit sell working order. Returns deal_id string."""
-    return _place_working_order(epic, "SELL", limit_price, sl_price, tp_price, size)
+    return _place_working_order(epic, "SELL", limit_price, sl_price, tp_price, size, currency=currency)
 
 
 def cancel_working_order(deal_id: str) -> None:

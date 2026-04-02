@@ -25,6 +25,7 @@ On first run, the bot will display this disclaimer and require you to type `I AG
 |----------|-----------|-----------|
 | Bitget | USDT-margined perpetual futures | S1 · S2 · S3 · S4 · S5 |
 | IG | Wall Street Cash (US30 / Dow Jones) | S5 only |
+| IG | Gold CFD (XAU/USD) | S5 only |
 
 ---
 
@@ -120,7 +121,9 @@ Multi-timeframe Smart Money Concepts strategy. Long or short depending on market
 
 **Risk (Bitget):** 10x leverage · 5% of total portfolio · SL 0.3% beyond OB outer wick · minimum 2:1 R:R required
 
-**Risk (IG):** 0.04 contracts (Wall Street Cash, min 0.02) · partial close 0.02 at 1:1 R:R · SL trails to prev 15m candle · $1/point per contract
+**Risk (IG — US30):** 1 contract (min 0.5) · partial close 0.5 at 1:1 R:R · SL trails to prev 15m candle · $1/point per contract
+
+**Risk (IG — Gold):** 1 contract (min 0.5) · partial close 0.5 at 1:1 R:R · SL trails to prev 15m candle · $1/point per contract
 
 **Optional filters (`config_s5.py`):** `S5_SMC_FVG_FILTER` — require an unfilled Fair Value Gap above/below the OB for added confluence (off by default).
 
@@ -213,8 +216,11 @@ IG_ACCOUNT_ID=     # optional — leave blank to auto-select
 
 | File | Purpose |
 |------|---------|
-| `config_ig.py` | Session hours (ET), contract sizing, poll interval, file paths |
-| `config_ig_s5.py` | S5 strategy parameters — US30-tuned overrides (OB lookback, OB invalidation buffer, R:R minimum, candle stops) |
+| `config_ig.py` | Credentials, shared session hours, poll interval, file paths, instrument registry |
+| `config_ig_us30.py` | S5 parameters for US30 — OB lookback, invalidation buffer, R:R minimum, contract sizing |
+| `config_ig_gold.py` | S5 parameters for Gold — OB lookback, invalidation buffer, R:R minimum, contract sizing |
+
+Each instrument can be enabled or removed from the `INSTRUMENTS` list in `config_ig.py` without touching any other code.
 
 ---
 
@@ -230,12 +236,12 @@ python bot.py
 python bot.py --paper
 ```
 
-### IG — Live trading *(sessions: Mon–Fri 09:30–12:30 ET only)*
+### IG — Live trading
 ```bash
 python ig_bot.py
 ```
 
-The IG bot automatically skips weekends, waits for the session window, and force-closes any open position at 12:30 ET.
+The IG bot runs all configured instruments concurrently. Session hours are defined per-instrument in `config_ig_<name>.py` (both US30 and Gold default to 24/7).
 
 ### IG — Paper trading
 ```bash
@@ -304,9 +310,9 @@ The unified dashboard has a **Bitget** tab and an **IG** tab.
 - Entry chart modal: click any trade to see the exact candle snapshot captured at entry, partial TP, and close events
 
 **IG tab:**
-- Session badge: **In Session** (green, 09:30–12:30 ET weekdays) or **Closed** (red)
+- Session badge: **In Session** or **Closed** per instrument
 - Bot status badge: Running / Stopped
-- Current open position: side, entry, SL, TP1, final TP, contracts, OB zone, partial-close status
+- One position card per instrument (US30, Gold) — side, entry, SL, TP1, final TP, contracts, OB zone, partial-close status
 - Trade history: all closed trades with P/L and exit reason
 - Trade lifecycle chart: click any closed trade to see a combined candle chart across all lifecycle events (entry → partial → close)
 
@@ -397,8 +403,9 @@ Claude suggests changes; you review and apply them manually. All five strategies
 ├── optimize.py         # Claude Sonnet strategy parameter optimizer
 │
 ├── config.py           # Bitget credentials + bot settings
-├── config_ig.py        # IG credentials + session hours + sizing
-├── config_ig_s5.py     # Strategy 5 IG-specific overrides (US30 tuning)
+├── config_ig.py        # IG credentials + shared settings + instrument registry
+├── config_ig_us30.py   # S5 parameters for US30 (contract size, OB tuning)
+├── config_ig_gold.py   # S5 parameters for Gold (contract size, OB tuning)
 ├── config_s1.py        # Strategy 1 parameters
 ├── config_s2.py        # Strategy 2 parameters
 ├── config_s3.py        # Strategy 3 parameters
@@ -412,7 +419,7 @@ Claude suggests changes; you review and apply them manually. All five strategies
 ├── ig_trades.csv       # IG trade log (live + paper)
 ├── state.json          # Bitget live runtime state
 ├── state_paper.json    # Bitget paper runtime state
-├── ig_state.json       # IG runtime state (current position + pending_order)
+├── ig_state.json       # IG runtime state (positions + pending_orders, keyed by instrument)
 ├── paper_state.json    # Bitget paper simulation state
 └── bot.log / ig_bot.log
 ```

@@ -24,10 +24,16 @@ class TestAuthentication:
     'Authorization: Bearer <token>'.
     """
 
-    def test_root_requires_auth(self, live_server_url):
+    def test_root_loads_without_auth(self, live_server_url):
+        """The root path must serve the dashboard HTML without a token.
+
+        / is intentionally exempt from auth so the browser can load the page,
+        which then shows an auth overlay and stores the token in localStorage.
+        All /api/* routes remain protected.
+        """
         r = httpx.get(f"{live_server_url}/")
-        assert r.status_code == 401, (
-            f"GET / returned {r.status_code} — endpoint is unauthenticated"
+        assert r.status_code == 200, (
+            f"GET / returned {r.status_code} — dashboard HTML should load without a token"
         )
 
     def test_api_state_requires_auth(self, live_server_url):

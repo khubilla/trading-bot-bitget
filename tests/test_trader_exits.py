@@ -411,3 +411,205 @@ class TestOpenShortFillPrice:
         assert abs(result["sl"] - expected_sl) < 0.001, (
             f"SL {result['sl']} should be near box_high*1.001={expected_sl}"
         )
+
+
+# ── _place_s1_exits ───────────────────────────────────────────────── #
+
+class TestPlaceS1ExitsQty:
+    """_place_s1_exits: qty splitting, order count, rangeRate, failure return."""
+
+    def test_odd_qty_no_fractions(self, monkeypatch):
+        """qty=209 STOUSDT → half=104, rest=105 (no fractional sizes)."""
+        calls = []
+        monkeypatch.setattr(trader, "_sym_info", _sym_info_stousdt)
+        monkeypatch.setattr(bc, "post", lambda path, p: calls.append(p) or {})
+
+        trader._place_s1_exits("STOUSDT", "long", "209", 0.13, 0.129, 0.17, 5.0)
+
+        sizes = [c["size"] for c in calls if "size" in c]
+        assert "104.5" not in sizes, "fractional size sent to exchange"
+        assert sizes[0] == "104.0"   # profit_plan half
+        assert sizes[1] == "105.0"   # moving_plan rest
+
+    def test_even_qty_splits_evenly(self, monkeypatch):
+        """qty=200 → half=100, rest=100."""
+        calls = []
+        monkeypatch.setattr(trader, "_sym_info", _sym_info_stousdt)
+        monkeypatch.setattr(bc, "post", lambda path, p: calls.append(p) or {})
+
+        trader._place_s1_exits("STOUSDT", "long", "200", 0.13, 0.129, 0.17, 5.0)
+
+        sizes = [c["size"] for c in calls if "size" in c]
+        assert sizes[0] == "100.0"
+        assert sizes[1] == "100.0"
+
+    def test_decimal_symbol_rounds_correctly(self, monkeypatch):
+        """qty=0.003 BTC (volume_place=3) → half=0.001, rest=0.002."""
+        calls = []
+        monkeypatch.setattr(trader, "_sym_info", _sym_info_btcusdt)
+        monkeypatch.setattr(bc, "post", lambda path, p: calls.append(p) or {})
+
+        trader._place_s1_exits("BTCUSDT", "long", "0.003", 55000, 54725, 65000, 5.0)
+
+        sizes = [c["size"] for c in calls if "size" in c]
+        assert sizes[0] == "0.001"
+        assert sizes[1] == "0.002"
+
+    def test_places_three_orders(self, monkeypatch):
+        """Exactly 3 API calls: place-pos-tpsl + 2x place-tpsl-order."""
+        paths = []
+        monkeypatch.setattr(trader, "_sym_info", _sym_info_stousdt)
+        monkeypatch.setattr(bc, "post", lambda path, p: paths.append(path) or {})
+
+        import time
+        monkeypatch.setattr(time, "sleep", lambda s: None)
+
+        trader._place_s1_exits("STOUSDT", "long", "100", 0.13, 0.129, 0.17, 5.0)
+
+        assert len(paths) == 3
+        assert any("place-pos-tpsl" in p for p in paths)
+        assert sum(1 for p in paths if "place-tpsl-order" in p) == 2
+
+    def test_rangeRate_sent_correctly(self, monkeypatch):
+        """moving_plan must carry rangeRate equal to the passed trail_range."""
+        calls = []
+        monkeypatch.setattr(trader, "_sym_info", _sym_info_stousdt)
+        monkeypatch.setattr(bc, "post", lambda path, p: calls.append(p) or {})
+
+        import time
+        monkeypatch.setattr(time, "sleep", lambda s: None)
+
+        trader._place_s1_exits("STOUSDT", "long", "100", 0.13, 0.129, 0.17, 5.0)
+
+        moving = next(c for c in calls if c.get("planType") == "moving_plan")
+        assert moving["rangeRate"] == "5.0", f"rangeRate={moving['rangeRate']!r} expected '5.0'"
+
+    def test_returns_false_on_three_consecutive_failures(self, monkeypatch):
+        """Returns False when bc.post always raises."""
+        monkeypatch.setattr(trader, "_sym_info", _sym_info_stousdt)
+        monkeypatch.setattr(bc, "post", lambda path, p: (_ for _ in ()).throw(Exception("timeout")))
+
+        import time
+        monkeypatch.setattr(time, "sleep", lambda s: None)
+
+        result = trader._place_s1_exits("STOUSDT", "long", "100", 0.13, 0.129, 0.17, 5.0)
+        assert result is False
+
+
+# ── open_long use_s1_exits ────────────────────────────────────────── #
+
+class TestOpenLongS1Exits:
+    """open_long with use_s1_exits=True: trail trigger, rangeRate, SL, fill, tpsl_set."""
+
+    def _setup(self, monkeypatch, mark=0.15, sl_floor=0.14, fill=None):
+        calls = []
+        monkeypatch.setattr(trader, "_sym_info", _sym_info_stousdt)
+        monkeypatch.setattr(trader, "get_usdt_balance", lambda: 100.0)
+        monkeypatch.setattr(trader, "_get_total_equity", lambda: 100.0)
+        monkeypatch.setattr(trader, "get_mark_price", lambda sym: mark)
+        monkeypatch.setattr(trader, "set_leverage", lambda *a: None)
+        monkeypatch.setattr(bc, "post", lambda path, p: calls.append(p) or {})
+
+        _fill = fill if fill is not None else mark
+        monkeypatch.setattr(trader, "get_all_open_positions",
+            lambda: {"STOUSDT": {"entry_price": _fill, "qty": 65.0}})
+
+        import time
+        monkeypatch.setattr(time, "sleep", lambda s: None)
+
+        import config_s1
+        monkeypatch.setattr(config_s1, "S1_TRAIL_RANGE_PCT", 5)
+        monkeypatch.setattr(config_s1, "TAKE_PROFIT_PCT", 0.10)
+
+        result = trader.open_long(
+            "STOUSDT", sl_floor=sl_floor,
+            leverage=10, trade_size_pct=0.1,
+            stop_loss_pct=0.05,
+            use_s1_exits=True,
+        )
+        return result, calls
+
+    def test_profit_plan_trigger_uses_fill(self, monkeypatch):
+        """trail trigger = fill * 1.10 (TAKE_PROFIT_PCT)."""
+        result, calls = self._setup(monkeypatch, mark=0.15, fill=0.151)
+        expected = round(0.151 * 1.10, 5)
+        profit = next(c for c in calls if c.get("planType") == "profit_plan")
+        assert abs(float(profit["triggerPrice"]) - expected) < 0.0001
+
+    def test_rangeRate_in_moving_plan(self, monkeypatch):
+        """moving_plan rangeRate must equal S1_TRAIL_RANGE_PCT."""
+        _, calls = self._setup(monkeypatch)
+        moving = next(c for c in calls if c.get("planType") == "moving_plan")
+        assert moving["rangeRate"] == "5", f"rangeRate={moving['rangeRate']!r}"
+
+    def test_sl_uses_sl_floor(self, monkeypatch):
+        """SL trigger must be based on sl_floor."""
+        result, _ = self._setup(monkeypatch, mark=0.15, sl_floor=0.14)
+        assert abs(result["sl"] - 0.14) < 0.001, f"sl={result['sl']} expected ~0.14"
+
+    def test_fill_returned_as_entry(self, monkeypatch):
+        """Return dict entry field must be the fill price."""
+        result, _ = self._setup(monkeypatch, mark=0.15, fill=0.152)
+        assert result["entry"] == 0.152
+
+    def test_tpsl_set_true_when_orders_placed(self, monkeypatch):
+        """tpsl_set must be True when _place_s1_exits succeeds."""
+        result, _ = self._setup(monkeypatch)
+        assert result["tpsl_set"] is True
+
+
+# ── open_short use_s1_exits ───────────────────────────────────────── #
+
+class TestOpenShortS1Exits:
+    """open_short with use_s1_exits=True: trail trigger, rangeRate, SL, fill."""
+
+    def _setup(self, monkeypatch, mark=0.34, box_high=0.345, fill=None):
+        calls = []
+        monkeypatch.setattr(trader, "_sym_info", _sym_info_stousdt)
+        monkeypatch.setattr(trader, "get_usdt_balance", lambda: 100.0)
+        monkeypatch.setattr(trader, "_get_total_equity", lambda: 100.0)
+        monkeypatch.setattr(trader, "get_mark_price", lambda sym: mark)
+        monkeypatch.setattr(trader, "set_leverage", lambda *a: None)
+        monkeypatch.setattr(bc, "post", lambda path, p: calls.append(p) or {})
+
+        _fill = fill if fill is not None else mark
+        monkeypatch.setattr(trader, "get_all_open_positions",
+            lambda: {"STOUSDT": {"entry_price": _fill, "qty": 65.0}})
+
+        import time
+        monkeypatch.setattr(time, "sleep", lambda s: None)
+
+        import config_s1
+        monkeypatch.setattr(config_s1, "S1_TRAIL_RANGE_PCT", 5)
+        monkeypatch.setattr(config_s1, "TAKE_PROFIT_PCT", 0.10)
+
+        result = trader.open_short(
+            "STOUSDT", box_high=box_high,
+            leverage=10, trade_size_pct=0.1,
+            use_s1_exits=True,
+        )
+        return result, calls
+
+    def test_profit_plan_trigger_uses_fill_short(self, monkeypatch):
+        """trail trigger = fill * 0.90 (1 - TAKE_PROFIT_PCT) for SHORT."""
+        result, calls = self._setup(monkeypatch, mark=0.34, fill=0.338)
+        expected = round(0.338 * 0.90, 5)
+        profit = next(c for c in calls if c.get("planType") == "profit_plan")
+        assert abs(float(profit["triggerPrice"]) - expected) < 0.0001
+
+    def test_rangeRate_in_moving_plan_short(self, monkeypatch):
+        """moving_plan rangeRate must equal S1_TRAIL_RANGE_PCT."""
+        _, calls = self._setup(monkeypatch)
+        moving = next(c for c in calls if c.get("planType") == "moving_plan")
+        assert moving["rangeRate"] == "5", f"rangeRate={moving['rangeRate']!r}"
+
+    def test_sl_uses_box_high_short(self, monkeypatch):
+        """SL trigger must be based on box_high * 1.001 (structural level)."""
+        result, _ = self._setup(monkeypatch, mark=0.34, box_high=0.345)
+        expected_sl = round(0.345 * 1.001, 5)
+        assert abs(result["sl"] - expected_sl) < 0.001, f"sl={result['sl']} expected ~{expected_sl}"
+
+    def test_fill_returned_as_entry_short(self, monkeypatch):
+        """Return dict entry field must equal fill price."""
+        result, _ = self._setup(monkeypatch, mark=0.34, fill=0.337)
+        assert result["entry"] == 0.337

@@ -335,6 +335,67 @@ def _place_s2_exits(symbol: str, hold_side: str, qty_str: str,
                 _t.sleep(1.5)
     return False
 
+def _place_s1_exits(symbol: str, hold_side: str, qty_str: str,
+                    sl_trig: float, sl_exec: float,
+                    trail_trigger: float, trail_range: float) -> bool:
+    """
+    S1 exit orders placed at entry:
+    1. SL on full position (place-pos-tpsl loss_plan)
+    2. Partial TP — sell 50% at trail_trigger (place-tpsl-order profit_plan)
+    3. Trailing stop on remaining 50% (place-tpsl-order moving_plan)
+    """
+    import time as _t
+    half_qty = _round_qty(float(qty_str) / 2, symbol)
+    rest_qty = _round_qty(float(qty_str) - float(half_qty), symbol)
+
+    for attempt in range(3):
+        try:
+            # 1. SL on full position
+            bc.post("/api/v2/mix/order/place-pos-tpsl", {
+                "symbol":               symbol,
+                "productType":          PRODUCT_TYPE,
+                "marginCoin":           MARGIN_COIN,
+                "holdSide":             hold_side,
+                "stopLossTriggerPrice": str(sl_trig),
+                "stopLossTriggerType":  "mark_price",
+                "stopLossExecutePrice": str(sl_exec),
+            })
+            _t.sleep(0.5)
+
+            # 2. Partial TP — sell 50% when trail_trigger hit
+            bc.post("/api/v2/mix/order/place-tpsl-order", {
+                "symbol":       symbol,
+                "productType":  PRODUCT_TYPE,
+                "marginCoin":   MARGIN_COIN,
+                "planType":     "profit_plan",
+                "triggerPrice": str(trail_trigger),
+                "triggerType":  "mark_price",
+                "executePrice": "0",
+                "holdSide":     hold_side,
+                "size":         half_qty,
+            })
+            _t.sleep(0.5)
+
+            # 3. Trailing stop on remaining position
+            bc.post("/api/v2/mix/order/place-tpsl-order", {
+                "symbol":       symbol,
+                "productType":  PRODUCT_TYPE,
+                "marginCoin":   MARGIN_COIN,
+                "planType":     "moving_plan",
+                "triggerPrice": str(trail_trigger),
+                "triggerType":  "mark_price",
+                "holdSide":     hold_side,
+                "size":         rest_qty,
+                "rangeRate":    str(round(trail_range, 4)),
+            })
+            return True
+        except Exception as e:
+            logger.warning(f"[{symbol}] S1 exits attempt {attempt+1}/3: {e}")
+            if attempt < 2:
+                _t.sleep(1.5)
+    return False
+
+
 def _place_s5_exits(symbol: str, hold_side: str, qty_str: str,
                     sl_trig: float, sl_exec: float,
                     partial_trig: float, tp_target: float,
@@ -420,6 +481,7 @@ def open_long(
     trade_size_pct: float  = TRADE_SIZE_PCT,
     take_profit_pct: float = TAKE_PROFIT_PCT,
     stop_loss_pct: float   = STOP_LOSS_PCT,
+    use_s1_exits: bool     = False,
     use_s2_exits: bool     = False,
     use_s5_exits: bool     = False,
     tp_price_abs: float    = 0,
@@ -466,6 +528,15 @@ def open_long(
                              sl_trig, sl_exec,
                              part_trig, tp_targ, S5_TRAIL_RANGE_PCT)
         tp_trig = tp_targ if tp_targ > 0 else part_trig
+    elif use_s1_exits:
+        from config_s1 import S1_TRAIL_RANGE_PCT, TAKE_PROFIT_PCT as _S1_TP_PCT
+        trail_trig = float(_round_price(fill * (1 + _S1_TP_PCT), symbol))
+        sl_trig    = float(_round_price(sl_floor, symbol))
+        sl_exec    = float(_round_price(sl_trig * 0.995, symbol))
+        ok = _place_s1_exits(symbol, "long", qty,
+                             sl_trig, sl_exec,
+                             trail_trig, S1_TRAIL_RANGE_PCT)
+        tp_trig = trail_trig
     elif use_s2_exits:
         from config_s2 import S2_TRAILING_TRIGGER_PCT, S2_TRAILING_RANGE_PCT
         trail_trig = float(_round_price(fill * (1 + S2_TRAILING_TRIGGER_PCT), symbol))
@@ -499,7 +570,7 @@ def open_long(
     }
     logger.info(
         f"[{symbol}] 🟢 LONG {leverage}x | qty={qty} entry≈{fill:.5f} "
-        f"SL={sl_trig} | {'✅ S2 exits' if use_s2_exits else 'TP='+str(tp_trig)} | {'✅' if ok else '❌ SET MANUALLY'}"
+        f"SL={sl_trig} | {'✅ S1 exits' if use_s1_exits else '✅ S2 exits' if use_s2_exits else 'TP='+str(tp_trig)} | {'✅' if ok else '❌ SET MANUALLY'}"
     )
     return result
 
@@ -511,6 +582,7 @@ def open_short(
     leverage: int          = LEVERAGE,
     trade_size_pct: float  = TRADE_SIZE_PCT,
     take_profit_pct: float = TAKE_PROFIT_PCT,
+    use_s1_exits: bool     = False,
     use_s4_exits: bool     = False,
     use_s5_exits: bool     = False,
     tp_price_abs: float    = 0,
@@ -560,6 +632,13 @@ def open_short(
                              sl_trig, sl_exec,
                              part_trig, tp_targ, S5_TRAIL_RANGE_PCT)
         tp_trig = tp_targ if tp_targ > 0 else part_trig
+    elif use_s1_exits:
+        from config_s1 import S1_TRAIL_RANGE_PCT, TAKE_PROFIT_PCT as _S1_TP_PCT
+        trail_trig = float(_round_price(fill * (1 - _S1_TP_PCT), symbol))
+        ok = _place_s1_exits(symbol, "short", qty,
+                             sl_trig, sl_exec,
+                             trail_trig, S1_TRAIL_RANGE_PCT)
+        tp_trig = trail_trig
     elif use_s4_exits:
         from config_s4 import S4_TRAILING_TRIGGER_PCT, S4_TRAILING_RANGE_PCT
         trail_trig = float(_round_price(fill * (1 - S4_TRAILING_TRIGGER_PCT), symbol))
@@ -583,7 +662,7 @@ def open_short(
     }
     logger.info(
         f"[{symbol}] 🔴 SHORT {leverage}x | qty={qty} entry≈{fill:.5f} "
-        f"SL={sl_trig} | {'✅ S5 exits' if use_s5_exits else '✅ S4 exits' if use_s4_exits else 'TP='+str(tp_trig)} | {'✅' if ok else '❌ SET MANUALLY'}"
+        f"SL={sl_trig} | {'✅ S5 exits' if use_s5_exits else '✅ S4 exits' if use_s4_exits else '✅ S1 exits' if use_s1_exits else 'TP='+str(tp_trig)} | {'✅' if ok else '❌ SET MANUALLY'}"
     )
     return result
 

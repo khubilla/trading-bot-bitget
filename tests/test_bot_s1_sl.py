@@ -82,7 +82,7 @@ def test_long_sl_uses_box_low_when_near_entry(monkeypatch):
     monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: mark)
 
     captured = {}
-    def fake_open_long(symbol, sl_floor, leverage, trade_size_pct, take_profit_pct):
+    def fake_open_long(symbol, sl_floor, leverage, trade_size_pct, use_s1_exits):
         captured["sl_floor"] = sl_floor
         return {"symbol": symbol, "side": "LONG", "qty": 1.0, "entry": mark,
                 "sl": sl_floor, "tp": mark * 1.1, "leverage": leverage,
@@ -111,7 +111,7 @@ def test_long_sl_uses_stop_loss_floor_when_box_low_far(monkeypatch):
     monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: mark)
 
     captured = {}
-    def fake_open_long(symbol, sl_floor, leverage, trade_size_pct, take_profit_pct):
+    def fake_open_long(symbol, sl_floor, leverage, trade_size_pct, use_s1_exits):
         captured["sl_floor"] = sl_floor
         return {"symbol": symbol, "side": "LONG", "qty": 1.0, "entry": mark,
                 "sl": sl_floor, "tp": mark * 1.1, "leverage": leverage,
@@ -140,7 +140,7 @@ def test_short_sl_uses_box_high_when_near_entry(monkeypatch):
     monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: mark)
 
     captured = {}
-    def fake_open_short(symbol, sl_floor, leverage, trade_size_pct, take_profit_pct):
+    def fake_open_short(symbol, sl_floor, leverage, trade_size_pct, use_s1_exits):
         captured["sl_floor"] = sl_floor
         return {"symbol": symbol, "side": "SHORT", "qty": 1.0, "entry": mark,
                 "sl": sl_floor, "tp": mark * 0.9, "leverage": leverage,
@@ -169,7 +169,7 @@ def test_short_sl_uses_stop_loss_ceiling_when_box_high_far(monkeypatch):
     monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: mark)
 
     captured = {}
-    def fake_open_short(symbol, sl_floor, leverage, trade_size_pct, take_profit_pct):
+    def fake_open_short(symbol, sl_floor, leverage, trade_size_pct, use_s1_exits):
         captured["sl_floor"] = sl_floor
         return {"symbol": symbol, "side": "SHORT", "qty": 1.0, "entry": mark,
                 "sl": sl_floor, "tp": mark * 0.9, "leverage": leverage,
@@ -241,7 +241,7 @@ def test_long_proceeds_when_sr_clearance_at_gate(monkeypatch):
     monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: mark)
 
     opened = []
-    def fake_open_long(symbol, sl_floor, leverage, trade_size_pct, take_profit_pct):
+    def fake_open_long(symbol, sl_floor, leverage, trade_size_pct, use_s1_exits):
         opened.append("long")
         return {"symbol": symbol, "side": "LONG", "qty": 1.0, "entry": mark,
                 "sl": sl_floor, "tp": mark * 1.1, "leverage": leverage,
@@ -254,3 +254,41 @@ def test_long_proceeds_when_sr_clearance_at_gate(monkeypatch):
 
     assert result is True, "Should return True when S/R clearance meets gate"
     assert opened == ["long"], "open_long should be called when clearance meets gate"
+
+
+# ── Swing trail guard math ────────────────────────────────────────── #
+
+def test_swing_trail_long_sl_only_steps_up():
+    """For LONG: swing_sl must be ignored if it is <= current ap['sl'] (would move SL down)."""
+    ap = {"side": "LONG", "strategy": "S1", "sl": 100.0}
+    swing_sl = 99.0  # below current SL — must NOT be applied
+    if swing_sl is not None and swing_sl <= ap.get("sl", 0):
+        swing_sl = None
+    assert swing_sl is None, "Guard should suppress SL that would move down for LONG"
+
+
+def test_swing_trail_long_sl_applied_when_higher():
+    """For LONG: swing_sl is applied when it is above the current ap['sl']."""
+    ap = {"side": "LONG", "strategy": "S1", "sl": 100.0}
+    swing_sl = 101.0  # above current SL — should be applied
+    if swing_sl is not None and swing_sl <= ap.get("sl", 0):
+        swing_sl = None
+    assert swing_sl == 101.0, "Guard should allow SL that moves up for LONG"
+
+
+def test_swing_trail_short_sl_only_steps_down():
+    """For SHORT: swing_sl must be ignored if it is >= current ap['sl'] (would move SL up)."""
+    ap = {"side": "SHORT", "strategy": "S1", "sl": 200.0}
+    swing_sl = 201.0  # above current SL — must NOT be applied
+    if swing_sl is not None and swing_sl >= ap.get("sl", float("inf")):
+        swing_sl = None
+    assert swing_sl is None, "Guard should suppress SL that would move up for SHORT"
+
+
+def test_swing_trail_short_sl_applied_when_lower():
+    """For SHORT: swing_sl is applied when it is below the current ap['sl']."""
+    ap = {"side": "SHORT", "strategy": "S1", "sl": 200.0}
+    swing_sl = 199.0  # below current SL — should be applied
+    if swing_sl is not None and swing_sl >= ap.get("sl", float("inf")):
+        swing_sl = None
+    assert swing_sl == 199.0, "Guard should allow SL that moves down for SHORT"

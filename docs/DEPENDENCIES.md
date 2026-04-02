@@ -779,6 +779,20 @@ ls config_ig_s5.py 2>/dev/null && echo "WARNING: should be deleted" || echo "Cor
 
 These functions place and manage exit orders on Bitget. All are called from `bot.py` only (not `ig_bot.py`).
 
+#### `_place_s1_exits(symbol, hold_side, qty_str, sl_trig, sl_exec, trail_trigger, trail_range)`
+Places 3 exit orders for S1 strategy:
+1. `place-pos-tpsl` — position-level SL (full position, auto-scales with size changes)
+2. `place-tpsl-order profit_plan` — sell 50% at `trail_trigger` (+10% from fill)
+3. `place-tpsl-order moving_plan` — trail remaining 50% with `rangeRate=trail_range` (5%)
+
+**Called from:** `open_long` (S1 path), `open_short` (S1 path)
+
+**Qty splitting:** uses `_round_qty` to respect symbol minimum volume. On odd integer qty (e.g. 209): half=104, rest=105.
+
+**Retry:** 3 attempts with 1.5s sleep between attempts. Returns `True` on success, `False` after 3 consecutive failures.
+
+---
+
 #### `_place_s2_exits(symbol, hold_side, qty_str, sl_trig, sl_exec, trail_trigger, trail_range)`
 Places 3 exit orders for S2 (LONG) and S4 (SHORT) strategies:
 1. `place-pos-tpsl` — position-level SL (full position, auto-scales with size changes)
@@ -808,16 +822,18 @@ Places 3 exit orders for S5 strategy:
 
 ---
 
-#### `open_long(symbol, box_low, sl_floor, leverage, trade_size_pct, take_profit_pct, stop_loss_pct, use_s2_exits, use_s5_exits, tp_price_abs)`
+#### `open_long(symbol, box_low, sl_floor, leverage, trade_size_pct, take_profit_pct, stop_loss_pct, use_s1_exits, use_s2_exits, use_s5_exits, tp_price_abs)`
 Opens a LONG market order then places exits based on the `use_*_exits` flag.
 
 **Fill price:** After placing the market order and sleeping 2s, calls `get_all_open_positions()` to get `openPriceAvg` as the actual fill price. All exit-level calculations (SL, TP, trail trigger, partial TP) use this fill price. Falls back to the pre-order mark price if the position is not yet visible. The pre-order mark is still used for qty sizing.
+
+**S1 path (`use_s1_exits=True`):** `trail_trigger = fill * (1 + TAKE_PROFIT_PCT)`, `sl_trig = sl_floor`. Calls `_place_s1_exits`.
 
 **SL cap (S2 path):** `sl_trig = max(box_low * 0.999, fill * (1 - stop_loss_pct))` — prevents box_low from being so far below entry that the SL exceeds the intended max loss (e.g. `-50%` at 10x for `S2_STOP_LOSS_PCT=0.05`).
 
 **Returns:** dict with `{symbol, side, qty, entry, sl, tp, box_low, leverage, margin, tpsl_set}` — `entry` is the actual fill price from `get_all_open_positions()` (falls back to pre-order mark if position not yet visible).
 
-**Called from:** `bot.py` — `_execute_s2`, `_execute_s3`, `_execute_s5` (paper path)
+**Called from:** `bot.py` — `_execute_s1`, `_execute_s2`, `_execute_s3`, `_execute_s5` (paper path)
 
 ---
 

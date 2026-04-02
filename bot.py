@@ -327,7 +327,7 @@ class MTFBot:
             #      (covers manually-added rows that never went through bot code)
             if not PAPER_MODE:
                 for sym, ap in list(self.active_positions.items()):
-                    if ap.get("strategy") not in ("S2", "S3", "S4", "S5"):
+                    if ap.get("strategy") not in ("S1", "S2", "S3", "S4", "S5"):
                         continue
                     if ap.get("partial_logged"):
                         continue
@@ -546,7 +546,7 @@ class MTFBot:
                     )
 
                     # Track initial qty and detect live partial close (S2/S4)
-                    if not PAPER_MODE and ap.get("strategy") in ("S2", "S3", "S4", "S5"):
+                    if not PAPER_MODE and ap.get("strategy") in ("S1", "S2", "S3", "S4", "S5"):
                         if "initial_qty" not in ap:
                             ap["initial_qty"] = float(pos["qty"])
                             st.update_position_memory(sym, initial_qty=float(pos["qty"]))
@@ -615,6 +615,33 @@ class MTFBot:
                                     )
                         except Exception as e:
                             logger.error(f"Swing trail error [{sym}]: {e}")
+
+                    # S1 Swing Trail — trail SL to nearest 3m swing low/high
+                    if config_s1.S1_USE_SWING_TRAIL and ap.get("strategy") == "S1":
+                        try:
+                            cs_df   = tr.get_candles(sym, config_s1.LTF_INTERVAL, limit=config_s1.S1_SWING_LOOKBACK + 5)
+                            mark_s1 = tr.get_mark_price(sym)
+                            if not cs_df.empty and len(cs_df) >= 3:
+                                if ap["side"] == "LONG":
+                                    raw      = find_swing_low_target(cs_df, mark_s1, lookback=config_s1.S1_SWING_LOOKBACK)
+                                    swing_sl = raw * (1 - config_s1.S1_SL_BUFFER_PCT) if raw else None
+                                    hold_s   = "long"
+                                    # Guard: only step SL up
+                                    if swing_sl is not None and swing_sl <= ap.get("sl", 0):
+                                        swing_sl = None
+                                else:
+                                    raw      = find_swing_high_target(cs_df, mark_s1, lookback=config_s1.S1_SWING_LOOKBACK)
+                                    swing_sl = raw * (1 + config_s1.S1_SL_BUFFER_PCT) if raw else None
+                                    hold_s   = "short"
+                                    # Guard: only step SL down
+                                    if swing_sl is not None and swing_sl >= ap.get("sl", float("inf")):
+                                        swing_sl = None
+                                if swing_sl is not None and tr.update_position_sl(sym, swing_sl, hold_side=hold_s):
+                                    ap["sl"] = swing_sl
+                                    st.update_open_trade_sl(sym, swing_sl)
+                                    logger.info(f"[S1][{sym}] 📍 Swing trail: SL → {swing_sl:.5f} (3m swing {'low' if ap['side'] == 'LONG' else 'high'})")
+                        except Exception as e:
+                            logger.error(f"[S1] Swing trail error [{sym}]: {e}")
 
                     # S3 Structural Swing Trail — trail SL to nearest 15m swing low from entry
                     if config_s3.S3_USE_SWING_TRAIL and ap.get("strategy") == "S3":
@@ -1224,11 +1251,11 @@ class MTFBot:
         if s1_sig == "LONG":
             trade = tr.open_long(symbol, sl_floor=sl_long, leverage=lev,
                                  trade_size_pct=config_s1.TRADE_SIZE_PCT,
-                                 take_profit_pct=config_s1.TAKE_PROFIT_PCT)
+                                 use_s1_exits=True)
         else:
             trade = tr.open_short(symbol, sl_floor=sl_short, leverage=lev,
                                   trade_size_pct=config_s1.TRADE_SIZE_PCT,
-                                  take_profit_pct=config_s1.TAKE_PROFIT_PCT)
+                                  use_s1_exits=True)
         trade["strategy"] = "S1"
         trade["snap_rsi"]           = round(c["rsi_val"], 1)
         trade["snap_adx"]           = round(c["adx_val"], 1)
@@ -1253,6 +1280,7 @@ class MTFBot:
             "side": s1_sig, "strategy": "S1",
             "box_high": c["s1_bh"], "box_low": c["s1_bl"],
             "trade_id": trade["trade_id"],
+            "sl": trade.get("sl", 0.0),
         }
         return True
 

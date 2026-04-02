@@ -131,6 +131,7 @@ def test_tick_places_limit_on_pending_short(monkeypatch):
 
 def test_tick_skips_evaluation_when_pending_order_exists(monkeypatch):
     """When pending_order is set, _tick() should NOT call evaluate_s5 or place any order."""
+    monkeypatch.setattr(config_ig, "INSTRUMENTS", [config_ig.INSTRUMENTS[0]])
     bot = _make_bot(monkeypatch)
     bot.pending_order = _pending_order()
 

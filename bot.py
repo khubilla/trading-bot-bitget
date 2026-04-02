@@ -514,6 +514,10 @@ class MTFBot:
                         "pnl_pct": pc["pnl_pct"], "exit_reason": "PARTIAL_TP",
                         "exit_price": pc.get("exit"),
                     })
+                    # Cache partial pnl so close logging can subtract it (avoids double-count)
+                    ap_ref = self.active_positions.get(pc["symbol"])
+                    if ap_ref is not None:
+                        ap_ref["partial_pnl"] = ap_ref.get("partial_pnl", 0.0) + pc["pnl"]
                     # Update to REMAINING margin (exchange_positions has the updated value from paper_trader)
                     remaining_margin = exchange_positions.get(pc["symbol"], {}).get("margin", 0)
                     if remaining_margin:
@@ -690,7 +694,9 @@ class MTFBot:
                     if PAPER_MODE:
                         _lc = tr.get_last_close(sym)
                         if _lc:
-                            last_pnl    = _lc["pnl"]
+                            # Subtract already-logged partial PnL so CSV close row contains only
+                            # the remaining-portion pnl (dashboard and stats rebuild add partial back)
+                            last_pnl    = _lc["pnl"] - ap.get("partial_pnl", 0.0)
                             pnl_pct     = _lc["pnl_pct"]
                             exit_reason = _lc["reason"]
                     else:
@@ -974,12 +980,10 @@ class MTFBot:
         # ── Collect S1 candidate ──────────────────────────────────── #
         if s1_sig in ("LONG", "SHORT") and allowed_direction != "NEUTRAL":
             lev = config_s1.LEVERAGE
-            last_red_low  = next((float(r["low"])  for _, r in ltf_df.iloc[::-1].iterrows() if float(r["close"]) < float(r["open"])), None)
-            last_grn_high = next((float(r["high"]) for _, r in ltf_df.iloc[::-1].iterrows() if float(r["close"]) > float(r["open"])), None)
-            pnl50_long  = close * (1 - 0.50 / lev)
-            pnl50_short = close * (1 + 0.50 / lev)
-            sl_long_est  = max(pnl50_long,  last_red_low  * 0.998 if last_red_low  else pnl50_long)
-            sl_short_est = min(pnl50_short, last_grn_high * 1.002 if last_grn_high else pnl50_short)
+            sl_long_est  = max(close * (1 - config_s1.STOP_LOSS_PCT),
+                               s1_bl * (1 - config_s1.S1_SL_BUFFER_PCT))
+            sl_short_est = min(close * (1 + config_s1.STOP_LOSS_PCT),
+                               s1_bh * (1 + config_s1.S1_SL_BUFFER_PCT))
             if s1_sig == "LONG" and close > sl_long_est:
                 s1_rr = round(config_s1.TAKE_PROFIT_PCT / ((close - sl_long_est) / close), 2)
             elif s1_sig == "SHORT" and sl_short_est > close:
@@ -1202,12 +1206,16 @@ class MTFBot:
         ltf_df = c["ltf_df"]
         lev    = config_s1.LEVERAGE
         mark_now = tr.get_mark_price(symbol)
-        pnl50_long  = mark_now * (1 - 0.50 / lev)
-        pnl50_short = mark_now * (1 + 0.50 / lev)
-        last_red_low  = next((float(r["low"])  for _, r in ltf_df.iloc[::-1].iterrows() if float(r["close"]) < float(r["open"])), None)
-        last_grn_high = next((float(r["high"]) for _, r in ltf_df.iloc[::-1].iterrows() if float(r["close"]) > float(r["open"])), None)
-        sl_long  = max(pnl50_long,  last_red_low  * 0.998 if last_red_low  else pnl50_long)
-        sl_short = min(pnl50_short, last_grn_high * 1.002 if last_grn_high else pnl50_short)
+        if c["sr_pct"] < config_s1.S1_MIN_SR_CLEARANCE * 100:
+            st.add_scan_log(
+                f"[S1][{symbol}] ⛔ Skipped — S/R clearance {c['sr_pct']:.1f}% < {config_s1.S1_MIN_SR_CLEARANCE*100:.0f}%",
+                "WARN"
+            )
+            return False
+        sl_long  = max(mark_now * (1 - config_s1.STOP_LOSS_PCT),
+                       c["s1_bl"] * (1 - config_s1.S1_SL_BUFFER_PCT))
+        sl_short = min(mark_now * (1 + config_s1.STOP_LOSS_PCT),
+                       c["s1_bh"] * (1 + config_s1.S1_SL_BUFFER_PCT))
         st.add_scan_log(
             f"[S1][{symbol}] {'🟢' if s1_sig == 'LONG' else '🔴'} {s1_sig} | "
             f"RSI={c['rsi_val']:.1f} ADX={c['adx_val']:.1f} | rank=#{c['priority_rank']}",

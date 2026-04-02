@@ -42,7 +42,11 @@ Multi-timeframe breakout with trend and momentum filters.
 | 3m | RSI > 70 (long) or < 30 (short) throughout consolidation |
 | 3m | Candle closes above/below box + 0.5% buffer |
 
-**Risk:** 30x leverage · 25% of total portfolio · SL at box edge · TP at +3.3%
+**Entry gate:** requires 15% clearance to the nearest daily S/R level — skips setups that are running into immediate overhead resistance or support.
+
+**Risk:** 10x leverage · 4% of total portfolio · SL at box pivot (0.5% buffer) · 50% partial close at +10% · 5% Bitget native trailing stop on remainder
+
+**Dynamic SL:** after entry, the hard SL is stepped up (LONG) or down (SHORT) each scan cycle to trail the nearest 3m swing low/high — SL never moves against the trade.
 
 ---
 
@@ -331,7 +335,7 @@ An optional Claude Haiku gate that runs before S2, S3, and S4 execute a trade. W
 - Returns APPROVE or REJECT with a brief reason logged to the dashboard and bot.log
 - On any API error, defaults to APPROVE — trades are never blocked by infrastructure failures
 
-**S1 is excluded** — it's a scalper with a 3.3% TP where LLM latency would matter.
+**S1 is excluded** — its 3m breakout entry is time-sensitive; LLM latency would cause missed entries.
 
 **Enable in `config.py`:**
 ```python

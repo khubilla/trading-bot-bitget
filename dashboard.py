@@ -78,8 +78,9 @@ async def add_security_headers(request: Request, call_next):
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self' https://unpkg.com; "
-        "style-src 'self' 'unsafe-inline'"
+        "script-src 'self' https://unpkg.com 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com"
     )
     # Remove server header to prevent version leakage
     if "server" in response.headers:
@@ -94,7 +95,7 @@ async def require_api_key(request: Request, call_next):
     Token is read from DASHBOARD_API_KEY environment variable.
     If env var is not set, auth is bypassed (allows existing deployments without token to work).
     """
-    if request.url.path == "/":
+    if request.url.path in ("/", "/favicon.ico"):
         return await call_next(request)
     api_key = os.environ.get("DASHBOARD_API_KEY", "")
     if api_key:
@@ -954,6 +955,7 @@ def get_trade_chart(
 
     # Build sorted candle list
     candles = sorted(candle_map.values(), key=lambda c: int(c["t"]))
+    candles = candles[-60:]
     if not candles:
         return JSONResponse({"error": "no snapshots found"}, status_code=404)
     ts_list = [int(c["t"]) for c in candles]

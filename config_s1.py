@@ -40,3 +40,8 @@ TAKE_PROFIT_PCT  = 0.10   # 10% price TP
 # ── S1-specific SL / S/R ─────────────────────────────────────────── #
 S1_SL_BUFFER_PCT    = 0.005  # 0.5% buffer below/above box pivot for SL
 S1_MIN_SR_CLEARANCE = 0.15   # 15% daily S/R clearance required to execute
+
+# ── Trailing Exit (partial TP + moving_plan) ─────────────────────────── #
+S1_TRAIL_RANGE_PCT  = 5     # moving_plan callback % (5 = trail 5% below high)
+S1_USE_SWING_TRAIL  = True  # enable per-tick 3m pivot SL stepping
+S1_SWING_LOOKBACK   = 20    # candles to scan for swing pivots (3m chart)

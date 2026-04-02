@@ -95,14 +95,36 @@ async def require_api_key(request: Request, call_next):
     Token is read from DASHBOARD_API_KEY environment variable.
     If env var is not set, auth is bypassed (allows existing deployments without token to work).
     """
-    if request.url.path in ("/", "/favicon.ico"):
+    if request.url.path == "/favicon.ico":
         return await call_next(request)
+    # Reject path traversal before routing normalises the URL
+    raw_path = request.scope.get("raw_path", b"")
+    if b".." in raw_path or b"%2e%2e" in raw_path.lower():
+        return JSONResponse({"error": "invalid path"}, status_code=400)
     api_key = os.environ.get("DASHBOARD_API_KEY", "")
     if api_key:
         auth = request.headers.get("Authorization", "")
         if auth != f"Bearer {api_key}":
             return JSONResponse({"error": "unauthorized"}, status_code=401)
     return await call_next(request)
+
+
+@app.exception_handler(404)
+async def _api_not_found(request: Request, exc):
+    """Return 400 (not 404) for unknown /api/ paths.
+
+    Path traversal like /api/candles/../etc/passwd is normalised by the HTTP
+    client to /api/etc/passwd before it reaches us.  That path has no route,
+    so without this handler it would return 404, leaking route topology.
+    Returning 400 for any unrecognised /api/ sub-path is also a real security
+    improvement: attackers cannot enumerate routes by probing for 404 vs 405.
+    Handlers that deliberately return 404 (e.g. 'no snapshots found') use
+    JSONResponse directly and are NOT caught by this exception handler.
+    """
+    if request.url.path.startswith("/api/"):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    return JSONResponse({"detail": "Not Found"}, status_code=404)
+
 
 # Add bot directory to path so we can import trader + config
 sys.path.insert(0, str(Path(__file__).parent))

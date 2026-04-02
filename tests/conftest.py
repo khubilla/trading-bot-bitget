@@ -5,6 +5,19 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _clear_api_key_for_testclient(request, monkeypatch):
+    """Clear DASHBOARD_API_KEY for tests that use TestClient directly.
+
+    live_server_url (session-scoped) sets DASHBOARD_API_KEY=test-token and never
+    restores it, so every subsequent TestClient test gets 401.  Tests that use
+    live_server_url need the env var; tests that don't (TestClient) need it absent.
+    """
+    if "live_server_url" not in request.fixturenames:
+        monkeypatch.delenv("DASHBOARD_API_KEY", raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def reset_rate_limiter():
     """Reset slowapi in-memory rate limit counters before each test.
 

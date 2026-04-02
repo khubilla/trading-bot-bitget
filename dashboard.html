@@ -1039,7 +1039,7 @@
         <button class="strat-tab"        id="tab-s5" onclick="switchTab('s5')">S5 — SMC OB</button>
       </div>
       <div class="scanner-toolbar">
-        <input id="pair-search" type="text" placeholder="Search pair…" oninput="onSearchInput(this.value)" autocomplete="off">
+        <input id="pair-search" type="text" placeholder="Search pair…" oninput="onSearchInput(this.value)" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')">
         <button id="sort-btn" class="sort-btn active" onclick="toggleSort()">⇅ Signals first</button>
       </div>
       <div class="panel-body" id="pair-grid">

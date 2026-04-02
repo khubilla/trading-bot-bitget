@@ -95,7 +95,7 @@ async def require_api_key(request: Request, call_next):
     Token is read from DASHBOARD_API_KEY environment variable.
     If env var is not set, auth is bypassed (allows existing deployments without token to work).
     """
-    if request.url.path == "/favicon.ico":
+    if request.url.path in ("/", "/favicon.ico"):
         return await call_next(request)
     # Reject path traversal before routing normalises the URL
     raw_path = request.scope.get("raw_path", b"")

@@ -292,6 +292,11 @@ def get_state():
             }
         except Exception:
             pass
+        try:
+            import config
+            state["max_concurrent"] = int(config.MAX_CONCURRENT_TRADES)
+        except Exception:
+            pass
         return JSONResponse(state)
     except Exception as e:
         return JSONResponse({"status": "ERROR", "error": str(e)})

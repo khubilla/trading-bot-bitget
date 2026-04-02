@@ -1004,7 +1004,7 @@
           <div class="stat-card blue">
             <div class="stat-label">Open Positions</div>
             <div class="stat-value blue" id="s-open">0</div>
-            <div class="stat-sub" id="s-max-sub">max 3 concurrent</div>
+            <div class="stat-sub" id="s-max-sub">max 10 concurrent</div>
           </div>
         </div>
       </div>
@@ -1455,6 +1455,7 @@ function render(s) {
   $('s-wr-bar').style.width = wr + '%';
   $('s-wr-sub').textContent = `${wins}W / ${losses}L of ${total} trades`;
   $('s-open').textContent   = (s.open_trades || []).length;
+  if (s.max_concurrent != null) $('s-max-sub').textContent = `max ${s.max_concurrent} concurrent`;
 
   // ── Active trades
   const trades = s.open_trades || [];

@@ -832,6 +832,9 @@ class MTFBot:
         # ── 7. Execute best candidates (priority-ranked across all strategies) ─ #
         self._execute_best_candidate(direction, balance)
 
+        # ── 8. Process S6 two-phase entry watchers ────────────────── #
+        self._process_s6_watchers()
+
     def _evaluate_pair(self, symbol: str, allowed_direction: str, balance: float) -> bool:
         htf_df   = tr.get_candles(symbol, config_s1.HTF_INTERVAL,   limit=15)
         ltf_df   = tr.get_candles(symbol, config_s1.LTF_INTERVAL,   limit=60)
@@ -1652,6 +1655,98 @@ class MTFBot:
                 "trade_id": trade["trade_id"],
             }
             return True
+
+    # ── S6 Execution ─────────────────────────────────────────────── #
+
+    def _execute_s6(self, w: dict) -> bool:
+        """Execute S6 SHORT after two-phase liquidity sweep is confirmed."""
+        symbol = w["symbol"]
+        if symbol in self.active_positions:
+            return False
+        mark_now = tr.get_mark_price(symbol)
+        sl_price  = mark_now * (1 + config_s6.S6_SL_PCT / config_s6.S6_LEVERAGE)
+        st.add_scan_log(
+            f"[S6][{symbol}] 🔴 SHORT | peak={w['peak_level']:.5f} | "
+            f"fakeout confirmed → entry @ {mark_now:.5f}",
+            "SIGNAL"
+        )
+        trade = tr.open_short(
+            symbol,
+            sl_floor       = sl_price,
+            leverage       = config_s6.S6_LEVERAGE,
+            trade_size_pct = config_s6.S6_TRADE_SIZE_PCT,
+            use_s6_exits   = True,
+        )
+        trade["strategy"]              = "S6"
+        trade["snap_s6_peak"]          = round(w["peak_level"], 8)
+        trade["snap_s6_drop_pct"]      = round(w["drop_pct"] * 100, 2)
+        trade["snap_s6_rsi_at_peak"]   = round(w["rsi_at_peak"], 1)
+        trade["snap_sentiment"]        = self.sentiment.direction if self.sentiment else None
+        trade["snap_sr_clearance_pct"] = None
+        trade["trade_id"] = uuid.uuid4().hex[:8]
+        _log_trade("S6_SHORT", trade)
+        st.add_open_trade(trade)
+        try:
+            snapshot.save_snapshot(
+                trade_id=trade["trade_id"], event="open",
+                symbol=symbol, interval="1D",
+                candles=_df_to_candles(w["daily_df"]),
+                event_price=float(trade.get("entry", 0)),
+            )
+        except Exception as e:
+            logger.warning(f"[S6][{symbol}] snapshot save failed: {e}")
+        if PAPER_MODE: tr.tag_strategy(symbol, "S6")
+        self.active_positions[symbol] = {
+            "side": "SHORT", "strategy": "S6",
+            "box_high": sl_price, "box_low": w["peak_level"],
+            "trade_id": trade["trade_id"],
+        }
+        del self.s6_watchers[symbol]
+        return True
+
+    def _process_s6_watchers(self) -> None:
+        """Check each S6 two-phase watcher against current mark price."""
+        if not self.s6_watchers:
+            return
+        now = time.time()
+        expired = []
+        for symbol, w in list(self.s6_watchers.items()):
+            # Cancel if sentiment flipped bullish
+            if self.sentiment and self.sentiment.direction == "BULLISH":
+                logger.info(f"[S6][{symbol}] 🚫 Watcher cancelled — sentiment flipped BULLISH")
+                st.add_scan_log(f"[S6][{symbol}] 🚫 Watcher cancelled (BULLISH)", "WARN")
+                expired.append(symbol)
+                continue
+            # Expire after 30 days
+            if now - w["detected_at"] > 30 * 86400:
+                logger.info(f"[S6][{symbol}] ⏰ Watcher expired (30 days)")
+                expired.append(symbol)
+                continue
+            if symbol in self.active_positions:
+                expired.append(symbol)
+                continue
+            try:
+                mark_now = tr.get_mark_price(symbol)
+            except Exception as e:
+                logger.debug(f"[S6][{symbol}] mark price fetch failed: {e}")
+                continue
+            peak = w["peak_level"]
+            if not w["fakeout_seen"]:
+                # Phase 1: wait for price to sweep above peak
+                if mark_now > peak:
+                    w["fakeout_seen"] = True
+                    st.patch_pair_state(symbol, {"s6_fakeout_seen": True})
+                    logger.info(f"[S6][{symbol}] 🚀 Phase 1 — fakeout above peak {peak:.5f} @ {mark_now:.5f}")
+                    st.add_scan_log(f"[S6][{symbol}] Phase 1 fakeout seen above {peak:.5f}", "INFO")
+            else:
+                # Phase 2: wait for price to drop back below peak → execute
+                if mark_now < peak:
+                    logger.info(f"[S6][{symbol}] 🎯 Phase 2 — entry triggered below peak {peak:.5f} @ {mark_now:.5f}")
+                    if not st.is_pair_paused(symbol):
+                        self._execute_s6(w)
+                    expired.append(symbol)
+        for symbol in expired:
+            self.s6_watchers.pop(symbol, None)
 
     # ── Entry Watcher ─────────────────────────────────────────────── #
 

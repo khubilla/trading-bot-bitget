@@ -188,10 +188,64 @@ snap_s6_peak, snap_s6_drop_pct, snap_s6_rsi_at_peak
 |------|--------|
 | `strategy.py` | Add `evaluate_s6()` function |
 | `config_s6.py` | New file — S6 config params |
-| `bot.py` | Add S6 candidate collection, two-phase entry watcher, `_execute_s6()`, pair_state updates, `_TRADE_FIELDS` additions |
+| `bot.py` | Add S6 candidate collection, two-phase entry watcher, `_execute_s6()`, pair_state updates, `_TRADE_FIELDS` additions, snapshot calls |
+| `dashboard.html` | Add S6 tab + `s6CardHTML()` function + `renderPairGrid` dispatch |
 | `DEPENDENCIES.md` | Document new S6 fields after implementation |
 
-**Not affected:** `ig_bot.py`, `dashboard.html` (no dashboard panel needed for initial release), `optimize.py` (new snap_ columns are additive)
+**Not affected:** `ig_bot.py`, `optimize.py` (new snap_ columns are additive)
+
+---
+
+## Dashboard Panel (dashboard.html)
+
+### New tab
+Add an **S6** tab alongside the existing S1–S5 tabs in the pair scanner tab bar.
+
+### s6CardHTML(sym, ps)
+
+Follows the same structure as `s4CardHTML` / `s5CardHTML`. Reads these `pair_states` fields:
+
+| Field | Usage |
+|-------|-------|
+| `ps.s6_signal` | Signal badge: `PENDING_SHORT` (amber) or `HOLD` (muted) |
+| `ps.s6_reason` | Reason text at bottom of card |
+| `ps.s6_peak_level` | Displayed as the resistance watch price |
+| `ps.s6_sl` | Displayed as the SL price |
+| `ps.s6_fakeout_seen` | Phase indicator |
+| `ps.updated_at` | Age calculation |
+
+**Card check rows (top → bottom):**
+
+```
+RSI > 70 at peak     [pass / fail]           — was swing high overbought?
+Drop ≥ 30%           [pass / fail + pct]     — magnitude of the spike
+Direct V-pivot       [pass / fail]           — immediate bullish pivot candle
+Fakeout above peak   [pass (seen) / ⏳ (waiting)]  — phase 1 gate
+```
+
+**Phase indicator in reason area:**
+- `fakeout_seen=false` → small amber label `"Phase 1 — waiting for sweep above peak"`
+- `fakeout_seen=true`  → small amber label `"Phase 2 — watching for entry below peak"`
+
+**Card border/background:** same `.signal-short` class when signal is `PENDING_SHORT`, plain when `HOLD`.
+
+**renderPairGrid dispatch:** add `case "S6": return s6CardHTML(sym, ps)` alongside existing strategy cases.
+
+---
+
+## Candle Snapshots
+
+S6 reuses the existing `snapshot.py` module (same as S1–S5). Snapshots are saved at three lifecycle events using the daily candle data:
+
+| Event | Trigger | Data saved |
+|-------|---------|------------|
+| `"open"` | Inside `_execute_s6()` after the market order fills | `daily_df` last 60 candles, event_price = fill price |
+| `"partial"` | When 50% TP hits (same partial-close detection loop used by S1–S5 in bot.py) | `daily_df` last 60 candles, event_price = partial exit price |
+| `"close"` | When position fully closed | `daily_df` last 60 candles, event_price = exit price |
+
+**Implementation note:** `daily_df` must be kept in the candidate dict so it is available at execution time. At partial/close time, bot.py refetches the daily candles (same pattern as S4/S5 close detection).
+
+**Entry chart** (`/api/entry-chart`) and **trade chart** (`/api/trade-chart`) endpoints in `dashboard.py` already handle any strategy generically via `load_snapshot(trade_id, "open")` and `list_snapshots(trade_id)` — no dashboard.py changes needed for snapshot serving.
 
 ---
 

@@ -1037,6 +1037,7 @@
         <button class="strat-tab"        id="tab-s3" onclick="switchTab('s3')">S3 — Pullback</button>
         <button class="strat-tab"        id="tab-s4" onclick="switchTab('s4')">S4 — Short</button>
         <button class="strat-tab"        id="tab-s5" onclick="switchTab('s5')">S5 — SMC OB</button>
+        <button class="strat-tab"        id="tab-s6" onclick="switchTab('s6')">S6 — V-Sweep</button>
       </div>
       <div class="scanner-toolbar">
         <input id="pair-search" type="text" placeholder="Search pair…" oninput="onSearchInput(this.value)" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')">
@@ -1381,7 +1382,7 @@ function render(s) {
 
   // ── Hide tabs for disabled strategies
   if (s.strategy_enabled) {
-    ['S1','S2','S3','S4','S5'].forEach(k => {
+    ['S1','S2','S3','S4','S5','S6'].forEach(k => {
       const tab = $('tab-' + k.toLowerCase());
       if (tab) tab.style.display = s.strategy_enabled[k] ? '' : 'none';
     });
@@ -1563,7 +1564,7 @@ function render(s) {
 }
 
 // ── Entry Chart Modal ──────────────────────────────────
-const _ENTRY_CHART_INTERVAL = {S1:'3m', S2:'1D', S3:'15m', S4:'1D', S5:'15m'};
+const _ENTRY_CHART_INTERVAL = {S1:'3m', S2:'1D', S3:'15m', S4:'1D', S5:'15m', S6:'1D'};
 
 async function openCombinedChart(trade) {
   if (!trade || !trade.trade_id) return openEntryChart(trade);
@@ -2241,7 +2242,7 @@ function isoToUnix(iso) {
 
 function openTradeChart(trade) {
   if (!trade || !trade.entry || !trade.open_at) return;
-  const tabMap = { S1: 's1', S2: 's2', S3: 's3', S4: 's4', S5: 's5' };
+  const tabMap = { S1: 's1', S2: 's2', S3: 's3', S4: 's4', S5: 's5', S6: 's6' };
   chartActiveTab  = tabMap[trade.strategy] || 's1';
   currentInterval = trade.interval || '15m';
   window._tradeOverlay = {
@@ -2334,6 +2335,12 @@ function signalScore(sym, ps, tab) {
     const chochOk = reason.includes('ChoCH ✅') || sig !== 'HOLD';
     const rankBonus = rank === 1 ? 100 : rank === 2 ? 50 : rank != null ? 25 : 0;
     return rankBonus + (emaOk ? 1 : 0) + (bosOk ? 1 : 0) + (obOk ? 1 : 0) + (chochOk ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
+  }
+  if (tab === 's6') {
+    const sig      = ps.s6_signal || 'HOLD';
+    const fakeout  = ps.s6_fakeout_seen;
+    const pending  = sig === 'PENDING_SHORT';
+    return (pending ? 10 : 0) + (pending && fakeout ? 5 : 0);
   }
   return 0;
 }
@@ -2598,6 +2605,76 @@ function s5CardHTML(sym, ps) {
     </div>`;
 }
 
+function s6CardHTML(sym, ps) {
+  const sig        = ps.s6_signal || 'HOLD';
+  const reason     = ps.s6_reason || '—';
+  const symShort   = sym.replace('USDT', '');
+  const cardClass  = sig === 'PENDING_SHORT' ? 'signal-short' : '';
+  const peak       = ps.s6_peak_level;
+  const slPrice    = ps.s6_sl;
+  const fakeout    = ps.s6_fakeout_seen;
+
+  // Infer which checks passed from the signal itself
+  const rsiOk      = sig === 'PENDING_SHORT' || reason.includes('RSI');
+  const dropOk     = sig === 'PENDING_SHORT' || reason.includes('drop') || reason.includes('V-formation');
+  const pivotOk    = sig === 'PENDING_SHORT';
+  const rsiClass   = rsiOk   ? 'pass' : 'fail';
+  const dropClass  = !rsiOk  ? 'muted' : dropOk  ? 'pass' : 'fail';
+  const pivotClass = !dropOk ? 'muted' : pivotOk ? 'pass' : 'fail';
+  const fakeoutClass = !pivotOk ? 'muted' : fakeout ? 'pass' : 'warn';
+  const fakeoutLabel = !pivotOk ? '—' : fakeout ? 'Seen ✓' : '⏳ Waiting…';
+
+  const peakLabel  = peak  != null ? peak.toFixed(4)  : '—';
+  const slLabel    = slPrice != null ? slPrice.toFixed(4) : '—';
+
+  const phaseLabel = sig === 'PENDING_SHORT'
+    ? (fakeout
+        ? '<span style="color:#e3b341;font-size:0.72rem">Phase 2 — watching for entry below peak</span>'
+        : '<span style="color:#e3b341;font-size:0.72rem">Phase 1 — waiting for sweep above peak</span>')
+    : '';
+
+  const reasonClass = sig !== 'HOLD' ? 'signal' : '';
+  const age = ps.updated_at ? (() => {
+    const sec = Math.floor((Date.now() - new Date(ps.updated_at).getTime()) / 1000);
+    if (sec < 60) return sec + 's ago';
+    if (sec < 3600) return Math.floor(sec/60) + 'm ago';
+    return Math.floor(sec/3600) + 'h ago';
+  })() : 'not scanned';
+  return `
+    <div class="pair-card ${cardClass}" data-symbol="${sym}">
+      <div class="pair-top">
+        <div class="pair-name" title="${sym}">${symShort}</div>
+        <span class="pair-sig-badge ${sig === 'PENDING_SHORT' ? 'SHORT' : sig}">${sig}</span>
+      </div>
+      <div class="pair-checks">
+        <div class="pair-check">
+          <span class="check-label">RSI &gt; 70 at peak</span>
+          <span class="check-val ${rsiClass}">${rsiOk ? 'Overbought ✓' : 'Not seen'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">Drop ≥ 30%</span>
+          <span class="check-val ${dropClass}">${!rsiOk ? '—' : dropOk ? 'Spike ✓' : 'Too shallow'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">Direct V-pivot</span>
+          <span class="check-val ${pivotClass}">${!dropOk ? '—' : pivotOk ? 'Confirmed ✓' : 'No pivot'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">Fakeout above peak</span>
+          <span class="check-val ${fakeoutClass}">${fakeoutLabel}</span>
+        </div>
+      </div>
+      <div class="pair-check" style="margin:4px 0 2px;font-size:0.75rem">
+        <span class="check-label">Peak level</span>
+        <span style="color:#c9d1d9">${peakLabel}</span>
+        <span class="check-label" style="margin-left:8px">SL</span>
+        <span style="color:#c9d1d9">${slLabel}</span>
+      </div>
+      ${phaseLabel}
+      <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0,60)} · ${age}</div>
+    </div>`;
+}
+
 function renderPairGrid(s) {
   const pairStates = s.pair_states || {};
   let pairs = s.qualified_pairs || [];
@@ -2620,7 +2697,9 @@ function renderPairGrid(s) {
   $('pair-count').textContent = pairs.length + ' pairs';
   const grid = $('pair-grid-inner');
   let html = '';
-  if (activeTab === 's5') {
+  if (activeTab === 's6') {
+    html = pairs.map(sym => s6CardHTML(sym, pairStates[sym] || {})).join('');
+  } else if (activeTab === 's5') {
     html = pairs.map(sym => s5CardHTML(sym, pairStates[sym] || {})).join('');
   } else if (activeTab === 's4') {
     html = pairs.map(sym => s4CardHTML(sym, pairStates[sym] || {})).join('');
@@ -3397,6 +3476,7 @@ function attachCardClicks() {
       else if (strat === 'S3') chartActiveTab = 's3';
       else if (strat === 'S4') chartActiveTab = 's4';
       else if (strat === 'S5') chartActiveTab = 's5';
+      else if (strat === 'S6') chartActiveTab = 's6';
       openChart(card.dataset.symbol);
     };
   });

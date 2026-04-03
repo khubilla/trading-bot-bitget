@@ -1420,6 +1420,12 @@ def evaluate_s6(
         if drop_pct < S6_MIN_DROP_PCT:
             continue
 
+        # ── Clean downward spike: no candle between high and spike ─ #
+        # exceeds peak_level (ensures price didn't retest peak before dropping)
+        between = window.iloc[i + 1: spike_abs]
+        if not between.empty and float(between["high"].max()) > peak_level:
+            continue
+
         # ── Pivot candle must exist (spike cannot be the last row) ─ #
         if spike_abs + 1 >= n:
             continue
@@ -1428,6 +1434,13 @@ def evaluate_s6(
         pivot = window.iloc[spike_abs + 1]
         if not (pivot["close"] > pivot["open"] and
                 pivot["close"] > spike_candle["close"]):
+            continue
+
+        # ── Post-pivot guard: fakeout sweep must not have occurred yet ─ #
+        # If any candle after the pivot already exceeded peak_level, the
+        # two-phase watcher handles Phase 2 — evaluate_s6 returns HOLD.
+        post_pivot = window.iloc[spike_abs + 2:]
+        if not post_pivot.empty and float(post_pivot["high"].max()) > peak_level:
             continue
 
         # ── Valid V-formation found ────────────────────────── #

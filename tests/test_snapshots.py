@@ -391,6 +391,9 @@ def test_entry_chart_uses_snapshot_when_available(tmp_path, monkeypatch):
     import bitget_client as bc
     monkeypatch.setattr(bc, "get_public", lambda *a, **kw: exchange_called.append(1) or {"data": []})
 
+    # Clear API key so auth middleware doesn't block the TestClient request
+    monkeypatch.delenv("DASHBOARD_API_KEY", raising=False)
+
     client = TestClient(dashboard.app)
     resp = client.get("/api/entry-chart", params={
         "symbol": "RIVERUSDT",

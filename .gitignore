@@ -23,3 +23,6 @@ ig_state.json
 ig_trades.csv
 ig_paper_trades.csv
 .worktrees/
+
+oracle_provision.py
+*.tmp

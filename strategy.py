@@ -1259,7 +1259,7 @@ def evaluate_s5(
         if current_close > ob_high * (1 + S5_MAX_ENTRY_BUFFER):
             return "HOLD", entry_trigger, sl_price, 0.0, ob_low, ob_high, (
                 f"Daily EMA ✅ | 1H BOS ✅ | Bullish OB ✅ | OB touched ✅ | "
-                f"Stale — price {current_close:.5f} already >{S5_MAX_ENTRY_BUFFER*100:.0f}% above ob_high {ob_high:.5f}"
+                f"Stale — price {current_close:.5f} already >{S5_MAX_ENTRY_BUFFER*100:.2g}% above ob_high {ob_high:.5f}"
             )
 
         # Structural TP — compute before entry-trigger check so PENDING signals carry full data
@@ -1328,7 +1328,7 @@ def evaluate_s5(
         if current_close < ob_low * (1 - S5_MAX_ENTRY_BUFFER):
             return "HOLD", entry_trigger, sl_price, 0.0, ob_low, ob_high, (
                 f"Daily EMA ✅ | 1H BOS ✅ | Bearish OB ✅ | OB touched ✅ | "
-                f"Stale — price {current_close:.5f} already >{S5_MAX_ENTRY_BUFFER*100:.0f}% below ob_low {ob_low:.5f}"
+                f"Stale — price {current_close:.5f} already >{S5_MAX_ENTRY_BUFFER*100:.2g}% below ob_low {ob_low:.5f}"
             )
 
         # Structural TP — compute before entry-trigger check so PENDING signals carry full data

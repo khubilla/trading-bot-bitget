@@ -23,7 +23,7 @@ On first run, the bot will display this disclaimer and require you to type `I AG
 
 | Exchange | Instrument | Strategies |
 |----------|-----------|-----------|
-| Bitget | USDT-margined perpetual futures | S1 · S2 · S3 · S4 · S5 |
+| Bitget | USDT-margined perpetual futures | S1 · S2 · S3 · S4 · S5 · S6 |
 | IG | Wall Street Cash (US30 / Dow Jones) | S5 only |
 | IG | Gold CFD (XAU/USD) | S5 only |
 
@@ -56,14 +56,16 @@ Pure daily-chart strategy targeting post-squeeze breakouts.
 
 1. Big momentum candle (≥20% body) within last 30 daily candles
 2. Daily RSI > 70 throughout consolidation
-3. 1–5 tight daily candles coiling (max 15% range)
-4. Current daily candle breaks above consolidation high (1% buffer)
+3. 1–5 tight daily candles coiling — range measured from candle **bodies** (wicks ignored per long-wick rule), max 15% from box top to box bottom
+4. Current daily candle breaks above consolidation box top (1% buffer)
 
 **Entry window:** price must be within 1–4% above the breakout trigger — entry is skipped if already missed.
 
 **Scale-in:** opens at 2.5% margin initially; adds remaining 2.5% after 1 hour if price is still within the entry window.
 
 **Risk:** 10x leverage · 5% of total portfolio · SL at box low · 50% partial close at +10% · 10% trailing stop on remainder
+
+**Dashboard:** S2 pair cards show the live coil range (box low – box high) so you can see exactly where the consolidation is sitting.
 
 ---
 
@@ -132,6 +134,26 @@ Multi-timeframe Smart Money Concepts strategy. Long or short depending on market
 **Optional filters (`config_s5.py`):** `S5_SMC_FVG_FILTER` — require an unfilled Fair Value Gap above/below the OB for added confluence (off by default).
 
 **Sentiment gate:** LONG only when BULLISH or NEUTRAL · SHORT only when BEARISH.
+
+---
+
+### Strategy 6 — V-Formation Liquidity Sweep Short *(Bitget only)*
+
+Short-only daily strategy targeting liquidity sweeps that fail to hold above a prior swing high.
+
+1. Daily RSI peaked above 75 within the last N candles (overbought swing high)
+2. Price spiked above that peak (liquidity sweep / fakeout) then collapsed — forming a V-shape
+3. The drop from peak to low is ≥ the minimum configured threshold
+4. Price has recovered a minimum ratio from the spike low back toward the peak (filters U-bottoms)
+5. No post-pivot candle has already exceeded peak level (fakeout watcher handles Phase 2)
+
+**Two-phase watcher:**
+- **Phase 1:** Waits for price to exceed `peak_level` (the fakeout sweep)
+- **Phase 2:** Waits for price to drop back below `peak_level` — SHORT entered on confirmation
+
+**Risk:** 10x leverage · SL above spike high · 50% partial close at +10% · 10% trailing stop on remainder
+
+**Sentiment gate:** only fires when market is BEARISH.
 
 ---
 
@@ -309,7 +331,7 @@ The unified dashboard has a **Bitget** tab and an **IG** tab.
 - Header stats: Balance, Open P/L, Total Value, Win Rate, Total P/L, Scanned Pairs
 - Active trades: entry price, SL, TP, current P/L %, strategy badge, margin used
 - Trade history: closed trades with PnL, result, and strategy tag
-- Pair scanner tabs: S1 · S2 · S3 · S4 · S5 — each showing signals and setup status per pair; S5 shows OB zone, entry trigger, SL, and structural TP lines on the 15m chart
+- Pair scanner tabs: S1 · S2 · S3 · S4 · S5 · S6 — each showing signals and setup status per pair; S2 shows live coil range; S5 shows OB zone, entry trigger, SL, and structural TP lines on the 15m chart
 - Candlestick chart with RSI and MACD subcharts, entry/SL signal lines
 - Entry chart modal: click any trade to see the exact candle snapshot captured at entry, partial TP, and close events
 
@@ -376,7 +398,7 @@ Analyzing S2 — 34 trades | 21W / 13L
    S2_RSI_LONG_THRESH: 70 → 75  (filters 8 losing trades, keeps 19 winners)
 ```
 
-Claude suggests changes; you review and apply them manually. All five strategies (S1–S5) are covered once they have sufficient trade history.
+Claude suggests changes; you review and apply them manually. All six strategies (S1–S6) are covered once they have sufficient trade history.
 
 **Cost:** ~$0.015 per run with Claude Sonnet 4.6.
 
@@ -415,6 +437,7 @@ Claude suggests changes; you review and apply them manually. All five strategies
 ├── config_s3.py        # Strategy 3 parameters
 ├── config_s4.py        # Strategy 4 parameters
 ├── config_s5.py        # Strategy 5 parameters (shared: Bitget + IG)
+├── config_s6.py        # Strategy 6 parameters
 │
 ├── .env                # Credentials for all exchanges (gitignored)
 │

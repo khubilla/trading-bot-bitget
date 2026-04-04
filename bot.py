@@ -18,10 +18,11 @@ import config_s2
 import config_s3
 import config_s4
 import config_s5
+import config_s6
 import state as st
 from scanner import get_qualified_pairs_and_sentiment
 from strategy import (
-    evaluate_s1, evaluate_s2, evaluate_s3, evaluate_s4, evaluate_s5,
+    evaluate_s1, evaluate_s2, evaluate_s3, evaluate_s4, evaluate_s5, evaluate_s6,
     check_htf, check_exit,
     calculate_rsi, detect_consolidation,
     check_daily_trend,
@@ -111,7 +112,9 @@ _TRADE_FIELDS = [
     "snap_rsi_peak", "snap_spike_body_pct", "snap_rsi_div", "snap_rsi_div_str",
     # S5 snapshot
     "snap_s5_ob_low", "snap_s5_ob_high", "snap_s5_tp",
-    # S/R clearance at entry (S2/S3/S4/S5)
+    # S6 snapshot
+    "snap_s6_peak", "snap_s6_drop_pct", "snap_s6_rsi_at_peak",
+    # S/R clearance at entry (S2/S3/S4/S5/S6)
     "snap_sr_clearance_pct",
     # Close fields
     "result", "pnl", "pnl_pct", "exit_reason", "exit_price",
@@ -257,12 +260,14 @@ class MTFBot:
         self._trade_lock = threading.Lock()
         # Priority evaluation — candidates collected each scan cycle (all strategies)
         self.candidates: list = []
+        # S6 two-phase entry watchers — persist across scan cycles
+        self.s6_watchers: dict[str, dict] = {}
 
         st.reset()
         st.set_status("RUNNING")
         # Rebuild win/loss stats from CSV so header survives restarts
         _rebuild_stats_from_csv(config.TRADE_LOG)
-        st.add_scan_log("Bot initialised (S1 + S2 + S3 + S4 + S5)", "INFO")
+        st.add_scan_log("Bot initialised (S1 + S2 + S3 + S4 + S5 + S6)", "INFO")
 
         logger.info("🤖 Bitget USDT-Futures MTF Bot — Strategy 1 + 2")
         logger.info(f"   Mode         : {'DEMO' if config.DEMO_MODE else '⚡ LIVE'}")
@@ -292,6 +297,7 @@ class MTFBot:
                 _resumed_ap: dict = {
                     "side": pos["side"], "strategy": strategy,
                     "box_high": 0.0, "box_low": 0.0,
+                    "trade_id": _csv.get("trade_id", "") if _csv else "",
                 }
                 if _pmem.get("initial_qty"):
                     _resumed_ap["initial_qty"] = _pmem["initial_qty"]
@@ -523,6 +529,19 @@ class MTFBot:
                     if remaining_margin:
                         st.update_open_trade_margin(pc["symbol"], remaining_margin)
                     logger.info(f"[{pc['strategy']}][{pc['symbol']}] 📊 Partial logged: PnL={pc['pnl']:+.4f} ({pc['pnl_pct']:+.1f}%)")
+                    try:
+                        _pc_tid = self.active_positions.get(pc["symbol"], {}).get("trade_id", "")
+                        _pc_int = _STRATEGY_CANDLE_INTERVAL.get(pc["strategy"], "15m")
+                        _pc_df  = tr.get_candles(pc["symbol"], _pc_int, limit=100)
+                        if not _pc_df.empty:
+                            snapshot.save_snapshot(
+                                trade_id=_pc_tid, event="partial",
+                                symbol=pc["symbol"], interval=_pc_int,
+                                candles=_df_to_candles(_pc_df),
+                                event_price=round(pc.get("exit", 0.0), 8),
+                            )
+                    except Exception as e:
+                        logger.warning(f"[{pc['strategy']}][{pc['symbol']}] partial snapshot failed: {e}")
 
             # Sync pnl + detect closed positions
             for sym in list(self.active_positions.keys()):
@@ -721,8 +740,7 @@ class MTFBot:
                     if PAPER_MODE:
                         _lc = tr.get_last_close(sym)
                         if _lc:
-                            # Subtract already-logged partial PnL so CSV close row contains only
-                            # the remaining-portion pnl (dashboard and stats rebuild add partial back)
+                            # CSV close row = remaining-portion pnl only (partial already logged separately)
                             last_pnl    = _lc["pnl"] - ap.get("partial_pnl", 0.0)
                             pnl_pct     = _lc["pnl_pct"]
                             exit_reason = _lc["reason"]
@@ -734,16 +752,18 @@ class MTFBot:
                         # Add partial pnl stored during monitoring if realized API not available
                         elif ap.get("partial_pnl"):
                             last_pnl += ap["partial_pnl"]
-                    result = "WIN" if last_pnl >= 0 else "LOSS"
-                    logger.info(f"{'✅' if result == 'WIN' else '❌'} [{sym}] Closed ({result}) PnL={last_pnl:+.4f}")
-                    st.close_trade(sym, result, last_pnl)
+                    # Total PnL for dashboard = close portion + any already-logged partial
+                    total_pnl = last_pnl + ap.get("partial_pnl", 0.0)
+                    result = "WIN" if total_pnl >= 0 else "LOSS"
+                    logger.info(f"{'✅' if result == 'WIN' else '❌'} [{sym}] Closed ({result}) PnL={total_pnl:+.4f}")
+                    st.close_trade(sym, result, total_pnl)
                     if result == "LOSS":
                         st.record_loss(sym)
                         if st.is_pair_paused(sym):
                             logger.info(f"⛔ [{sym}] 3 losses today — paused until tomorrow (UTC)")
                             st.add_scan_log(f"[{sym}] ⛔ Paused for today — 3 losses reached", "WARN")
                     st.add_scan_log(
-                        f"[{ap['strategy']}][{sym}] Closed {result} | PnL={last_pnl:+.4f} USDT", "INFO"
+                        f"[{ap['strategy']}][{sym}] Closed {result} | PnL={total_pnl:+.4f} USDT", "INFO"
                     )
                     try:
                         _exit_price = _lc.get("exit_price") if (PAPER_MODE and _lc) else tr.get_mark_price(sym)
@@ -826,6 +846,9 @@ class MTFBot:
 
         # ── 7. Execute best candidates (priority-ranked across all strategies) ─ #
         self._execute_best_candidate(direction, balance)
+
+        # ── 8. Process S6 two-phase entry watchers ────────────────── #
+        self._process_s6_watchers()
 
     def _evaluate_pair(self, symbol: str, allowed_direction: str, balance: float) -> bool:
         htf_df   = tr.get_candles(symbol, config_s1.HTF_INTERVAL,   limit=15)
@@ -935,6 +958,14 @@ class MTFBot:
             s4_sig, s4_rsi, s4_trigger, s4_sl, s4_body_pct, s4_rsi_peak, s4_div, s4_div_str, s4_reason = evaluate_s4(symbol, daily_df)
             logger.info(f"[S4][{symbol}] {s4_reason}")
 
+        # ── Strategy 6 ───────────────────────────────────────────── #
+        s6_sig, s6_peak_level, s6_sl, s6_drop_pct, s6_rsi_at_peak, s6_reason = "HOLD", 0.0, 0.0, 0.0, 0.0, ""
+        if config_s6.S6_ENABLED:
+            s6_sig, s6_peak_level, s6_sl, s6_drop_pct, s6_rsi_at_peak, s6_reason = evaluate_s6(
+                symbol, daily_df, allowed_direction
+            )
+            logger.info(f"[S6][{symbol}] {s6_reason}")
+
         # ── S/R Clearance (for dashboard display + entry guard) ──── #
         _sr_res        = find_nearest_resistance(daily_df, close)
         _sr_sup        = find_nearest_support(daily_df, close)
@@ -956,7 +987,7 @@ class MTFBot:
 
         st.update_pair_state(symbol, {
             "rsi": rsi_val, "htf_bull": htf_bull, "htf_bear": htf_bear,
-            "signal": s1_sig if s1_sig != "HOLD" else (s2_sig if s2_sig != "HOLD" else (s3_sig if s3_sig != "HOLD" else (s4_sig if s4_sig != "HOLD" else ("PENDING" if s5_sig.startswith("PENDING") else s5_sig)))),
+            "signal": s1_sig if s1_sig != "HOLD" else (s2_sig if s2_sig != "HOLD" else (s3_sig if s3_sig != "HOLD" else (s4_sig if s4_sig != "HOLD" else ("PENDING" if s5_sig.startswith("PENDING") else (s6_sig if s6_sig != "HOLD" else s5_sig))))),
             "s1_signal": s1_sig,
             "s2_signal": s2_sig,
             "price": close,
@@ -970,6 +1001,11 @@ class MTFBot:
             "s3_daily_gain_pct": s3_daily_gain_pct,
             "s4_reason": s4_reason,
             "s4_signal": s4_sig,
+            "s6_signal":      s6_sig,
+            "s6_reason":      s6_reason,
+            "s6_peak_level":  round(s6_peak_level, 8) if s6_peak_level else None,
+            "s6_sl":          round(s6_sl,          8) if s6_sl          else None,
+            "s6_fakeout_seen": False,   # updated by _process_s6_watchers
             "s5_reason": s5_reason,
             "s5_signal": s5_sig if s5_sig in ("LONG", "SHORT", "HOLD") else "PENDING",
             "s5_ob_low":  round(s5_ob_low,  8) if s5_ob_low  else None,
@@ -980,10 +1016,10 @@ class MTFBot:
             "s5_sr_pct":  s5_sr_pct,
             "rsi_ok": rsi_ok,
             "adx": round(adx_val, 1), "trend_ok": trend_ok,
-            "strategy": "S1" if s1_sig != "HOLD" else ("S2" if s2_sig != "HOLD" else ("S3" if s3_sig != "HOLD" else ("S4" if s4_sig != "HOLD" else ("S5" if s5_sig not in ("HOLD", "") else "S1")))),
+            "strategy": "S1" if s1_sig != "HOLD" else ("S2" if s2_sig != "HOLD" else ("S3" if s3_sig != "HOLD" else ("S4" if s4_sig != "HOLD" else ("S6" if s6_sig not in ("HOLD", "") else ("S5" if s5_sig not in ("HOLD", "") else "S1"))))),
             "s2_daily_rsi": s2_rsi,
             "s2_big_candle": s2_rsi > 0 and ("big_candle" in s2_reason or "Big candle" in s2_reason or s2_bh > 0),
-            "s2_coiling":    s2_bl > 0 and s2_bh > 0,
+            "s2_coiling":    s2_bl > 0 and s2_bh > 0 and s2_sig == "HOLD",
             "s2_box_low":    round(s2_bl, 8) if s2_bl > 0 else None,
             "s2_box_high":   round(s2_bh, 8) if s2_bh > 0 else None,
             "sr_resistance_pct":    sr_res_pct,
@@ -1060,6 +1096,16 @@ class MTFBot:
                 "s4_reason": s4_reason, "daily_df": daily_df,
             })
 
+        # ── Collect S6 candidate ──────────────────────────────────── #
+        if s6_sig == "PENDING_SHORT" and s6_peak_level > 0:
+            self.candidates.append({
+                "strategy": "S6", "symbol": symbol, "sig": "PENDING_SHORT",
+                "rr": None, "sr_pct": None,
+                "s6_peak_level": s6_peak_level, "s6_sl": s6_sl,
+                "s6_drop_pct": s6_drop_pct, "s6_rsi_at_peak": s6_rsi_at_peak,
+                "s6_reason": s6_reason, "daily_df": daily_df,
+            })
+
         # All strategies deferred — executed by _execute_best_candidate()
         return False
 
@@ -1110,8 +1156,11 @@ class MTFBot:
             strategy = candidate["strategy"]
 
             if sig in ("PENDING_LONG", "PENDING_SHORT"):
-                # S5 PENDING only — queue with rank so entry watcher respects ordering
-                if sym not in self.pending_signals and not st.is_pair_paused(sym):
+                if strategy == "S6":
+                    if sym not in self.s6_watchers and not st.is_pair_paused(sym):
+                        self._queue_s6_watcher(candidate)
+                elif sym not in self.pending_signals and not st.is_pair_paused(sym):
+                    # S5 PENDING — queue with rank so entry watcher respects ordering
                     self._queue_s5_pending(
                         sym, sig, candidate["trigger"], candidate["sl"], candidate["tp"],
                         candidate["ob_low"], candidate["ob_high"], candidate["m15_df"],
@@ -1217,7 +1266,8 @@ class MTFBot:
                 except Exception as e:
                     logger.warning(f"[{ap['strategy']}][{sym}] scale_in snapshot failed: {e}")
             else:
-                logger.info(f"[{ap['strategy']}][{sym}] ⏸️ Scale-in skipped — price {mark_now:.5f} outside entry window")
+                logger.info(f"[{ap['strategy']}][{sym}] ⏸️ Scale-in waiting — price {mark_now:.5f} outside entry window")
+                return  # keep scale_in_pending=True; retry next tick
             ap["scale_in_pending"] = False
         except Exception as e:
             logger.error(f"Scale-in error [{sym}]: {e}")
@@ -1622,6 +1672,98 @@ class MTFBot:
             }
             return True
 
+    # ── S6 Execution ─────────────────────────────────────────────── #
+
+    def _execute_s6(self, w: dict) -> bool:
+        """Execute S6 SHORT after two-phase liquidity sweep is confirmed."""
+        symbol = w["symbol"]
+        if symbol in self.active_positions:
+            return False
+        mark_now = tr.get_mark_price(symbol)
+        sl_price  = mark_now * (1 + config_s6.S6_SL_PCT / config_s6.S6_LEVERAGE)
+        st.add_scan_log(
+            f"[S6][{symbol}] 🔴 SHORT | peak={w['peak_level']:.5f} | "
+            f"fakeout confirmed → entry @ {mark_now:.5f}",
+            "SIGNAL"
+        )
+        trade = tr.open_short(
+            symbol,
+            sl_floor       = sl_price,
+            leverage       = config_s6.S6_LEVERAGE,
+            trade_size_pct = config_s6.S6_TRADE_SIZE_PCT,
+            use_s6_exits   = True,
+        )
+        trade["strategy"]              = "S6"
+        trade["snap_s6_peak"]          = round(w["peak_level"], 8)
+        trade["snap_s6_drop_pct"]      = round(w["drop_pct"] * 100, 2)
+        trade["snap_s6_rsi_at_peak"]   = round(w["rsi_at_peak"], 1)
+        trade["snap_sentiment"]        = self.sentiment.direction if self.sentiment else None
+        trade["snap_sr_clearance_pct"] = None
+        trade["trade_id"] = uuid.uuid4().hex[:8]
+        _log_trade("S6_SHORT", trade)
+        st.add_open_trade(trade)
+        try:
+            snapshot.save_snapshot(
+                trade_id=trade["trade_id"], event="open",
+                symbol=symbol, interval="1D",
+                candles=_df_to_candles(w["daily_df"]),
+                event_price=float(trade.get("entry", 0)),
+            )
+        except Exception as e:
+            logger.warning(f"[S6][{symbol}] snapshot save failed: {e}")
+        if PAPER_MODE: tr.tag_strategy(symbol, "S6")
+        self.active_positions[symbol] = {
+            "side": "SHORT", "strategy": "S6",
+            "box_high": sl_price, "box_low": w["peak_level"],
+            "trade_id": trade["trade_id"],
+        }
+        del self.s6_watchers[symbol]
+        return True
+
+    def _process_s6_watchers(self) -> None:
+        """Check each S6 two-phase watcher against current mark price."""
+        if not self.s6_watchers:
+            return
+        now = time.time()
+        expired = []
+        for symbol, w in list(self.s6_watchers.items()):
+            # Cancel if sentiment flipped bullish
+            if self.sentiment and self.sentiment.direction == "BULLISH":
+                logger.info(f"[S6][{symbol}] 🚫 Watcher cancelled — sentiment flipped BULLISH")
+                st.add_scan_log(f"[S6][{symbol}] 🚫 Watcher cancelled (BULLISH)", "WARN")
+                expired.append(symbol)
+                continue
+            # Expire after 30 days
+            if now - w["detected_at"] > 30 * 86400:
+                logger.info(f"[S6][{symbol}] ⏰ Watcher expired (30 days)")
+                expired.append(symbol)
+                continue
+            if symbol in self.active_positions:
+                expired.append(symbol)
+                continue
+            try:
+                mark_now = tr.get_mark_price(symbol)
+            except Exception as e:
+                logger.debug(f"[S6][{symbol}] mark price fetch failed: {e}")
+                continue
+            peak = w["peak_level"]
+            if not w["fakeout_seen"]:
+                # Phase 1: wait for price to sweep above peak
+                if mark_now > peak:
+                    w["fakeout_seen"] = True
+                    st.patch_pair_state(symbol, {"s6_fakeout_seen": True})
+                    logger.info(f"[S6][{symbol}] 🚀 Phase 1 — fakeout above peak {peak:.5f} @ {mark_now:.5f}")
+                    st.add_scan_log(f"[S6][{symbol}] Phase 1 fakeout seen above {peak:.5f}", "INFO")
+            else:
+                # Phase 2: wait for price to drop back below peak → execute
+                if mark_now < peak:
+                    logger.info(f"[S6][{symbol}] 🎯 Phase 2 — entry triggered below peak {peak:.5f} @ {mark_now:.5f}")
+                    if not st.is_pair_paused(symbol):
+                        self._execute_s6(w)
+                    expired.append(symbol)
+        for symbol in expired:
+            self.s6_watchers.pop(symbol, None)
+
     # ── Entry Watcher ─────────────────────────────────────────────── #
 
     def _queue_s5_pending(self, symbol: str, sig: str, trigger: float, sl: float,
@@ -1686,6 +1828,32 @@ class MTFBot:
         )
         st.add_scan_log(
             f"[S5][{symbol}] 🕐 PENDING {side} | trigger={trigger:.5f} | TP={tp:.5f}", "SIGNAL"
+        )
+
+    def _queue_s6_watcher(self, candidate: dict) -> None:
+        """Register a new S6 two-phase entry watcher for a symbol."""
+        symbol = candidate["symbol"]
+        self.s6_watchers[symbol] = {
+            "strategy":     "S6",
+            "symbol":       symbol,
+            "sig":          "PENDING_SHORT",
+            "peak_level":   candidate["s6_peak_level"],
+            "sl":           candidate["s6_sl"],
+            "drop_pct":     candidate["s6_drop_pct"],
+            "rsi_at_peak":  candidate["s6_rsi_at_peak"],
+            "reason":       candidate["s6_reason"],
+            "fakeout_seen": False,
+            "detected_at":  time.time(),
+            "daily_df":     candidate["daily_df"],
+        }
+        st.patch_pair_state(symbol, {"s6_fakeout_seen": False})
+        logger.info(
+            f"[S6][{symbol}] 🕐 V-formation watcher queued | "
+            f"peak={candidate['s6_peak_level']:.5f} | SL={candidate['s6_sl']:.5f} | "
+            f"drop={candidate['s6_drop_pct']*100:.1f}% | RSI={candidate['s6_rsi_at_peak']:.1f}"
+        )
+        st.add_scan_log(
+            f"[S6][{symbol}] 🕐 V-formation watcher | peak={candidate['s6_peak_level']:.5f}", "SIGNAL"
         )
 
     def _entry_watcher_loop(self) -> None:

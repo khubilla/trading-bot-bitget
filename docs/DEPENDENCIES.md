@@ -28,7 +28,7 @@
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     BITGET BOT (bot.py)                     │
-│  Crypto USDT-margined futures · S1-S5 strategies           │
+│  Crypto USDT-margined futures · S1-S6 strategies           │
 │  Output: state.json, trades.csv (or _paper variants)       │
 └─────────────────────────────────────────────────────────────┘
                               ↓
@@ -50,7 +50,7 @@
 ### Shared Code Contract
 
 **Files shared between bots:**
-- `strategy.py` — all evaluate_s1 through evaluate_s5 functions
+- `strategy.py` — all evaluate_s1 through evaluate_s6 functions
 - `config_s5.py` — S5 parameters (Bitget only; IG now uses per-instrument CONFIG dicts)
 - `paper_trader.py` — simulation engine (used by Bitget bot only in paper mode)
 
@@ -77,10 +77,10 @@ paper_trader.py → paper_state.json (internal simulation state)
 
 ### 2.1 strategy.py
 
-**Purpose:** Contains all strategy evaluation logic (S1-S5) shared by both Bitget and IG bots.
+**Purpose:** Contains all strategy evaluation logic (S1-S6) shared by both Bitget and IG bots. S6 is Bitget-only; ig_bot.py does not call evaluate_s6.
 
 **Used by:**
-- `bot.py` (Bitget bot) — imports and calls evaluate_s1 through evaluate_s5
+- `bot.py` (Bitget bot) — imports and calls evaluate_s1 through evaluate_s6
 - `ig_bot.py` (IG bot) — imports and calls evaluate_s5 only
 - `backtest.py` — historical strategy testing (uses evaluate_s1, s2, s3; does NOT use evaluate_s5)
 
@@ -175,7 +175,24 @@ sed -n '1067,1095p' strategy.py | grep "from config_s5 import"
 sed -n '24,36p' ig_bot.py
 ```
 
-**Note:** Additional strategy functions (evaluate_s1, evaluate_s2, etc.) can be added to this section as needed for comprehensive dependency documentation.
+#### evaluate_s6()
+
+**Signature:**
+```python
+def evaluate_s6(
+    symbol: str,
+    daily_df: pd.DataFrame,
+    allowed_direction: str,
+) -> tuple[str, float, float, float, float, str]:
+    # Returns: (signal, peak_level, sl_price, drop_pct, rsi_at_peak, reason)
+```
+
+**Callers:**
+- `bot.py` — `s6_sig, s6_peak_level, s6_sl, s6_drop_pct, s6_rsi_at_peak, s6_reason = evaluate_s6(symbol, daily_df, allowed_direction)` (Bitget-only; ig_bot.py does NOT call this)
+
+**Breaking changes:**
+- Changing return value count/order → bot.py unpacking fails
+- ig_bot.py does NOT call evaluate_s6; no IG impact
 
 ---
 
@@ -350,13 +367,20 @@ Each key is a symbol (e.g., "BTCUSDT"). Value is a dict with 44 fields:
   "s5_priority_rank": int | None,    # Rank (1=best) set by _execute_best_s5_candidate
   "s5_priority_score": float | None, # Scoring metric for ranking
 
+  # S6 fields
+  "s6_signal": str,           # "PENDING_SHORT" | "HOLD"
+  "s6_reason": str,
+  "s6_peak_level": float | None,  # High of swing-high candle (resistance / entry watch level)
+  "s6_sl": float | None,      # Stop loss: peak_level * (1 + S6_SL_PCT)
+  "s6_fakeout_seen": bool | None, # True once mark_price > peak_level (phase 1 gate)
+
   # Shared S/R fields
   "sr_resistance_pct": float | None,
   "sr_support_pct": float | None,
 
   # Metadata
-  "signal": str,              # Aggregate signal (first non-HOLD from S1-S5)
-  "strategy": str,            # "S1" | "S2" | "S3" | "S4" | "S5"
+  "signal": str,              # Aggregate signal (first non-HOLD from S1-S6)
+  "strategy": str,            # "S1" | "S2" | "S3" | "S4" | "S5" | "S6"
   "updated_at": str,          # ISO timestamp
 }
 ```
@@ -412,7 +436,7 @@ python -c "import json; s=json.load(open('state_paper.json')); ps=s['pair_states
 - `dashboard.py` line 71: Injects CSV history into state (CSV is authoritative source)
 - `optimize.py` line 229: `csv_path.replace("trades.csv", "trades_paper.csv")` — parameter analysis
 
-**Columns (38 fields):**
+**Columns (41 fields):**
 
 ```csv
 timestamp,trade_id,action,symbol,side,qty,entry,sl,tp,
@@ -422,6 +446,7 @@ snap_daily_rsi,
 snap_entry_trigger,snap_sl,snap_rr,
 snap_rsi_peak,snap_spike_body_pct,snap_rsi_div,snap_rsi_div_str,
 snap_s5_ob_low,snap_s5_ob_high,snap_s5_tp,
+snap_s6_peak,snap_s6_drop_pct,snap_s6_rsi_at_peak,
 snap_sr_clearance_pct,
 result,pnl,pnl_pct,exit_reason,exit_price
 ```
@@ -434,6 +459,7 @@ result,pnl,pnl_pct,exit_reason,exit_price
 - **S3 snapshot:** snap_entry_trigger, snap_sl, snap_rr
 - **S4 snapshot:** snap_rsi_peak, snap_spike_body_pct, snap_rsi_div, snap_rsi_div_str
 - **S5 snapshot:** snap_s5_ob_low, snap_s5_ob_high, snap_s5_tp
+- **S6 snapshot:** snap_s6_peak, snap_s6_drop_pct, snap_s6_rsi_at_peak
 - **S/R snapshot:** snap_sr_clearance_pct
 - **Close data:** result, pnl, pnl_pct, exit_reason, exit_price
 
@@ -1223,3 +1249,4 @@ head -1 ig_trades.csv
 - 2026-03-31: Updated Section 4.4 — ig_state.json gained scan_signals (per-instrument S5 signal state) and scan_log (last 20 scan entries, newest first) fields. Written by ig_bot.py _update_scan_state() after each evaluate_s5() call; read by dashboard.py /api/ig/state and rendered by renderIGScanner() + renderIGScanLog() in dashboard.html.
 - 2026-04-02: Updated Section 6.1 — open_long/open_short now fetch actual fill price (openPriceAvg) after market order and use it for all exit-level calculations; `entry` in return dict is now fill price not pre-order mark. refresh_plan_exits gained optional new_trail_trigger param. _do_scale_in now recomputes trail trigger and SL (S2 only) from new avg entry after scale-in.
 - 2026-04-02: Multi-instrument IG bot — updated Section 1 (architecture diagram shows US30+GOLD loop); Section 2.1 (evaluate_s5 cfg param, dual config resolution paths); Section 4.3 (ig_trades.csv 19→20 columns, symbol at index 3, backward-compat note); Section 4.4 (ig_state.json positions/pending_orders dicts, startup migration); Section 5 (new — per-instrument config architecture, CONFIG shape, _validate_instruments()); Section 10.2 (updated config sync guidance); Section 10.3 (patching mechanism removed, cfg=instrument is the new approach, config_ig_s5.py deleted); Section 10.4 (IG CSV column count 19→20).
+- 2026-04-03: S6 V-Formation Liquidity Sweep Short — added evaluate_s6() to Section 2.1 (Bitget-only, 6-tuple return); added S6 fields to Section 4.1 pair_states (s6_signal, s6_reason, s6_peak_level, s6_sl, s6_fakeout_seen); updated trades.csv to 41 columns (+snap_s6_peak, snap_s6_drop_pct, snap_s6_rsi_at_peak); updated Section 1 architecture diagram and signal/strategy fields to include S6.

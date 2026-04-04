@@ -585,6 +585,7 @@ def open_short(
     use_s1_exits: bool     = False,
     use_s4_exits: bool     = False,
     use_s5_exits: bool     = False,
+    use_s6_exits: bool     = False,
     tp_price_abs: float    = 0,
 ) -> dict:
     """
@@ -646,6 +647,13 @@ def open_short(
                              sl_trig, sl_exec,
                              trail_trig, S4_TRAILING_RANGE_PCT)
         tp_trig = trail_trig  # For dashboard display
+    elif use_s6_exits:
+        from config_s6 import S6_TRAILING_TRIGGER_PCT, S6_TRAIL_RANGE_PCT
+        trail_trig = float(_round_price(fill * (1 - S6_TRAILING_TRIGGER_PCT), symbol))
+        ok = _place_s2_exits(symbol, "short", qty,
+                             sl_trig, sl_exec,
+                             trail_trig, S6_TRAIL_RANGE_PCT)
+        tp_trig = trail_trig
     else:
         tp_trig = float(_round_price(fill * (1 - take_profit_pct), symbol))
         tp_exec = float(_round_price(tp_trig * 0.995, symbol))
@@ -662,7 +670,7 @@ def open_short(
     }
     logger.info(
         f"[{symbol}] 🔴 SHORT {leverage}x | qty={qty} entry≈{fill:.5f} "
-        f"SL={sl_trig} | {'✅ S5 exits' if use_s5_exits else '✅ S4 exits' if use_s4_exits else '✅ S1 exits' if use_s1_exits else 'TP='+str(tp_trig)} | {'✅' if ok else '❌ SET MANUALLY'}"
+        f"SL={sl_trig} | {'✅ S5 exits' if use_s5_exits else '✅ S6 exits' if use_s6_exits else '✅ S4 exits' if use_s4_exits else '✅ S1 exits' if use_s1_exits else 'TP='+str(tp_trig)} | {'✅' if ok else '❌ SET MANUALLY'}"
     )
     return result
 

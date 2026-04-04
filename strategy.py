@@ -474,14 +474,16 @@ def evaluate_s2(
 
     # ── Step 1: Big momentum candle anywhere in last 30 days ─── #
     # Search the entire lookback window — includes consolidation candles too
-    lookback_window  = daily_df.iloc[-(S2_BIG_CANDLE_LOOKBACK + 1):-1]
-    big_candle_found = False
-    best_body_pct    = 0.0
+    lookback_window      = daily_df.iloc[-(S2_BIG_CANDLE_LOOKBACK + 1):-1]
+    big_candle_found     = False
+    best_body_pct        = 0.0
+    big_candle_body_top  = 0.0   # body top of most recent big candle (floor for trigger)
     for _, row in lookback_window.iterrows():
         bp = _body_pct(row)
         if bp >= S2_BIG_CANDLE_BODY_PCT:
-            big_candle_found = True
-            best_body_pct = max(best_body_pct, bp)
+            big_candle_found    = True
+            best_body_pct       = max(best_body_pct, bp)
+            big_candle_body_top = max(float(row["close"]), float(row["open"]))
 
     if not big_candle_found:
         return "HOLD", daily_rsi, 0.0, 0.0, (
@@ -510,6 +512,21 @@ def evaluate_s2(
         if mid == 0:
             continue
 
+        # ── Consolidation box must be tight ─────────────────────────
+        # Same wick-ratio rule as the entry trigger: if a candle's upper
+        # wick > S2_LONG_WICK_RATIO * body, its effective top is the body
+        # top (wick rejected); otherwise use the wick high.
+        def _eff_top(r):
+            bt = max(float(r["close"]), float(r["open"]))
+            return bt if _upper_wick(r) > S2_LONG_WICK_RATIO * _body_size(r) else float(r["high"])
+        eff_h = float(window.apply(_eff_top, axis=1).max())
+        eff_l = float(window.apply(lambda r: min(float(r["close"]), float(r["open"])), axis=1).min())
+        if eff_h <= 0:
+            continue
+        range_pct = (eff_h - eff_l) / eff_h
+        if range_pct > S2_CONSOL_RANGE_PCT:
+            continue
+
         # ── Inside-bar consolidation check ──────────────────────
         # All candles in window must be inside the range of the candle
         # just before the window (the "mother candle" after the big move)
@@ -525,11 +542,6 @@ def evaluate_s2(
             )
             if not all_inside:
                 continue
-        else:
-            # Fallback to range_pct if no mother candle
-            range_pct = (wh - wl) / mid
-            if range_pct > S2_CONSOL_RANGE_PCT:
-                continue
 
         # RSI must have been > 70 throughout this consolidation window
         window_rsi = rsi_ser.iloc[-n - 1:-1]
@@ -538,8 +550,8 @@ def evaluate_s2(
 
         # Valid consolidation found
         consol_found = True
-        box_high     = wh
-        box_low      = wl
+        box_high     = eff_h
+        box_low      = eff_l
         consol_size  = n
 
         # Determine entry trigger: above wick or above body of the highest candle
@@ -556,6 +568,14 @@ def evaluate_s2(
             # Short wick = clean high → need to break above the full candle high (wick)
             entry_trigger = float(high_candle["high"]) * (1 + S2_BREAKOUT_BUFFER)
             trigger_type  = "above_wick (short wick — clean high)"
+
+        # Floor the trigger against the big candle's body top — the consolidation
+        # may be a doji/spinning top with a near-zero body sitting below the big
+        # candle's close, which would produce a misleadingly low trigger price.
+        big_candle_floor = big_candle_body_top
+        if entry_trigger < big_candle_floor:
+            entry_trigger = big_candle_floor
+            trigger_type += f" [floored to big candle body {big_candle_body_top:.5f}]"
 
         break  # Use smallest valid window (tightest)
 
@@ -1353,3 +1373,113 @@ def evaluate_s5(
         return "PENDING_SHORT", entry_trigger, sl_price, tp_price, ob_low, ob_high, (
             f"S5 OB {ob_low:.5f}–{ob_high:.5f} | Limit@{entry_trigger:.5f} | TP={tp_price:.5f} R:R={rr:.1f}"
         )
+
+
+# ── S6: V-Formation Liquidity Sweep Short ─────────────────── #
+
+def evaluate_s6(
+    symbol: str,
+    daily_df: pd.DataFrame,
+    allowed_direction: str,
+) -> tuple[Signal, float, float, float, float, str]:
+    """
+    Scans the last S6_SPIKE_LOOKBACK daily candles for a V-formation:
+      1. Swing high: local maximum with RSI > S6_OVERBOUGHT_RSI
+      2. Spike low : price drops >= S6_MIN_DROP_PCT from swing-high's high
+      3. V-pivot   : candle immediately after spike low is bullish
+                     (close > open AND close > spike_low_candle.close)
+
+    Returns (signal, peak_level, sl_price, drop_pct, rsi_at_peak, reason).
+    signal is PENDING_SHORT when a valid V is found in a BEARISH market.
+    """
+    from config_s6 import (
+        S6_ENABLED, S6_RSI_LOOKBACK, S6_SPIKE_LOOKBACK,
+        S6_OVERBOUGHT_RSI, S6_MIN_DROP_PCT, S6_SL_PCT,
+        S6_MIN_RECOVERY_RATIO,
+    )
+
+    _hold = lambda msg: ("HOLD", 0.0, 0.0, 0.0, 0.0, msg)
+
+    if not S6_ENABLED:
+        return _hold("S6 disabled")
+
+    if allowed_direction != "BEARISH":
+        return _hold(f"Direction {allowed_direction!r} — S6 requires BEARISH")
+
+    min_rows = S6_SPIKE_LOOKBACK + S6_RSI_LOOKBACK + 2
+    if len(daily_df) < min_rows:
+        return _hold(f"Insufficient daily candles ({len(daily_df)} < {min_rows})")
+
+    rsi_series = calculate_rsi(daily_df["close"], S6_RSI_LOOKBACK)
+
+    # Work over the lookback window (reset index for safe iloc arithmetic)
+    window  = daily_df.iloc[-(S6_SPIKE_LOOKBACK + 2):].reset_index(drop=True)
+    rsi_win = rsi_series.iloc[-(S6_SPIKE_LOOKBACK + 2):].reset_index(drop=True)
+    n       = len(window)
+
+    # Scan swing highs from most recent to oldest.
+    # i must have at least 1 candle before (i-1) and 2 after (spike + pivot).
+    for i in range(n - 3, 0, -1):
+        # ── Swing-high check ─────────────────────────────── #
+        if not (window["high"].iloc[i] > window["high"].iloc[i - 1] and
+                window["high"].iloc[i] > window["high"].iloc[i + 1]):
+            continue
+        if pd.isna(rsi_win.iloc[i]) or rsi_win.iloc[i] <= S6_OVERBOUGHT_RSI:
+            continue
+
+        peak_level  = float(window["high"].iloc[i])
+        rsi_at_peak = float(rsi_win.iloc[i])
+
+        # ── Spike low: minimum low after swing high ────────── #
+        after_high = window.iloc[i + 1:]
+        spike_abs  = int(after_high["low"].idxmin())   # absolute index in window
+        spike_candle = window.iloc[spike_abs]
+        spike_low    = float(spike_candle["low"])
+
+        # ── Drop magnitude ────────────────────────────────── #
+        drop_pct = (peak_level - spike_low) / peak_level
+        if drop_pct < S6_MIN_DROP_PCT:
+            continue
+
+        # ── Clean downward spike: no candle between high and spike ─ #
+        # exceeds peak_level (ensures price didn't retest peak before dropping)
+        between = window.iloc[i + 1: spike_abs]
+        if not between.empty and float(between["high"].max()) > peak_level:
+            continue
+
+        # ── Pivot candle must exist (spike cannot be the last row) ─ #
+        if spike_abs + 1 >= n:
+            continue
+
+        # ── Direct V-pivot: immediate bullish candle ──────── #
+        pivot = window.iloc[spike_abs + 1]
+        if not (pivot["close"] > pivot["open"] and
+                pivot["close"] > spike_candle["close"]):
+            continue
+
+        # ── Post-pivot guard: fakeout sweep must not have occurred yet ─ #
+        # If any candle after the pivot already exceeded peak_level, the
+        # two-phase watcher handles Phase 2 — evaluate_s6 returns HOLD.
+        post_pivot = window.iloc[spike_abs + 2:]
+        if not post_pivot.empty and float(post_pivot["high"].max()) > peak_level:
+            continue
+
+        # ── Recovery ratio guard: rejects U-bottoms ───────────────── #
+        # Price must have recovered >= S6_MIN_RECOVERY_RATIO of the range
+        # from spike_low back toward peak_level. Pairs still consolidating
+        # at the bottom score near 0%; a clean V scores 20–50%+.
+        current_close   = float(window.iloc[-1]["close"])
+        recovery_ratio  = (current_close - spike_low) / (peak_level - spike_low)
+        if recovery_ratio < S6_MIN_RECOVERY_RATIO:
+            continue
+
+        # ── Valid V-formation found ────────────────────────── #
+        sl_price = peak_level * (1 + S6_SL_PCT)
+        reason   = (
+            f"V-formation ✅ | RSI at peak {rsi_at_peak:.1f} | "
+            f"Drop {drop_pct * 100:.1f}% | Peak {peak_level:.5f} | "
+            f"SL {sl_price:.5f}"
+        )
+        return "PENDING_SHORT", peak_level, sl_price, drop_pct, rsi_at_peak, reason
+
+    return _hold(f"No V-formation in last {S6_SPIKE_LOOKBACK} days")

@@ -297,6 +297,7 @@ class MTFBot:
                 _resumed_ap: dict = {
                     "side": pos["side"], "strategy": strategy,
                     "box_high": 0.0, "box_low": 0.0,
+                    "trade_id": _csv.get("trade_id", "") if _csv else "",
                 }
                 if _pmem.get("initial_qty"):
                     _resumed_ap["initial_qty"] = _pmem["initial_qty"]
@@ -528,6 +529,19 @@ class MTFBot:
                     if remaining_margin:
                         st.update_open_trade_margin(pc["symbol"], remaining_margin)
                     logger.info(f"[{pc['strategy']}][{pc['symbol']}] 📊 Partial logged: PnL={pc['pnl']:+.4f} ({pc['pnl_pct']:+.1f}%)")
+                    try:
+                        _pc_tid = self.active_positions.get(pc["symbol"], {}).get("trade_id", "")
+                        _pc_int = _STRATEGY_CANDLE_INTERVAL.get(pc["strategy"], "15m")
+                        _pc_df  = tr.get_candles(pc["symbol"], _pc_int, limit=100)
+                        if not _pc_df.empty:
+                            snapshot.save_snapshot(
+                                trade_id=_pc_tid, event="partial",
+                                symbol=pc["symbol"], interval=_pc_int,
+                                candles=_df_to_candles(_pc_df),
+                                event_price=round(pc.get("exit", 0.0), 8),
+                            )
+                    except Exception as e:
+                        logger.warning(f"[{pc['strategy']}][{pc['symbol']}] partial snapshot failed: {e}")
 
             # Sync pnl + detect closed positions
             for sym in list(self.active_positions.keys()):
@@ -726,8 +740,7 @@ class MTFBot:
                     if PAPER_MODE:
                         _lc = tr.get_last_close(sym)
                         if _lc:
-                            # Subtract already-logged partial PnL so CSV close row contains only
-                            # the remaining-portion pnl (dashboard and stats rebuild add partial back)
+                            # CSV close row = remaining-portion pnl only (partial already logged separately)
                             last_pnl    = _lc["pnl"] - ap.get("partial_pnl", 0.0)
                             pnl_pct     = _lc["pnl_pct"]
                             exit_reason = _lc["reason"]
@@ -739,16 +752,18 @@ class MTFBot:
                         # Add partial pnl stored during monitoring if realized API not available
                         elif ap.get("partial_pnl"):
                             last_pnl += ap["partial_pnl"]
-                    result = "WIN" if last_pnl >= 0 else "LOSS"
-                    logger.info(f"{'✅' if result == 'WIN' else '❌'} [{sym}] Closed ({result}) PnL={last_pnl:+.4f}")
-                    st.close_trade(sym, result, last_pnl)
+                    # Total PnL for dashboard = close portion + any already-logged partial
+                    total_pnl = last_pnl + ap.get("partial_pnl", 0.0)
+                    result = "WIN" if total_pnl >= 0 else "LOSS"
+                    logger.info(f"{'✅' if result == 'WIN' else '❌'} [{sym}] Closed ({result}) PnL={total_pnl:+.4f}")
+                    st.close_trade(sym, result, total_pnl)
                     if result == "LOSS":
                         st.record_loss(sym)
                         if st.is_pair_paused(sym):
                             logger.info(f"⛔ [{sym}] 3 losses today — paused until tomorrow (UTC)")
                             st.add_scan_log(f"[{sym}] ⛔ Paused for today — 3 losses reached", "WARN")
                     st.add_scan_log(
-                        f"[{ap['strategy']}][{sym}] Closed {result} | PnL={last_pnl:+.4f} USDT", "INFO"
+                        f"[{ap['strategy']}][{sym}] Closed {result} | PnL={total_pnl:+.4f} USDT", "INFO"
                     )
                     try:
                         _exit_price = _lc.get("exit_price") if (PAPER_MODE and _lc) else tr.get_mark_price(sym)
@@ -1004,7 +1019,7 @@ class MTFBot:
             "strategy": "S1" if s1_sig != "HOLD" else ("S2" if s2_sig != "HOLD" else ("S3" if s3_sig != "HOLD" else ("S4" if s4_sig != "HOLD" else ("S6" if s6_sig not in ("HOLD", "") else ("S5" if s5_sig not in ("HOLD", "") else "S1"))))),
             "s2_daily_rsi": s2_rsi,
             "s2_big_candle": s2_rsi > 0 and ("big_candle" in s2_reason or "Big candle" in s2_reason or s2_bh > 0),
-            "s2_coiling":    s2_bl > 0 and s2_bh > 0,
+            "s2_coiling":    s2_bl > 0 and s2_bh > 0 and s2_sig == "HOLD",
             "s2_box_low":    round(s2_bl, 8) if s2_bl > 0 else None,
             "s2_box_high":   round(s2_bh, 8) if s2_bh > 0 else None,
             "sr_resistance_pct":    sr_res_pct,
@@ -1251,7 +1266,8 @@ class MTFBot:
                 except Exception as e:
                     logger.warning(f"[{ap['strategy']}][{sym}] scale_in snapshot failed: {e}")
             else:
-                logger.info(f"[{ap['strategy']}][{sym}] ⏸️ Scale-in skipped — price {mark_now:.5f} outside entry window")
+                logger.info(f"[{ap['strategy']}][{sym}] ⏸️ Scale-in waiting — price {mark_now:.5f} outside entry window")
+                return  # keep scale_in_pending=True; retry next tick
             ap["scale_in_pending"] = False
         except Exception as e:
             logger.error(f"Scale-in error [{sym}]: {e}")

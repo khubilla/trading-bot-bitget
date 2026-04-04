@@ -2413,6 +2413,10 @@ function s2CardHTML(sym, ps) {
           <span class="check-val ${coilClass}">${!bigCandle || !rsiOk ? '—' : coiling ? 'Coiling ✓' : 'Not yet'}</span>
         </div>
         <div class="pair-check">
+          <span class="check-label">Coil range</span>
+          <span class="check-val ${coilClass}">${coiling && ps.s2_box_low && ps.s2_box_high ? `${fmt(ps.s2_box_low,5)} – ${fmt(ps.s2_box_high,5)}` : '—'}</span>
+        </div>
+        <div class="pair-check">
           <span class="check-label">Resistance</span>
           <span class="check-val ${srClass}">${srLabel}</span>
         </div>

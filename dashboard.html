@@ -1477,7 +1477,8 @@ function render(s) {
   if (trades.length === 0) {
     $('active-trades').innerHTML = `<div class="empty-state"><div>◎</div>No open positions</div>`;
   } else {
-    $('active-trades').innerHTML = trades.map(t => {
+    window._activeTrades = trades;
+    $('active-trades').innerHTML = trades.map((t, i) => {
       const side    = (t.side || '').toLowerCase();
       const pnl     = t.unrealised_pnl || 0;
       const margin  = t.margin || 0;
@@ -1504,11 +1505,7 @@ function render(s) {
             <div class="tg-row" style="grid-column:1/-1"><span class="tg-key">Margin</span><span class="tg-val">$${fmt(margin,2)} @ ${lev}x</span></div>
           </div>
           ${t.trade_id ? `<div style="text-align:right;padding:4px 0 0;font-size:11px">
-            <span onclick="openCombinedChart(${JSON.stringify({
-              trade_id: t.trade_id, symbol: t.symbol, strategy: strat,
-              side: t.side, entry: t.entry, sl: t.sl, tp: t.tp,
-              open_at: t.open_at || '',
-            })})" title="Trade chart" style="cursor:pointer;color:var(--muted)">📊</span>
+            <span onclick="event.stopPropagation(); openCombinedChart(window._activeTrades[${i}])" title="Trade chart" style="cursor:pointer;color:var(--muted)">📊</span>
           </div>` : ''}
         </div>`;
     }).join('');
@@ -3476,12 +3473,12 @@ function attachCardClicks() {
         strategy: strat,
       };
       // Set chart strategy context without touching activeTab (pair grid tab stays unchanged)
-      if      (strat === 'S1') chartActiveTab = 's1';
-      else if (strat === 'S2') chartActiveTab = 's2';
-      else if (strat === 'S3') chartActiveTab = 's3';
-      else if (strat === 'S4') chartActiveTab = 's4';
-      else if (strat === 'S5') chartActiveTab = 's5';
-      else if (strat === 'S6') chartActiveTab = 's6';
+      if      (strat === 'S1') { chartActiveTab = 's1'; currentInterval = '3m';  }
+      else if (strat === 'S2') { chartActiveTab = 's2'; currentInterval = '1D';  }
+      else if (strat === 'S3') { chartActiveTab = 's3'; currentInterval = '15m'; }
+      else if (strat === 'S4') { chartActiveTab = 's4'; currentInterval = '1D';  }
+      else if (strat === 'S5') { chartActiveTab = 's5'; currentInterval = '15m'; }
+      else if (strat === 'S6') { chartActiveTab = 's6'; currentInterval = '1D';  }
       openChart(card.dataset.symbol);
     };
   });

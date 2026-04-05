@@ -54,7 +54,7 @@ S5_LEVERAGE         = 10
 S5_TRADE_SIZE_PCT   = 0.04   # 2% of total portfolio as margin
 S5_MIN_RR           = 2.0    # minimum reward:risk ratio (structural target vs SL)
 S5_TRAIL_RANGE_PCT  = 5      # fallback trailing callback % after partial close
-S5_USE_CANDLE_STOPS = True   # after partial close, trail SL to prev completed 15m candle low/high
+S5_USE_SWING_TRAIL  = True   # after partial close, trail SL to 15m swing low/high (SMC style)
 
 # ── S/R Clearance ─────────────────────────────────────────── #
 S5_MIN_SR_CLEARANCE = 0.10   # skip if resistance/support < 10% away

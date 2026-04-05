@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>S3 Swing Trail — How it works</title>
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0e1117; color: #d1d4dc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 24px; }
+  h1 { font-size: 18px; font-weight: 600; color: #fff; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #787b86; margin-bottom: 20px; }
+  #chart { width: 100%; height: 480px; border-radius: 8px; overflow: hidden; }
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 16px;
+    margin-top: 20px; padding: 16px;
+    background: #161b22; border-radius: 8px; border: 1px solid #21262d;
+  }
+  .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .dot { width: 12px; height: 12px; border-radius: 2px; flex-shrink: 0; }
+  .line-sample { width: 24px; height: 3px; flex-shrink: 0; }
+  .steps {
+    margin-top: 20px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .step {
+    background: #161b22; border-radius: 8px; border-left: 3px solid;
+    padding: 12px 14px; font-size: 13px; line-height: 1.5;
+  }
+  .step-num { font-weight: 700; margin-right: 6px; }
+  .step-title { font-weight: 600; }
+  .step-body { color: #8b949e; margin-top: 2px; }
+  code { background: #21262d; border-radius: 3px; padding: 1px 5px; font-size: 11px; color: #79c0ff; }
+</style>
+</head>
+<body>
+
+<h1>S3 Swing Trail — Visual Explainer (LONG)</h1>
+<p class="subtitle">How the bot steps up the Stop Loss using swing pivots — without jumping too early</p>
+
+<div id="chart"></div>
+
+<div class="legend">
+  <div class="legend-item"><div class="dot" style="background:#26a69a"></div> Bullish candle</div>
+  <div class="legend-item"><div class="dot" style="background:#ef5350"></div> Bearish candle</div>
+  <div class="legend-item"><div class="line-sample" style="background:#f0b429"></div> Entry price</div>
+  <div class="legend-item"><div class="line-sample" style="background:#ef5350"></div> Stop Loss (current)</div>
+  <div class="legend-item"><div class="line-sample" style="background:#58a6ff; border-top: 2px dashed #58a6ff; height:0"></div> Ref High (must break before SL moves)</div>
+  <div class="legend-item"><div class="line-sample" style="background:#3fb950"></div> Swing Low (SL snaps here after ref breaks)</div>
+</div>
+
+<div class="steps">
+  <div class="step" style="border-color:#f0b429">
+    <span class="step-num">①</span><span class="step-title">Entry</span>
+    <div class="step-body">Trade opens. Initial SL placed below entry structure. Bot calls <code>find_swing_high_target()</code> → sets <strong>Ref High ①</strong> as the next swing high above price.</div>
+  </div>
+  <div class="step" style="border-color:#58a6ff">
+    <span class="step-num">②</span><span class="step-title">Price approaches Ref High ① — SL does NOT move yet</span>
+    <div class="step-body">Price rises but has not yet broken <strong>Ref High ①</strong>. SL stays at original level. No swing low can qualify until the ref is broken.</div>
+  </div>
+  <div class="step" style="border-color:#a371f7">
+    <span class="step-num">③</span><span class="step-title">Ref High ① broken — waiting for a NEW swing low to form after it</span>
+    <div class="step-body">Price closes above <strong>Ref High ①</strong>. Bot calls <code>find_swing_low_after_ref()</code>. It looks for a pivot low that formed <em>after</em> the Ref High ① candle. None yet → SL still frozen.</div>
+  </div>
+  <div class="step" style="border-color:#3fb950">
+    <span class="step-num">④</span><span class="step-title">Swing Low A confirmed → SL steps up</span>
+    <div class="step-body">Price pulls back, forms a clear pivot low <em>after</em> the Ref High ① candle. Bot sets <code>SL = swing_low_A × (1 − buffer)</code>. <strong>SL advances only upward.</strong> New <strong>Ref High ②</strong> is set above current price.</div>
+  </div>
+  <div class="step" style="border-color:#58a6ff">
+    <span class="step-num">⑤</span><span class="step-title">Ref High ② broken → waiting again</span>
+    <div class="step-body">Price breaks <strong>Ref High ②</strong>. Same wait — bot won't move SL until a new swing low forms <em>after</em> this candle.</div>
+  </div>
+  <div class="step" style="border-color:#3fb950">
+    <span class="step-num">⑥</span><span class="step-title">Swing Low B confirmed → SL steps up again</span>
+    <div class="step-body">New pivot low forms after Ref High ②. SL advances to <code>swing_low_B × (1 − buffer)</code>. Cycle repeats as price continues higher.</div>
+  </div>
+</div>
+
+<script>
+const chart = LightweightCharts.createChart(document.getElementById('chart'), {
+  layout: { background: { color: '#0d1117' }, textColor: '#8b949e' },
+  grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } },
+  rightPriceScale: { borderColor: '#21262d' },
+  timeScale: { borderColor: '#21262d', timeVisible: false, ticksVisible: false },
+  crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+  width: document.getElementById('chart').clientWidth,
+  height: 480,
+});
+
+// ── Synthetic candle data telling the swing trail story ────────────────────
+// Each candle: { time, open, high, low, close }
+// Price range: ~100–200. Entry at t=10, candle 10.
+const candles = [
+  // t=1..8  — pre-entry build-up
+  { time: 1,  o:100, h:103, l: 98, c:102 },
+  { time: 2,  o:102, h:106, l:101, c:105 },
+  { time: 3,  o:105, h:107, l:102, c:104 },
+  { time: 4,  o:104, h:108, l:103, c:107 },
+  { time: 5,  o:107, h:112, l:106, c:111 },  // swing high ① candidate at 112
+  { time: 6,  o:111, h:113, l:108, c:109 },
+  { time: 7,  o:109, h:110, l:106, c:107 },
+  { time: 8,  o:107, h:109, l:105, c:108 },
+  { time: 9,  o:108, h:111, l:107, c:110 },
+  // t=10 — ENTRY candle
+  { time: 10, o:110, h:114, l:109, c:113 },
+  // t=11-14 — price rises, approaching ref_high ① (= swing high at t=5, high=112, already broken at entry)
+  // Let's place ref_high ① at 118 (next swing high above entry 113)
+  { time: 11, o:113, h:116, l:112, c:115 },
+  { time: 12, o:115, h:119, l:114, c:118 },  // ref_high ① = 119 (high here, this is the swing high target)
+  { time: 13, o:118, h:120, l:116, c:117 },  // starts to pull back
+  { time: 14, o:117, h:118, l:115, c:116 },
+  // t=15 — ref_high ① BROKEN: price closes clearly above 119
+  { time: 15, o:116, h:122, l:115, c:121 },  // breaks above 119 ref_high ①
+  // t=16-17 — no swing low yet formed after t=12 (ref_high ① candle)
+  { time: 16, o:121, h:124, l:120, c:123 },
+  // t=17 — SWING LOW A forms (pivot: lower than t=16 and t=18)
+  { time: 17, o:123, h:124, l:118, c:119 },  // swing low A at 118
+  { time: 18, o:119, h:122, l:119, c:121 },  // confirms t=17 was a pivot low
+  // SL steps up to swing_low_A (118) * (1 - buffer) ≈ 117.3 → mark ~117.5 on chart
+  // ref_high ② is set: next swing high above 121 = the high at t=16, which is 124
+  { time: 19, o:121, h:126, l:120, c:125 },
+  { time: 20, o:125, h:129, l:124, c:128 },  // ref_high ② at 129 (this candle is the new swing high target = 129)
+  // t=21 — ref_high ② is the high at t=20 = 129. Now we need price to break it
+  { time: 21, o:128, h:131, l:127, c:130 },  // ref_high ② BROKEN: price > 129
+  { time: 22, o:130, h:132, l:129, c:131 },
+  // t=23 — SWING LOW B forms
+  { time: 23, o:131, h:132, l:125, c:126 },  // swing low B at 125
+  { time: 24, o:126, h:128, l:126, c:127 },  // confirms t=23 pivot
+  // SL steps up to swing_low_B * (1-buf) ≈ 124.4 → show ~124.5
+  { time: 25, o:127, h:131, l:126, c:130 },
+  { time: 26, o:130, h:134, l:129, c:133 },
+];
+
+const series = chart.addCandlestickSeries({
+  upColor: '#26a69a', downColor: '#ef5350',
+  borderUpColor: '#26a69a', borderDownColor: '#ef5350',
+  wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+});
+series.setData(candles.map(c => ({ time: c.time, open: c.o, high: c.h, low: c.l, close: c.c })));
+
+// ── Horizontal lines ────────────────────────────────────────────────────
+function hline(price, color, lineStyle, title) {
+  const s = chart.addLineSeries({ color, lineWidth: 1, lineStyle, lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false });
+  s.setData([{ time: 1, value: price }, { time: 26, value: price }]);
+  // Price label via priceLine
+  s.createPriceLine({ price, color, lineWidth: 1, lineStyle, axisLabelVisible: true, title });
+  return s;
+}
+
+const LS = LightweightCharts.LineStyle;
+
+// Entry
+hline(113, '#f0b429', LS.Solid,  '① Entry 113');
+
+// Initial SL (below entry, below swing low around t=7-8 area, ~104)
+hline(104.5, '#ef5350', LS.Solid, 'SL start');
+
+// Ref High ①  (high of t=12 = 119)
+hline(119, '#58a6ff', LS.Dashed, '② Ref High ①  119');
+
+// Swing Low A (t=17 low = 118) → SL after step 1
+hline(117.3, '#3fb950', LS.Solid, '④ SL → 117.3 (SwLow A)');
+
+// Ref High ② (high of t=20 = 129)
+hline(129, '#a371f7', LS.Dashed, '⑤ Ref High ②  129');
+
+// Swing Low B (t=23 low = 125) → SL after step 2
+hline(124.4, '#3fb950', LS.Solid, '⑥ SL → 124.4 (SwLow B)');
+
+// ── Markers on candles ────────────────────────────────────────────────
+series.setMarkers([
+  { time: 10, position: 'belowBar', color: '#f0b429', shape: 'arrowUp',   text: '① Entry' },
+  { time: 12, position: 'aboveBar', color: '#58a6ff', shape: 'circle',    text: 'Ref High ①' },
+  { time: 15, position: 'aboveBar', color: '#a371f7', shape: 'arrowUp',   text: '③ Ref ① broken' },
+  { time: 17, position: 'belowBar', color: '#3fb950', shape: 'arrowDown', text: '④ SwLow A → SL steps up' },
+  { time: 20, position: 'aboveBar', color: '#58a6ff', shape: 'circle',    text: 'Ref High ②' },
+  { time: 21, position: 'aboveBar', color: '#a371f7', shape: 'arrowUp',   text: '⑤ Ref ② broken' },
+  { time: 23, position: 'belowBar', color: '#3fb950', shape: 'arrowDown', text: '⑥ SwLow B → SL steps up' },
+]);
+
+chart.timeScale().fitContent();
+
+window.addEventListener('resize', () => {
+  chart.applyOptions({ width: document.getElementById('chart').clientWidth });
+});
+</script>
+</body>
+</html>

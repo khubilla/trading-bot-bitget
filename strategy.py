@@ -453,7 +453,7 @@ def evaluate_s2(
     from config_s2 import (
         S2_ENABLED, S2_BIG_CANDLE_BODY_PCT, S2_BIG_CANDLE_LOOKBACK,
         S2_RSI_LONG_THRESH, S2_CONSOL_CANDLES, S2_CONSOL_RANGE_PCT,
-        S2_BREAKOUT_BUFFER, S2_LONG_WICK_RATIO,
+        S2_BREAKOUT_BUFFER, S2_DARVAS_WICK_PCT,
     )
 
     if not S2_ENABLED:
@@ -513,35 +513,27 @@ def evaluate_s2(
             continue
 
         # ── Consolidation box must be tight ─────────────────────────
-        # Same wick-ratio rule as the entry trigger: if a candle's upper
-        # wick > S2_LONG_WICK_RATIO * body, its effective top is the body
-        # top (wick rejected); otherwise use the wick high.
+        # Same Darvas rule as the entry trigger: wick > 5% of body top →
+        # rejected high, use body; otherwise use wick high.
         def _eff_top(r):
             bt = max(float(r["close"]), float(r["open"]))
-            return bt if _upper_wick(r) > S2_LONG_WICK_RATIO * _body_size(r) else float(r["high"])
-        eff_h = float(window.apply(_eff_top, axis=1).max())
-        eff_l = float(window.apply(lambda r: min(float(r["close"]), float(r["open"])), axis=1).min())
+            return bt if _upper_wick(r) > S2_DARVAS_WICK_PCT * bt else float(r["high"])
+        eff_tops = window.apply(_eff_top, axis=1)
+        eff_h    = float(eff_tops.max())
+        eff_l    = float(window.apply(lambda r: min(float(r["close"]), float(r["open"])), axis=1).min())
         if eff_h <= 0:
             continue
         range_pct = (eff_h - eff_l) / eff_h
         if range_pct > S2_CONSOL_RANGE_PCT:
             continue
 
-        # ── Inside-bar consolidation check ──────────────────────
-        # All candles in window must be inside the range of the candle
-        # just before the window (the "mother candle" after the big move)
-        mother = daily_df.iloc[-n - 2] if len(daily_df) > n + 1 else None
-        if mother is not None:
-            mother_h = float(mother["high"])
-            mother_l = float(mother["low"])
-            # Each candle in window must be contained within mother's range
-            all_inside = all(
-                float(row["high"]) <= mother_h * 1.02 and  # 2% tolerance
-                float(row["low"])  >= mother_l * 0.98
-                for _, row in window.iterrows()
-            )
-            if not all_inside:
-                continue
+        # All consolidation candles must close at or below the Darvas box top
+        # (big candle's body top). A close above means price is still running.
+        if not all(float(r["close"]) <= big_candle_body_top for _, r in window.iterrows()):
+            continue
+
+        # Darvas box top = highest eff_top in window (used for entry trigger)
+        box_top_pos = int(eff_tops.values.argmax())
 
         # RSI must have been > 70 throughout this consolidation window
         window_rsi = rsi_ser.iloc[-n - 1:-1]
@@ -554,18 +546,19 @@ def evaluate_s2(
         box_low      = eff_l
         consol_size  = n
 
-        # Determine entry trigger: above wick or above body of the highest candle
-        high_candle = window.loc[window["high"].idxmax()]
-        uw   = _upper_wick(high_candle)
-        body = _body_size(high_candle)
+        # Determine entry trigger: Darvas Box top rule
+        # wick > 5% of body top → rejected high, buy above body
+        # wick ≤ 5% of body top → clean high, buy above wick
+        high_candle = window.iloc[box_top_pos]
+        uw       = _upper_wick(high_candle)
+        body_top = max(float(high_candle["close"]), float(high_candle["open"]))
 
-        if uw > S2_LONG_WICK_RATIO * body:
-            # Long wick = price was rejected there → only need body breakout
-            body_top      = max(float(high_candle["close"]), float(high_candle["open"]))
+        if uw > S2_DARVAS_WICK_PCT * body_top:
+            # Wick > 5% of body top = price rejected there → buy above body
             entry_trigger = body_top * (1 + S2_BREAKOUT_BUFFER)
             trigger_type  = "above_body (long wick — ignore wick)"
         else:
-            # Short wick = clean high → need to break above the full candle high (wick)
+            # Wick ≤ 5% = clean Darvas box top → buy above wick high
             entry_trigger = float(high_candle["high"]) * (1 + S2_BREAKOUT_BUFFER)
             trigger_type  = "above_wick (short wick — clean high)"
 
@@ -576,6 +569,11 @@ def evaluate_s2(
         if entry_trigger < big_candle_floor:
             entry_trigger = big_candle_floor
             trigger_type += f" [floored to big candle body {big_candle_body_top:.5f}]"
+            # Coil boundaries must reflect the floored trigger range, not the
+            # raw sub-trigger consolidation box (which would mislead the display
+            # and the scale-in window check).
+            box_high = entry_trigger
+            box_low  = entry_trigger * (1 - S2_CONSOL_RANGE_PCT)
 
         break  # Use smallest valid window (tightest)
 
@@ -997,6 +995,66 @@ def find_swing_low_target(
             if lo < below_price:
                 candidates.append(lo)
     return max(candidates) if candidates else None
+
+
+def find_swing_low_after_ref(
+    df: pd.DataFrame,
+    below_price: float,
+    ref_high: float,
+    lookback: int = 50,
+) -> float | None:
+    """
+    Finds a confirmed swing low that formed AFTER the candle containing `ref_high`.
+    Used for LONG swing trail: after the ref high is broken, wait for a new swing
+    low to form — only then advance the SL.
+    Returns the highest qualifying swing low, or None if none has formed yet.
+    """
+    candles = df.iloc[-lookback:].reset_index(drop=True)
+    n = len(candles)
+    ref_idx = None
+    for i in range(n - 1, -1, -1):
+        if abs(float(candles.iloc[i]["high"]) - ref_high) < 1e-9:
+            ref_idx = i
+            break
+    if ref_idx is None:
+        return None
+    candidates = []
+    for i in range(max(ref_idx + 1, 1), n - 1):
+        lo = float(candles.iloc[i]["low"])
+        if lo < float(candles.iloc[i - 1]["low"]) and lo < float(candles.iloc[i + 1]["low"]):
+            if lo < below_price:
+                candidates.append(lo)
+    return max(candidates) if candidates else None
+
+
+def find_swing_high_after_ref(
+    df: pd.DataFrame,
+    above_price: float,
+    ref_low: float,
+    lookback: int = 50,
+) -> float | None:
+    """
+    Symmetric for SHORT: finds a confirmed swing high that formed AFTER the candle
+    containing `ref_low`. After the ref low is broken downward, wait for a new swing
+    high to form — only then advance the SL.
+    Returns the lowest qualifying swing high, or None if none has formed yet.
+    """
+    candles = df.iloc[-lookback:].reset_index(drop=True)
+    n = len(candles)
+    ref_idx = None
+    for i in range(n - 1, -1, -1):
+        if abs(float(candles.iloc[i]["low"]) - ref_low) < 1e-9:
+            ref_idx = i
+            break
+    if ref_idx is None:
+        return None
+    candidates = []
+    for i in range(max(ref_idx + 1, 1), n - 1):
+        hi = float(candles.iloc[i]["high"])
+        if hi > float(candles.iloc[i - 1]["high"]) and hi > float(candles.iloc[i + 1]["high"]):
+            if hi > above_price:
+                candidates.append(hi)
+    return min(candidates) if candidates else None
 
 
 def find_fvg(

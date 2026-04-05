@@ -29,6 +29,7 @@ from strategy import (
     find_nearest_resistance, find_nearest_support, find_spike_base,
     find_bullish_ob, find_bearish_ob,
     find_swing_high_target, find_swing_low_target,
+    find_swing_low_after_ref, find_swing_high_after_ref,
 )
 from claude_filter import claude_approve
 import snapshot
@@ -299,6 +300,10 @@ class MTFBot:
                     "box_high": 0.0, "box_low": 0.0,
                     "trade_id": _csv.get("trade_id", "") if _csv else "",
                 }
+                try:
+                    _resumed_ap["sl"] = float(_sl)
+                except (TypeError, ValueError):
+                    pass
                 if _pmem.get("initial_qty"):
                     _resumed_ap["initial_qty"] = _pmem["initial_qty"]
                 if _pmem.get("partial_logged"):
@@ -317,6 +322,7 @@ class MTFBot:
                     "leverage":  pos.get("leverage", 0),
                     "strategy":  strategy,
                     "opened_at": _opened,
+                    "trade_id":  _csv.get("trade_id", "") if _csv else "",
                 })
             if existing:
                 st.add_scan_log(f"Resumed {len(existing)} position(s)", "WARN")
@@ -612,68 +618,96 @@ class MTFBot:
                         self._do_scale_in(sym, ap)
 
                     # S5 Structural Swing Trail — trail SL to nearest swing high/low (SMC style)
-                    if config_s5.S5_USE_CANDLE_STOPS and ap.get("strategy") == "S5":
+                    if config_s5.S5_USE_SWING_TRAIL and ap.get("strategy") == "S5":
                         try:
-                            cs_df   = tr.get_candles(sym, config_s5.S5_LTF_INTERVAL, limit=config_s5.S5_SWING_LOOKBACK + 5)
+                            _lk5    = config_s5.S5_SWING_LOOKBACK
+                            cs_df   = tr.get_candles(sym, config_s5.S5_LTF_INTERVAL, limit=_lk5 + 5)
                             mark_s5 = tr.get_mark_price(sym)
                             if not cs_df.empty and len(cs_df) >= 3:
                                 if ap["side"] == "LONG":
-                                    raw = find_swing_low_target(cs_df, mark_s5, lookback=config_s5.S5_SWING_LOOKBACK)
-                                    swing_sl = raw * (1 - config_s5.S5_SL_BUFFER_PCT) if raw else None
-                                    hold_s   = "long"
+                                    _ref = ap.get("swing_trail_ref")
+                                    if _ref is None:
+                                        ap["swing_trail_ref"] = find_swing_high_target(cs_df, mark_s5, lookback=_lk5)
+                                    elif mark_s5 >= _ref:
+                                        raw = find_swing_low_after_ref(cs_df, mark_s5, _ref, lookback=_lk5)
+                                        if raw:
+                                            swing_sl = raw * (1 - config_s5.S5_SL_BUFFER_PCT)
+                                            if swing_sl > ap.get("sl", 0) and tr.update_position_sl(sym, swing_sl, hold_side="long"):
+                                                ap["sl"] = swing_sl
+                                                st.update_open_trade_sl(sym, swing_sl)
+                                                ap["swing_trail_ref"] = find_swing_high_target(cs_df, mark_s5, lookback=_lk5)
+                                                logger.info(f"[S5][{sym}] 📍 Swing trail: SL → {swing_sl:.5f} (swing low after ref high {_ref:.5f})")
                                 else:
-                                    raw = find_swing_high_target(cs_df, mark_s5, lookback=config_s5.S5_SWING_LOOKBACK)
-                                    swing_sl = raw * (1 + config_s5.S5_SL_BUFFER_PCT) if raw else None
-                                    hold_s   = "short"
-                                if swing_sl is not None and tr.update_position_sl(sym, swing_sl, hold_side=hold_s):
-                                    ap["sl"] = swing_sl
-                                    st.update_open_trade_sl(sym, swing_sl)
-                                    logger.info(
-                                        f"[S5][{sym}] 📍 Swing trail: SL → {swing_sl:.5f} "
-                                        f"(swing {'low' if ap['side'] == 'LONG' else 'high'} ±{config_s5.S5_SL_BUFFER_PCT*100:.1f}% buffer)"
-                                    )
+                                    _ref = ap.get("swing_trail_ref")
+                                    if _ref is None:
+                                        ap["swing_trail_ref"] = find_swing_low_target(cs_df, mark_s5, lookback=_lk5)
+                                    elif mark_s5 <= _ref:
+                                        raw = find_swing_high_after_ref(cs_df, mark_s5, _ref, lookback=_lk5)
+                                        if raw:
+                                            swing_sl = raw * (1 + config_s5.S5_SL_BUFFER_PCT)
+                                            if swing_sl < ap.get("sl", float("inf")) and tr.update_position_sl(sym, swing_sl, hold_side="short"):
+                                                ap["sl"] = swing_sl
+                                                st.update_open_trade_sl(sym, swing_sl)
+                                                ap["swing_trail_ref"] = find_swing_low_target(cs_df, mark_s5, lookback=_lk5)
+                                                logger.info(f"[S5][{sym}] 📍 Swing trail: SL → {swing_sl:.5f} (swing high after ref low {_ref:.5f})")
                         except Exception as e:
                             logger.error(f"Swing trail error [{sym}]: {e}")
 
                     # S1 Swing Trail — trail SL to nearest 3m swing low/high
                     if config_s1.S1_USE_SWING_TRAIL and ap.get("strategy") == "S1":
                         try:
-                            cs_df   = tr.get_candles(sym, config_s1.LTF_INTERVAL, limit=config_s1.S1_SWING_LOOKBACK + 5)
+                            _lk1    = config_s1.S1_SWING_LOOKBACK
+                            cs_df   = tr.get_candles(sym, config_s1.LTF_INTERVAL, limit=_lk1 + 5)
                             mark_s1 = tr.get_mark_price(sym)
                             if not cs_df.empty and len(cs_df) >= 3:
                                 if ap["side"] == "LONG":
-                                    raw      = find_swing_low_target(cs_df, mark_s1, lookback=config_s1.S1_SWING_LOOKBACK)
-                                    swing_sl = raw * (1 - config_s1.S1_SL_BUFFER_PCT) if raw else None
-                                    hold_s   = "long"
-                                    # Guard: only step SL up
-                                    if swing_sl is not None and swing_sl <= ap.get("sl", 0):
-                                        swing_sl = None
+                                    _ref = ap.get("swing_trail_ref")
+                                    if _ref is None:
+                                        ap["swing_trail_ref"] = find_swing_high_target(cs_df, mark_s1, lookback=_lk1)
+                                    elif mark_s1 >= _ref:
+                                        raw = find_swing_low_after_ref(cs_df, mark_s1, _ref, lookback=_lk1)
+                                        if raw:
+                                            swing_sl = raw * (1 - config_s1.S1_SL_BUFFER_PCT)
+                                            if swing_sl > ap.get("sl", 0) and tr.update_position_sl(sym, swing_sl, hold_side="long"):
+                                                ap["sl"] = swing_sl
+                                                st.update_open_trade_sl(sym, swing_sl)
+                                                ap["swing_trail_ref"] = find_swing_high_target(cs_df, mark_s1, lookback=_lk1)
+                                                logger.info(f"[S1][{sym}] 📍 Swing trail: SL → {swing_sl:.5f} (3m swing low after ref high {_ref:.5f})")
                                 else:
-                                    raw      = find_swing_high_target(cs_df, mark_s1, lookback=config_s1.S1_SWING_LOOKBACK)
-                                    swing_sl = raw * (1 + config_s1.S1_SL_BUFFER_PCT) if raw else None
-                                    hold_s   = "short"
-                                    # Guard: only step SL down
-                                    if swing_sl is not None and swing_sl >= ap.get("sl", float("inf")):
-                                        swing_sl = None
-                                if swing_sl is not None and tr.update_position_sl(sym, swing_sl, hold_side=hold_s):
-                                    ap["sl"] = swing_sl
-                                    st.update_open_trade_sl(sym, swing_sl)
-                                    logger.info(f"[S1][{sym}] 📍 Swing trail: SL → {swing_sl:.5f} (3m swing {'low' if ap['side'] == 'LONG' else 'high'})")
+                                    _ref = ap.get("swing_trail_ref")
+                                    if _ref is None:
+                                        ap["swing_trail_ref"] = find_swing_low_target(cs_df, mark_s1, lookback=_lk1)
+                                    elif mark_s1 <= _ref:
+                                        raw = find_swing_high_after_ref(cs_df, mark_s1, _ref, lookback=_lk1)
+                                        if raw:
+                                            swing_sl = raw * (1 + config_s1.S1_SL_BUFFER_PCT)
+                                            if swing_sl < ap.get("sl", float("inf")) and tr.update_position_sl(sym, swing_sl, hold_side="short"):
+                                                ap["sl"] = swing_sl
+                                                st.update_open_trade_sl(sym, swing_sl)
+                                                ap["swing_trail_ref"] = find_swing_low_target(cs_df, mark_s1, lookback=_lk1)
+                                                logger.info(f"[S1][{sym}] 📍 Swing trail: SL → {swing_sl:.5f} (3m swing high after ref low {_ref:.5f})")
                         except Exception as e:
                             logger.error(f"[S1] Swing trail error [{sym}]: {e}")
 
                     # S3 Structural Swing Trail — trail SL to nearest 15m swing low from entry
                     if config_s3.S3_USE_SWING_TRAIL and ap.get("strategy") == "S3":
                         try:
-                            cs_df   = tr.get_candles(sym, config_s3.S3_LTF_INTERVAL, limit=config_s3.S3_SWING_LOOKBACK + 5)
+                            _lk3    = config_s3.S3_SWING_LOOKBACK
+                            cs_df   = tr.get_candles(sym, config_s3.S3_LTF_INTERVAL, limit=_lk3 + 5)
                             mark_s3 = tr.get_mark_price(sym)
                             if not cs_df.empty and len(cs_df) >= 3:
-                                raw = find_swing_low_target(cs_df, mark_s3, lookback=config_s3.S3_SWING_LOOKBACK)
-                                swing_sl = raw * (1 - config_s3.S3_SL_BUFFER_PCT) if raw else None
-                                if swing_sl is not None and tr.update_position_sl(sym, swing_sl, hold_side="long"):
-                                    ap["sl"] = swing_sl
-                                    st.update_open_trade_sl(sym, swing_sl)
-                                    logger.info(f"[S3][{sym}] 📍 Swing trail: SL → {swing_sl:.5f} (nearest 15m swing low)")
+                                _ref = ap.get("swing_trail_ref")
+                                if _ref is None:
+                                    ap["swing_trail_ref"] = find_swing_high_target(cs_df, mark_s3, lookback=_lk3)
+                                elif mark_s3 >= _ref:
+                                    raw = find_swing_low_after_ref(cs_df, mark_s3, _ref, lookback=_lk3)
+                                    if raw:
+                                        swing_sl = raw * (1 - config_s3.S3_SL_BUFFER_PCT)
+                                        if swing_sl > ap.get("sl", 0) and tr.update_position_sl(sym, swing_sl, hold_side="long"):
+                                            ap["sl"] = swing_sl
+                                            st.update_open_trade_sl(sym, swing_sl)
+                                            ap["swing_trail_ref"] = find_swing_high_target(cs_df, mark_s3, lookback=_lk3)
+                                            logger.info(f"[S3][{sym}] 📍 Swing trail: SL → {swing_sl:.5f} (15m swing low after ref high {_ref:.5f})")
                         except Exception as e:
                             logger.error(f"[S3] Swing trail error [{sym}]: {e}")
 
@@ -688,12 +722,19 @@ class MTFBot:
                                 cs_df   = tr.get_candles(sym, "1D", limit=config_s2.S2_SWING_LOOKBACK + 5)
                                 mark_s2 = tr.get_mark_price(sym)
                                 if not cs_df.empty and len(cs_df) >= 3:
-                                    raw = find_swing_low_target(cs_df, mark_s2, lookback=config_s2.S2_SWING_LOOKBACK)
-                                    swing_sl = raw * (1 - config_s2.S2_STOP_LOSS_PCT) if raw else None
-                                    if swing_sl is not None and tr.update_position_sl(sym, swing_sl, hold_side="long"):
-                                        ap["sl"] = swing_sl
-                                        st.update_open_trade_sl(sym, swing_sl)
-                                        logger.info(f"[S2][{sym}] 📍 Swing trail: SL → {swing_sl:.5f} (nearest daily swing low)")
+                                    _lk2 = config_s2.S2_SWING_LOOKBACK
+                                    _ref = ap.get("swing_trail_ref")
+                                    if _ref is None:
+                                        ap["swing_trail_ref"] = find_swing_high_target(cs_df, mark_s2, lookback=_lk2)
+                                    elif mark_s2 >= _ref:
+                                        raw = find_swing_low_after_ref(cs_df, mark_s2, _ref, lookback=_lk2)
+                                        if raw:
+                                            swing_sl = raw * (1 - config_s2.S2_STOP_LOSS_PCT)
+                                            if swing_sl > ap.get("sl", 0) and tr.update_position_sl(sym, swing_sl, hold_side="long"):
+                                                ap["sl"] = swing_sl
+                                                st.update_open_trade_sl(sym, swing_sl)
+                                                ap["swing_trail_ref"] = find_swing_high_target(cs_df, mark_s2, lookback=_lk2)
+                                                logger.info(f"[S2][{sym}] 📍 Swing trail: SL → {swing_sl:.5f} (daily swing low after ref high {_ref:.5f})")
                             except Exception as e:
                                 logger.error(f"[S2] Swing trail error [{sym}]: {e}")
 
@@ -708,12 +749,20 @@ class MTFBot:
                                 cs_df   = tr.get_candles(sym, "1D", limit=config_s4.S4_SWING_LOOKBACK + 5)
                                 mark_s4 = tr.get_mark_price(sym)
                                 if not cs_df.empty and len(cs_df) >= 3:
-                                    raw = find_swing_high_target(cs_df, mark_s4, lookback=config_s4.S4_SWING_LOOKBACK)
-                                    swing_sl = raw * (1 + config_s4.S4_ENTRY_BUFFER) if raw else None
-                                    if swing_sl is not None and tr.update_position_sl(sym, swing_sl, hold_side="short"):
-                                        ap["sl"] = swing_sl
-                                        st.update_open_trade_sl(sym, swing_sl)
-                                        logger.info(f"[S4][{sym}] 📍 Swing trail: SL → {swing_sl:.5f} (nearest daily swing high)")
+                                    _lk4 = config_s4.S4_SWING_LOOKBACK
+                                    _ref = ap.get("swing_trail_ref")
+                                    if _ref is None:
+                                        ap["swing_trail_ref"] = find_swing_low_target(cs_df, mark_s4, lookback=_lk4)
+                                    elif mark_s4 <= _ref:
+                                        raw = find_swing_high_after_ref(cs_df, mark_s4, _ref, lookback=_lk4)
+                                        if raw:
+                                            swing_sl = raw * (1 + config_s4.S4_ENTRY_BUFFER)
+                                            # Guard: only step SL down (SHORT)
+                                            if swing_sl < ap.get("sl", float("inf")) and tr.update_position_sl(sym, swing_sl, hold_side="short"):
+                                                ap["sl"] = swing_sl
+                                                st.update_open_trade_sl(sym, swing_sl)
+                                                ap["swing_trail_ref"] = find_swing_low_target(cs_df, mark_s4, lookback=_lk4)
+                                                logger.info(f"[S4][{sym}] 📍 Swing trail: SL → {swing_sl:.5f} (daily swing high after ref low {_ref:.5f})")
                             except Exception as e:
                                 logger.error(f"[S4] Swing trail error [{sym}]: {e}")
 

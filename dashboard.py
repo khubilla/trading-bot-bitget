@@ -485,48 +485,52 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
             sig, daily_rsi, bh, bl, reason = evaluate_s2(symbol, df)
             # Also check consolidation even if no full signal yet
             # Try to find coil regardless of big candle (for chart display)
-            from config_s2 import S2_CONSOL_CANDLES, S2_CONSOL_RANGE_PCT, S2_RSI_LONG_THRESH, S2_BREAKOUT_BUFFER, S2_LONG_WICK_RATIO
+            from config_s2 import S2_CONSOL_CANDLES, S2_CONSOL_RANGE_PCT, S2_RSI_LONG_THRESH, S2_BREAKOUT_BUFFER, S2_DARVAS_WICK_PCT
             daily_rsi_val = float(rsi_full.iloc[-1])
             if daily_rsi_val > S2_RSI_LONG_THRESH:
                 for n in range(1, S2_CONSOL_CANDLES + 1):
                     window = df.iloc[-n - 1:-1]
                     if len(window) < n:
                         continue
-                    wh  = float(window["high"].max())
                     wl  = float(window["low"].min())
-                    mid = (wh + wl) / 2
-                    if mid == 0:
+                    # Darvas Box: eff_top per candle (same rule as strategy.py)
+                    def _db_eff_top(r):
+                        bt = max(float(r["close"]), float(r["open"]))
+                        return bt if (float(r["high"]) - bt) > S2_DARVAS_WICK_PCT * bt else float(r["high"])
+                    eff_tops    = window.apply(_db_eff_top, axis=1)
+                    eff_h       = float(eff_tops.max())
+                    if eff_h <= 0:
                         continue
-                    # Inside-bar check: all candles must be within mother candle's range
-                    mother = df.iloc[-n - 2] if len(df) > n + 1 else None
-                    if mother is not None:
-                        mh = float(mother["high"])
-                        ml = float(mother["low"])
-                        all_inside = all(
-                            float(r["high"]) <= mh * 1.02 and float(r["low"]) >= ml * 0.98
-                            for _, r in window.iterrows()
-                        )
-                        if not all_inside:
-                            continue
-                    else:
-                        if (wh - wl) / mid > S2_CONSOL_RANGE_PCT:
-                            continue
+                    range_pct = (eff_h - float(window.apply(lambda r: min(float(r["close"]), float(r["open"])), axis=1).min())) / eff_h
+                    if range_pct > S2_CONSOL_RANGE_PCT:
+                        continue
+                    # Box top must not be the last candle — need consolidation after it
+                    box_top_pos = int(eff_tops.values.argmax())
+                    if box_top_pos == len(window) - 1:
+                        continue
+                    if not all(float(r["high"]) <= eff_h * 1.02 for _, r in window.iloc[box_top_pos + 1:].iterrows()):
+                        continue
                     window_rsi = rsi_full.iloc[-n - 1:-1]
                     if not (window_rsi > S2_RSI_LONG_THRESH).all():
                         continue
                     # Found coil
                     is_coil  = True
-                    box_high = round(wh, 8)
+                    box_high = round(eff_h, 8)
                     box_low  = round(wl, 8)
-                    # Entry trigger
-                    high_candle = window.loc[window["high"].idxmax()]
-                    uw   = float(high_candle["high"]) - max(float(high_candle["close"]), float(high_candle["open"]))
-                    body = abs(float(high_candle["close"]) - float(high_candle["open"]))
-                    if uw > S2_LONG_WICK_RATIO * body:
-                        body_top      = max(float(high_candle["close"]), float(high_candle["open"]))
+                    # Entry trigger using Darvas box top candle
+                    high_candle = window.iloc[box_top_pos]
+                    body_top = max(float(high_candle["close"]), float(high_candle["open"]))
+                    uw       = float(high_candle["high"]) - body_top
+                    if uw > S2_DARVAS_WICK_PCT * body_top:
                         breakout_long = round(body_top * (1 + S2_BREAKOUT_BUFFER), 8)
                     else:
                         breakout_long = round(float(high_candle["high"]) * (1 + S2_BREAKOUT_BUFFER), 8)
+                    # If evaluate_s2 returned a floored box (trigger floored to big candle
+                    # body top), use those boundaries so chart matches the scanner card.
+                    if bh and bh > box_high:
+                        box_high      = round(bh, 8)
+                        box_low       = round(bl, 8)
+                        breakout_long = round(bh, 8)
                     break
         else:
             # S1 — RSI-zone aware consolidation on 3m

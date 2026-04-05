@@ -21,8 +21,8 @@ S2_CONSOL_RANGE_PCT = 0.15       # Max 15% range to count as tight consolidation
 
 # ── Entry Trigger ────────────────────────────────────────── #
 S2_BREAKOUT_BUFFER  = 0.01     # 1% buffer above box high for entry
-S2_LONG_WICK_RATIO  = 2.0        # Wick is "long" if wick > 2x body → buy above wick
-                                  # Otherwise → buy above body close
+S2_DARVAS_WICK_PCT  = 0.05     # Darvas Box top: wick > 5% of body top → rejected, use body
+                                  # wick ≤ 5% of body top → clean high, use wick
 S2_MAX_ENTRY_BUFFER = 0.04       # Skip entry if price already >4% above breakout trigger
 
 # ── Risk Management ──────────────────────────────────────── #

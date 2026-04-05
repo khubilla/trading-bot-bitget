@@ -9,6 +9,10 @@ S6_RSI_LOOKBACK      = 14      # RSI period
 S6_SPIKE_LOOKBACK    = 30      # Max daily candles to scan for a V-formation
 S6_OVERBOUGHT_RSI    = 70.0    # Minimum RSI at the swing-high candle
 S6_MIN_DROP_PCT      = 0.30    # Minimum drop from peak_level to spike low (30%)
+S6_MIN_RECOVERY_RATIO = 0.25   # Current close must have recovered >= 25% of the way
+                                # from spike_low back toward peak_level.
+                                # Rejects U-bottoms still consolidating near the low.
+                                # Formula: (close - spike_low) / (peak - spike_low) >= 0.15
 
 # ── Exit levels ───────────────────────────────────────────── #
 S6_SL_PCT               = 0.50  # SL = fill * (1 + 0.50), i.e. 50% above entry

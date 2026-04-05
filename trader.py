@@ -145,6 +145,7 @@ def get_all_open_positions() -> dict[str, dict]:
             "entry_price":    float(p.get("openPriceAvg", 0)),
             "qty":            total,
             "unrealised_pnl": float(p.get("unrealizedPL", 0)),
+            "mark_price":     float(p.get("markPrice", 0)),
             "margin":         float(p.get("marginSize", 0)),
             "leverage":       int(float(p.get("leverage", 0) or 0)),
         }
@@ -483,6 +484,7 @@ def open_long(
     stop_loss_pct: float   = STOP_LOSS_PCT,
     use_s1_exits: bool     = False,
     use_s2_exits: bool     = False,
+    use_s3_exits: bool     = False,
     use_s5_exits: bool     = False,
     tp_price_abs: float    = 0,
 ) -> dict:
@@ -491,8 +493,8 @@ def open_long(
     Exit levels (SL, TP, trail trigger) are computed from the actual fill price
     fetched after the market order fills (falls back to pre-order mark if the
     position is not yet visible).
-    S2/S3: partial TP at +100% margin + trailing stop on remaining 50%
-      S2 uses box_low for SL; S3 passes sl_floor (pre-computed pivot SL)
+    S2: fixed SL at fill * (1 - stop_loss_pct); partial TP + trailing stop.
+    S3: structural SL at max(sl_floor, fill * (1 - stop_loss_pct)); same TP/trail.
     """
     import time as _t
     balance  = get_usdt_balance()
@@ -540,14 +542,23 @@ def open_long(
     elif use_s2_exits:
         from config_s2 import S2_TRAILING_TRIGGER_PCT, S2_TRAILING_RANGE_PCT
         trail_trig = float(_round_price(fill * (1 + S2_TRAILING_TRIGGER_PCT), symbol))
-        raw_sl = sl_floor if sl_floor > 0 else box_low * 0.999
-        sl_cap = fill * (1 - stop_loss_pct)   # cap: never risk more than stop_loss_pct (e.g. 5% = -50% at 10x)
-        sl_trig = float(_round_price(max(raw_sl, sl_cap), symbol))
-        sl_exec = float(_round_price(sl_trig * 0.995, symbol))
+        sl_trig    = float(_round_price(fill * (1 - stop_loss_pct), symbol))
+        sl_exec    = float(_round_price(sl_trig * 0.995, symbol))
         ok = _place_s2_exits(symbol, "long", qty,
                              sl_trig, sl_exec,
                              trail_trig, S2_TRAILING_RANGE_PCT)
         tp_trig = trail_trig  # For dashboard display: show where partial TP triggers
+    elif use_s3_exits:
+        from config_s3 import S3_TRAILING_TRIGGER_PCT, S3_TRAILING_RANGE_PCT
+        trail_trig = float(_round_price(fill * (1 + S3_TRAILING_TRIGGER_PCT), symbol))
+        raw_sl  = sl_floor if sl_floor > 0 else box_low * 0.999
+        sl_cap  = fill * (1 - stop_loss_pct)
+        sl_trig = float(_round_price(max(raw_sl, sl_cap), symbol))
+        sl_exec = float(_round_price(sl_trig * 0.995, symbol))
+        ok = _place_s2_exits(symbol, "long", qty,
+                             sl_trig, sl_exec,
+                             trail_trig, S3_TRAILING_RANGE_PCT)
+        tp_trig = trail_trig
     else:
         tp_trig = float(_round_price(fill * (1 + take_profit_pct), symbol))
         tp_exec = float(_round_price(tp_trig * 1.005, symbol))
@@ -570,7 +581,7 @@ def open_long(
     }
     logger.info(
         f"[{symbol}] 🟢 LONG {leverage}x | qty={qty} entry≈{fill:.5f} "
-        f"SL={sl_trig} | {'✅ S1 exits' if use_s1_exits else '✅ S2 exits' if use_s2_exits else 'TP='+str(tp_trig)} | {'✅' if ok else '❌ SET MANUALLY'}"
+        f"SL={sl_trig} | {'✅ S1 exits' if use_s1_exits else '✅ S2 exits' if use_s2_exits else '✅ S3 exits' if use_s3_exits else 'TP='+str(tp_trig)} | {'✅' if ok else '❌ SET MANUALLY'}"
     )
     return result
 
@@ -705,7 +716,9 @@ def scale_in_short(symbol: str, additional_trade_size_pct: float, leverage: int)
 
 def get_history_position(symbol: str,
                          open_time_iso: str | None = None,
-                         entry_price:   float | None = None) -> dict | None:
+                         entry_price:   float | None = None,
+                         retries: int = 3,
+                         retry_delay: float = 1.5) -> dict | None:
     """
     Find a specific closed position in Bitget history-position API.
 
@@ -714,69 +727,87 @@ def get_history_position(symbol: str,
     This handles multiple successive closes on the same symbol during a
     disconnect. Falls back to the most recent record if no match found.
 
+    Retries up to `retries` times when achievedProfits == 0 (API not settled).
     Returns {pnl, exit_price, close_time} or None on error / no record.
     """
-    try:
-        params: dict = {"productType": PRODUCT_TYPE, "symbol": symbol, "limit": "10"}
-        if open_time_iso:
-            try:
-                from datetime import datetime, timezone
-                dt = datetime.fromisoformat(open_time_iso)
-                params["startTime"] = str(int(dt.timestamp() * 1000))
-            except Exception:
-                pass
-        data    = bc.get("/api/v2/mix/position/history-position", params=params)
-        records = data.get("data", {}).get("list") or data.get("data", [])
-        if not records:
+    import time as _time
+    for attempt in range(retries):
+        try:
+            params: dict = {"productType": PRODUCT_TYPE, "symbol": symbol, "limit": "10"}
+            if open_time_iso:
+                try:
+                    from datetime import datetime, timezone
+                    dt = datetime.fromisoformat(open_time_iso)
+                    params["startTime"] = str(int(dt.timestamp() * 1000))
+                except Exception:
+                    pass
+            data    = bc.get("/api/v2/mix/position/history-position", params=params)
+            records = data.get("data", {}).get("list") or data.get("data", [])
+            if not records:
+                return None
+
+            # Match by entry price when provided; otherwise take the first record
+            def _entry_of(r: dict) -> float:
+                v = r.get("openAvgPrice") or r.get("openAveragePrice") or 0
+                return float(v)
+
+            if entry_price:
+                records = sorted(records, key=lambda r: abs(_entry_of(r) - entry_price))
+
+            r   = records[0]
+            pnl = float(r.get("achievedProfits", 0) or 0)
+            if pnl == 0:
+                if attempt < retries - 1:
+                    logger.debug(f"[{symbol}] get_history_position: achievedProfits=0, retrying ({attempt+1}/{retries-1})")
+                    _time.sleep(retry_delay)
+                    continue
+                logger.warning(f"[{symbol}] get_history_position: still 0 after {retries} attempts")
+                return None
+
+            close_avg = r.get("closeAvgPrice") or r.get("closeAveragePrice")
+            close_ts  = r.get("closeTime") or r.get("updateTime")
+            close_dt  = None
+            if close_ts:
+                try:
+                    from datetime import datetime, timezone
+                    close_dt = datetime.fromtimestamp(int(close_ts) / 1000, tz=timezone.utc).isoformat()
+                except Exception:
+                    pass
+            return {
+                "pnl":        pnl,
+                "exit_price": float(close_avg) if close_avg else None,
+                "close_time": close_dt,
+            }
+        except Exception as e:
+            logger.warning(f"[{symbol}] get_history_position error: {e}")
             return None
-
-        # Match by entry price when provided; otherwise take the first record
-        def _entry_of(r: dict) -> float:
-            v = r.get("openAvgPrice") or r.get("openAveragePrice") or 0
-            return float(v)
-
-        if entry_price:
-            records = sorted(records, key=lambda r: abs(_entry_of(r) - entry_price))
-
-        r   = records[0]
-        pnl = float(r.get("achievedProfits", 0) or 0)
-        if pnl == 0:
-            return None  # API hasn't settled yet
-
-        close_avg = r.get("closeAvgPrice") or r.get("closeAveragePrice")
-        close_ts  = r.get("closeTime") or r.get("updateTime")
-        close_dt  = None
-        if close_ts:
-            try:
-                from datetime import datetime, timezone
-                close_dt = datetime.fromtimestamp(int(close_ts) / 1000, tz=timezone.utc).isoformat()
-            except Exception:
-                pass
-        return {
-            "pnl":        pnl,
-            "exit_price": float(close_avg) if close_avg else None,
-            "close_time": close_dt,
-        }
-    except Exception as e:
-        logger.warning(f"[{symbol}] get_history_position error: {e}")
     return None
 
 
-def get_realized_pnl(symbol: str) -> float | None:
+def get_realized_pnl(symbol: str, retries: int = 3, retry_delay: float = 1.5) -> float | None:
     """
     Query the most recent closed position's realized PnL from Bitget.
     Used after a trailing stop fires to get accurate combined P/L.
-    Returns None on error.
+    Retries up to `retries` times if achievedProfits is 0 (API not settled yet).
+    Returns None on error or if still unsettled after all retries.
     """
-    try:
-        data = bc.get("/api/v2/mix/position/history-position",
-                      params={"productType": PRODUCT_TYPE, "symbol": symbol, "limit": "1"})
-        records = data.get("data", {}).get("list") or data.get("data", [])
-        if records:
-            profits = float(records[0].get("achievedProfits", 0) or 0)
-            return profits if profits != 0 else None  # 0 likely means API hasn't settled yet
-    except Exception as e:
-        logger.warning(f"[{symbol}] get_realized_pnl error: {e}")
+    import time as _time
+    for attempt in range(retries):
+        try:
+            data = bc.get("/api/v2/mix/position/history-position",
+                          params={"productType": PRODUCT_TYPE, "symbol": symbol, "limit": "1"})
+            records = data.get("data", {}).get("list") or data.get("data", [])
+            if records:
+                profits = float(records[0].get("achievedProfits", 0) or 0)
+                if profits != 0:
+                    return profits
+                if attempt < retries - 1:
+                    logger.debug(f"[{symbol}] get_realized_pnl: achievedProfits=0, retrying ({attempt+1}/{retries-1})")
+                    _time.sleep(retry_delay)
+        except Exception as e:
+            logger.warning(f"[{symbol}] get_realized_pnl error: {e}")
+            return None
+    logger.warning(f"[{symbol}] get_realized_pnl: still 0 after {retries} attempts, falling back to unrealised_pnl")
     return None
 
 

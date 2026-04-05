@@ -1486,6 +1486,7 @@ function render(s) {
       const pnlPct  = margin > 0 ? (pnl / margin * 100) : 0;
       const pnlClass = pnl >= 0 ? 'pos' : 'neg';
       const strat   = t.strategy || '';
+      const curPrice = t.mark_price || ((s.pair_states || {})[t.symbol] || {}).price;
       return `
         <div class="trade-row ${side}" style="cursor:pointer"
           data-symbol="${t.symbol}" data-strategy="${strat}"
@@ -1499,6 +1500,7 @@ function render(s) {
           </div>
           <div class="trade-grid">
             <div class="tg-row"><span class="tg-key">Entry</span><span class="tg-val">$${fmtPrice(t.entry)}</span></div>
+            <div class="tg-row"><span class="tg-key">Price</span><span class="tg-val">${curPrice != null ? '$' + fmtPrice(curPrice) : '—'}</span></div>
             <div class="tg-row"><span class="tg-key">uPnL</span><span class="tg-val ${pnlClass}">${fmtUSD(pnl)} <span style="font-size:9px;opacity:0.8">(${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)</span></span></div>
             <div class="tg-row"><span class="tg-key">SL</span><span class="tg-val neg">$${fmtPrice(t.sl)}</span></div>
             <div class="tg-row"><span class="tg-key">TP</span><span class="tg-val pos">$${fmtPrice(t.tp)}</span></div>
@@ -2407,7 +2409,7 @@ function s2CardHTML(sym, ps) {
         </div>
         <div class="pair-check">
           <span class="check-label">Coiling</span>
-          <span class="check-val ${coilClass}">${!bigCandle || !rsiOk ? '—' : coiling ? 'Coiling ✓' : 'Not yet'}</span>
+          <span class="check-val ${coilClass}">${!bigCandle || !rsiOk ? '—' : coiling ? 'Coiling ✓' : sig === 'LONG' ? 'Broke out ✓' : 'Not yet'}</span>
         </div>
         <div class="pair-check">
           <span class="check-label">Coil range</span>

@@ -455,6 +455,10 @@ class MTFBot:
                     # Re-sync stats to include any newly logged closes
                     _rebuild_stats_from_csv(config.TRADE_LOG)
 
+            # Always rebuild stats from CSV as source of truth (catches any
+            # manual CSV corrections or PnL accounting fixes across restarts)
+            _rebuild_stats_from_csv(config.TRADE_LOG)
+
         except Exception as e:
             logger.error(f"Startup sync error: {e}")
 
@@ -554,6 +558,8 @@ class MTFBot:
                 if sym in exchange_positions:
                     pos = exchange_positions[sym]
                     st.update_open_trade_pnl(sym, pos["unrealised_pnl"])
+                    if pos.get("mark_price"):
+                        st.update_open_trade_mark_price(sym, pos["mark_price"])
                     # Backfill margin/leverage for positions resumed at startup
                     _ot_live = st.get_open_trade(sym)
                     if _ot_live and not _ot_live.get("margin") and pos.get("margin"):
@@ -794,11 +800,19 @@ class MTFBot:
                             pnl_pct     = _lc["pnl_pct"]
                             exit_reason = _lc["reason"]
                     else:
-                        # Live: use Bitget realized P/L if available (combines partial + final)
-                        realized = tr.get_realized_pnl(sym)
-                        if realized is not None:
-                            last_pnl = realized
-                        # Add partial pnl stored during monitoring if realized API not available
+                        # Live: use Bitget history-position for accurate PnL + actual fill price.
+                        # achievedProfits = total for the full position (partial + final combined).
+                        # Subtract already-logged partial so last_pnl = remaining portion only,
+                        # matching what the startup reconcile path does.
+                        _ot_entry = float(_ot.get("entry") or 0) if _ot else None
+                        _ot_opened = _ot.get("opened_at") if _ot else None
+                        _hist = tr.get_history_position(sym,
+                                                        open_time_iso=_ot_opened,
+                                                        entry_price=_ot_entry)
+                        if _hist is not None:
+                            last_pnl   = _hist["pnl"] - ap.get("partial_pnl", 0.0)
+                            _exit_price = _hist.get("exit_price")  # actual closeAvgPrice from Bitget
+                        # API unsettled after retries: fall back to unrealised_pnl
                         elif ap.get("partial_pnl"):
                             last_pnl += ap["partial_pnl"]
                     # Total PnL for dashboard = close portion + any already-logged partial
@@ -814,10 +828,17 @@ class MTFBot:
                     st.add_scan_log(
                         f"[{ap['strategy']}][{sym}] Closed {result} | PnL={total_pnl:+.4f} USDT", "INFO"
                     )
-                    try:
-                        _exit_price = _lc.get("exit_price") if (PAPER_MODE and _lc) else tr.get_mark_price(sym)
-                    except Exception:
-                        _exit_price = None
+                    if PAPER_MODE and _lc:
+                        try:
+                            _exit_price = _lc.get("exit_price")
+                        except Exception:
+                            _exit_price = None
+                    elif _exit_price is None:
+                        # Fallback: mark price if history API returned nothing
+                        try:
+                            _exit_price = tr.get_mark_price(sym)
+                        except Exception:
+                            _exit_price = None
                     if not PAPER_MODE and pnl_pct is None and _exit_price and _ot:
                         _entry = float(_ot.get("entry") or 0)
                         _lev   = float(_ot.get("leverage") or 1)
@@ -1268,16 +1289,42 @@ class MTFBot:
                     updated_pos = tr.get_all_open_positions().get(sym, {})
                     if updated_pos.get("margin"):
                         st.update_open_trade_margin(sym, updated_pos["margin"])
+                    # Update initial_qty so partial detection uses new total
+                    new_total_qty = float(updated_pos.get("qty", 0))
+                    if new_total_qty > 0:
+                        ap["initial_qty"] = new_total_qty
+                        st.update_position_memory(sym, initial_qty=new_total_qty)
                 else:
                     # Refresh plan exits (profit_plan + moving_plan) to reflect new total qty.
                     # SL (place-pos-tpsl) is position-level and auto-scales on Bitget.
                     try:
                         import time as _si_t
-                        _si_t.sleep(1.5)  # allow fill to settle
+                        # Poll until Bitget's position API reflects the scale-in fill.
+                        # A fixed sleep is unreliable — the REST endpoint can lag several
+                        # seconds behind the actual fill. We wait up to 12 seconds.
+                        _pre_qty = float(ap.get("qty", 0))
+                        _deadline = _si_t.time() + 12
+                        _scale_pos = {}
+                        while _si_t.time() < _deadline:
+                            _scale_pos = tr.get_all_open_positions().get(sym, {})
+                            if float(_scale_pos.get("qty", 0)) > _pre_qty:
+                                break
+                            _si_t.sleep(1.5)
+                        else:
+                            logger.warning(
+                                f"[{ap['strategy']}][{sym}] ⚠️ Position qty did not increase "
+                                f"after scale-in within 12s (pre={_pre_qty})"
+                            )
                         hold_side = "long" if ap["side"] == "LONG" else "short"
                         # Recompute trail trigger and SL from new average entry after scale-in
                         new_trig = 0.0
-                        _scale_pos = tr.get_all_open_positions().get(sym, {})
+                        # Update initial_qty and margin to reflect scaled-in position
+                        _new_qty = float(_scale_pos.get("qty", 0))
+                        if _new_qty > 0:
+                            ap["initial_qty"] = _new_qty
+                            st.update_position_memory(sym, initial_qty=_new_qty)
+                        if _scale_pos.get("margin"):
+                            st.update_open_trade_margin(sym, float(_scale_pos["margin"]))
                         new_avg = _scale_pos.get("entry_price", 0)
                         if new_avg > 0:
                             if ap["strategy"] == "S2":
@@ -1488,7 +1535,7 @@ class MTFBot:
                 return False
         st.add_scan_log(f"[S3][{symbol}] 🟢 LONG | {c['s3_reason']} | rank=#{c['priority_rank']}", "SIGNAL")
         trade = tr.open_long(symbol, sl_floor=c["s3_sl"], leverage=config_s3.S3_LEVERAGE,
-                             trade_size_pct=config_s3.S3_TRADE_SIZE_PCT, use_s2_exits=True)
+                             trade_size_pct=config_s3.S3_TRADE_SIZE_PCT, use_s3_exits=True)
         trade["strategy"] = "S3"
         trade["snap_adx"]              = round(c["s3_adx"], 1) if c["s3_adx"] else None
         trade["snap_entry_trigger"]    = round(s3_trigger, 8)
@@ -1915,9 +1962,21 @@ class MTFBot:
             # Paper position monitor — run _check_exit at 4s resolution
             if PAPER_MODE and self.active_positions:
                 try:
-                    tr.get_all_open_positions()   # internally calls _check_exit for each position
+                    positions = tr.get_all_open_positions()   # internally calls _check_exit for each position
+                    for sym, pos in positions.items():
+                        if pos.get("mark_price"):
+                            st.update_open_trade_mark_price(sym, pos["mark_price"])
                 except Exception as e:
                     logger.debug(f"Paper position poll error: {e}")
+
+            # Live mode: refresh mark price for active trades at 4s resolution
+            elif not PAPER_MODE and self.active_positions:
+                for sym in list(self.active_positions.keys()):
+                    try:
+                        mark = tr.get_mark_price(sym)
+                        st.update_open_trade_mark_price(sym, mark)
+                    except Exception:
+                        pass
 
             if self.pending_signals:
                 try:

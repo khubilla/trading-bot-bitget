@@ -91,10 +91,10 @@ class TestPlaceS5ExitsQty:
         assert sizes[1] == "105.0"   # hard TP (rest)
 
 
-# ── open_long SL cap ──────────────────────────────────────────────── #
+# ── open_long S2 exits (fixed SL) ────────────────────────────────── #
 
-class TestOpenLongSLCap:
-    """box_low far below entry must be capped at stop_loss_pct below fill price."""
+class TestOpenLongS2Exits:
+    """S2: SL is always fixed at fill * (1 - stop_loss_pct), regardless of box_low."""
 
     def _setup(self, monkeypatch, mark=0.15324, box_low=0.10000, stop_loss_pct=0.05, fill=None):
         sl_calls = []
@@ -124,6 +124,71 @@ class TestOpenLongSLCap:
         )
         return result, sl_calls
 
+    def test_sl_is_fixed_regardless_of_box_low(self, monkeypatch):
+        """box_low close to entry — S2 SL ignores box_low, always fixed at 5% below fill."""
+        result, _ = self._setup(monkeypatch, mark=0.15324, box_low=0.15020, stop_loss_pct=0.05)
+        expected_sl = 0.15324 * 0.95
+        assert abs(result["sl"] - expected_sl) < 0.0001, (
+            f"SL {result['sl']} != fixed {expected_sl}"
+        )
+
+    def test_sl_fixed_when_box_low_far(self, monkeypatch):
+        """box_low 35% below entry — S2 SL still fixed at 5% below fill."""
+        result, _ = self._setup(monkeypatch, mark=0.15324, box_low=0.10000, stop_loss_pct=0.05)
+        expected_sl = 0.15324 * 0.95
+        assert abs(result["sl"] - expected_sl) < 0.0001, (
+            f"SL {result['sl']} != fixed {expected_sl}"
+        )
+
+    def test_fill_price_used_for_trail_trigger(self, monkeypatch):
+        """When fill price differs from mark, trail trigger must be based on fill."""
+        result, sl_calls = self._setup(monkeypatch, mark=0.15, box_low=0.14, fill=0.151)
+        expected_trail = round(0.151 * 1.10, 5)
+        profit_plan = next(c for c in sl_calls if c.get("planType") == "profit_plan")
+        actual_trig = float(profit_plan["triggerPrice"])
+        assert abs(actual_trig - expected_trail) < 0.0001, (
+            f"trail trigger {actual_trig} != expected {expected_trail}"
+        )
+
+    def test_fill_price_returned_as_entry(self, monkeypatch):
+        """Return dict entry field must be the fill price, not the pre-order mark."""
+        result, _ = self._setup(monkeypatch, mark=0.15, box_low=0.14, fill=0.152)
+        assert result["entry"] == 0.152, f"entry {result['entry']} != fill 0.152"
+
+
+# ── open_long S3 exits (structural SL) ───────────────────────────── #
+
+class TestOpenLongS3Exits:
+    """S3: SL follows structural level (sl_floor / box_low), capped at stop_loss_pct."""
+
+    def _setup(self, monkeypatch, mark=0.15324, box_low=0.10000, stop_loss_pct=0.05, fill=None):
+        sl_calls = []
+        monkeypatch.setattr(trader, "_sym_info", _sym_info_stousdt)
+        monkeypatch.setattr(trader, "get_usdt_balance", lambda: 100.0)
+        monkeypatch.setattr(trader, "_get_total_equity", lambda: 100.0)
+        monkeypatch.setattr(trader, "get_mark_price", lambda sym: mark)
+        monkeypatch.setattr(trader, "set_leverage", lambda *a: None)
+        monkeypatch.setattr(bc, "post", lambda path, p: sl_calls.append(p) or {})
+
+        _fill = fill if fill is not None else mark
+        monkeypatch.setattr(trader, "get_all_open_positions",
+            lambda: {"STOUSDT": {"entry_price": _fill, "qty": 65.0}})
+
+        import time
+        monkeypatch.setattr(time, "sleep", lambda s: None)
+
+        import config_s3
+        monkeypatch.setattr(config_s3, "S3_TRAILING_TRIGGER_PCT", 0.10)
+        monkeypatch.setattr(config_s3, "S3_TRAILING_RANGE_PCT", 10)
+
+        result = trader.open_long(
+            "STOUSDT", box_low=box_low,
+            leverage=10, trade_size_pct=0.1,
+            stop_loss_pct=stop_loss_pct,
+            use_s3_exits=True,
+        )
+        return result, sl_calls
+
     def test_box_low_too_far_sl_capped(self, monkeypatch):
         """box_low 35% below entry — SL must be capped at 5% below fill price."""
         result, _ = self._setup(monkeypatch, mark=0.15324, box_low=0.10000, stop_loss_pct=0.05)
@@ -141,7 +206,6 @@ class TestOpenLongSLCap:
     def test_fill_price_used_for_trail_trigger(self, monkeypatch):
         """When fill price differs from mark, trail trigger must be based on fill."""
         result, sl_calls = self._setup(monkeypatch, mark=0.15, box_low=0.14, fill=0.151)
-        # trail_trig = fill * 1.10 = 0.1661
         expected_trail = round(0.151 * 1.10, 5)
         profit_plan = next(c for c in sl_calls if c.get("planType") == "profit_plan")
         actual_trig = float(profit_plan["triggerPrice"])
@@ -168,15 +232,15 @@ class TestOpenLongSLCap:
         import time
         monkeypatch.setattr(time, "sleep", lambda s: None)
 
-        import config_s2
-        monkeypatch.setattr(config_s2, "S2_TRAILING_TRIGGER_PCT", 0.10)
-        monkeypatch.setattr(config_s2, "S2_TRAILING_RANGE_PCT", 10)
+        import config_s3
+        monkeypatch.setattr(config_s3, "S3_TRAILING_TRIGGER_PCT", 0.10)
+        monkeypatch.setattr(config_s3, "S3_TRAILING_RANGE_PCT", 10)
 
         result = trader.open_long(
             "STOUSDT", box_low=0.14,
             leverage=10, trade_size_pct=0.1,
             stop_loss_pct=0.05,
-            use_s2_exits=True,
+            use_s3_exits=True,
         )
         # Falls back to mark=0.15 → trail_trig = 0.15 * 1.10 = 0.165
         assert result["entry"] == 0.15

@@ -29,7 +29,7 @@ S2_MAX_ENTRY_BUFFER = 0.04       # Skip entry if price already >4% above breakou
 S2_LEVERAGE         = 10
 S2_TRADE_SIZE_PCT   = 0.04       # 4% of total portfolio as margin
 S2_TAKE_PROFIT_PCT  = 0.10       # 10% price move = +100% margin at 10x
-S2_STOP_LOSS_PCT    = 0.05       # 5% price move = -50% margin at 10x (via box_low SL)
+S2_STOP_LOSS_PCT    = 0.05       # 5% price move = -50% margin at 10x (fixed from entry)
 
 S2_TRAILING_TRIGGER_PCT = 0.10   # activation trigger: close 50% when price is 10% above entry
 S2_TRAILING_RANGE_PCT   = 10     # 10% trailing callback = 100% margin at 10x

@@ -118,6 +118,7 @@ def get_all_open_positions() -> dict:
             "qty":            qty,
             "entry_price":    entry,
             "unrealised_pnl": round(upnl, 6),
+            "mark_price":     round(mark, 8),
             # Extra fields for dashboard resume (paper only)
             "sl":        pos.get("sl"),
             "tp":        pos.get("tp"),
@@ -138,6 +139,7 @@ def open_long(
     take_profit_pct: float = 0.05,
     stop_loss_pct: float   = 0.015,
     use_s2_exits: bool     = False,
+    use_s3_exits: bool     = False,
     use_s5_exits: bool     = False,
     tp_price_abs: float    = 0,
 ) -> dict:
@@ -156,7 +158,13 @@ def open_long(
     if use_s2_exits:
         from config_s2 import S2_TRAILING_TRIGGER_PCT, S2_TRAILING_RANGE_PCT
         trail_trigger = mark * (1 + S2_TRAILING_TRIGGER_PCT)
-        trail_range   = S2_TRAILING_RANGE_PCT   # stored as int e.g. 10 = 10%
+        trail_range   = S2_TRAILING_RANGE_PCT
+        tp_price      = trail_trigger
+        use_trailing  = True
+    elif use_s3_exits:
+        from config_s3 import S3_TRAILING_TRIGGER_PCT, S3_TRAILING_RANGE_PCT
+        trail_trigger = mark * (1 + S3_TRAILING_TRIGGER_PCT)
+        trail_range   = S3_TRAILING_RANGE_PCT
         tp_price      = trail_trigger
         use_trailing  = True
 

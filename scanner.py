@@ -92,6 +92,7 @@ def get_qualified_pairs_and_sentiment() -> tuple[list[str], SentimentResult]:
         # Floor at 0.5% so near-zero movers don't get zeroed out
         # but still contribute less than strong movers
         magnitude = max(abs(price_change), 0.5)
+        # weight    = vol_usdt * magnitude
         weight    = vol_usdt * magnitude
 
         if price_change > 0:

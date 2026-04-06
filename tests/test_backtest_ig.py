@@ -146,3 +146,56 @@ def test_fetch_yf_normalises_columns(monkeypatch):
     df_15m = bt._fetch_yf("US30", "15m")
     assert list(df_15m.columns) == ["ts", "open", "high", "low", "close", "vol"]
     assert df_15m.iloc[0]["ts"] > 1_000_000_000_000
+
+
+# ── Session helper tests ───────────────────────────────────────────── #
+
+def _ts_et(year, month, day, hour, minute, tz_str="America/New_York"):
+    """Return Unix ms for a given ET wall-clock time."""
+    import pytz as _pytz
+    et = _pytz.timezone(tz_str)
+    dt = et.localize(datetime(year, month, day, hour, minute))
+    return int(dt.timestamp() * 1000)
+
+
+def test_in_session_weekday_within_window():
+    import backtest_ig as bt
+    inst = _dummy_instrument()
+    inst["session_start"] = (9, 30)
+    inst["session_end"]   = (16, 0)
+    ts = _ts_et(2026, 3, 10, 10, 0)  # Monday 10:00 ET
+    assert bt._in_session(ts, inst) is True
+
+
+def test_not_in_session_before_open():
+    import backtest_ig as bt
+    inst = _dummy_instrument()
+    inst["session_start"] = (9, 30)
+    inst["session_end"]   = (16, 0)
+    ts = _ts_et(2026, 3, 10, 8, 0)  # Monday 08:00 ET — before open
+    assert bt._in_session(ts, inst) is False
+
+
+def test_not_in_session_weekend():
+    import backtest_ig as bt
+    inst = _dummy_instrument()
+    inst["session_start"] = (9, 30)
+    inst["session_end"]   = (16, 0)
+    ts = _ts_et(2026, 3, 7, 10, 0)  # Saturday
+    assert bt._in_session(ts, inst) is False
+
+
+def test_is_session_end_at_boundary():
+    import backtest_ig as bt
+    inst = _dummy_instrument()
+    inst["session_end"] = (23, 59)
+    ts = _ts_et(2026, 3, 10, 23, 59)
+    assert bt._is_session_end(ts, inst) is True
+
+
+def test_not_session_end_before_boundary():
+    import backtest_ig as bt
+    inst = _dummy_instrument()
+    inst["session_end"] = (23, 59)
+    ts = _ts_et(2026, 3, 10, 10, 0)
+    assert bt._is_session_end(ts, inst) is False

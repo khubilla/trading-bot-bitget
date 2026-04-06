@@ -99,3 +99,50 @@ def test_load_candles_no_fetch_missing_cache_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(bt, "_CACHE_DIR", tmp_path)
     with pytest.raises(FileNotFoundError):
         bt.load_candles("US30", "15m", no_fetch=True)
+
+
+def test_fetch_yf_normalises_columns(monkeypatch):
+    """_fetch_yf returns ts/open/high/low/close/vol with ts as int ms."""
+    import backtest_ig as bt
+    import pandas as pd
+
+    # Simulate daily bar (yfinance returns 'Date' as datetime.date)
+    import datetime
+    fake_daily = pd.DataFrame({
+        "Date": [datetime.date(2024, 1, 2)],
+        "Open": [38000.0],
+        "High": [38500.0],
+        "Low":  [37500.0],
+        "Close":[38200.0],
+        "Volume":[100000],
+    })
+    fake_daily["Date"] = pd.to_datetime(fake_daily["Date"])
+
+    # Simulate intraday bar (yfinance returns 'Datetime' as tz-aware Timestamp)
+    fake_intra = pd.DataFrame({
+        "Datetime": pd.to_datetime(["2024-01-02 10:00:00+00:00"]),
+        "Open":  [38000.0],
+        "High":  [38500.0],
+        "Low":   [37500.0],
+        "Close": [38200.0],
+        "Volume":[5000],
+    })
+
+    class FakeTicker:
+        def __init__(self, sym): pass
+        def history(self, period, interval):
+            return fake_daily if interval == "1d" else fake_intra
+
+    import yfinance as yf
+    monkeypatch.setattr(yf, "Ticker", FakeTicker)
+
+    # Test daily
+    df_1d = bt._fetch_yf("US30", "1D")
+    assert list(df_1d.columns) == ["ts", "open", "high", "low", "close", "vol"]
+    assert isinstance(int(df_1d.iloc[0]["ts"]), int)
+    assert df_1d.iloc[0]["ts"] > 1_000_000_000_000  # sanity: ms since epoch
+
+    # Test intraday
+    df_15m = bt._fetch_yf("US30", "15m")
+    assert list(df_15m.columns) == ["ts", "open", "high", "low", "close", "vol"]
+    assert df_15m.iloc[0]["ts"] > 1_000_000_000_000

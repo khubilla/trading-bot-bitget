@@ -57,7 +57,7 @@ def _fetch_yf(name: str, interval: str) -> pd.DataFrame:
         return pd.DataFrame()
     raw = raw.reset_index()
     ts_col = "Datetime" if "Datetime" in raw.columns else "Date"
-    raw["ts"] = raw[ts_col].apply(lambda x: int(x.timestamp() * 1000))
+    raw["ts"] = pd.to_datetime(raw[ts_col], utc=True).dt.as_unit("ms").astype("int64")
     raw = raw.rename(columns={"Open": "open", "High": "high",
                                "Low": "low", "Close": "close", "Volume": "vol"})
     df = raw[["ts", "open", "high", "low", "close", "vol"]].copy()

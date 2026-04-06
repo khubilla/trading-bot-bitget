@@ -65,50 +65,43 @@ def test_save_overwrites_existing(tmp_path, monkeypatch):
 
 
 def test_bot_saves_open_snapshot_s3(tmp_path, monkeypatch):
-    """_execute_s3 must save an 'open' snapshot after opening a trade."""
+    """_fire_s3 must save an 'open' snapshot after opening a trade."""
     import snapshot
-    import pandas as pd
 
     monkeypatch.setattr(snapshot, "_SNAP_DIR", tmp_path)
 
     import bot
     import config_s3
 
-    # Build minimal m15_df with "ts" column (25 rows, same values for simplicity)
-    df = pd.DataFrame([
-        {"ts": 1743296100000 + i * 900_000,
-         "open": 15.71, "high": 15.82, "low": 15.68,
-         "close": 15.80, "vol": 12340.5}
-        for i in range(25)
-    ])
-
     monkeypatch.setattr(bot.tr, "open_long", lambda *a, **kw: {
         "symbol": "RIVERUSDT", "side": "LONG", "qty": 4.0,
         "entry": 15.756, "sl": 14.99, "tp": 17.332,
         "margin": 6.3385, "leverage": 10,
     })
-    monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: 15.756)
     monkeypatch.setattr(bot.st, "add_open_trade", lambda t: None)
     monkeypatch.setattr(bot.st, "add_scan_log", lambda *a, **kw: None)
+    monkeypatch.setattr(bot.st, "get_pair_state", lambda sym: {})
+    monkeypatch.setattr(bot.st, "save_pending_signals", lambda *a, **kw: None)
     monkeypatch.setattr(bot, "_log_trade", lambda action, details: None)
-    monkeypatch.setattr(bot, "find_nearest_resistance", lambda *a, **kw: None)
     monkeypatch.setattr(bot, "claude_approve", lambda *a, **kw: {"approved": True})
 
     b = object.__new__(bot.MTFBot)
     b.active_positions = {}
+    b.pending_signals = {}
     b.sentiment = type("S", (), {"direction": "BULLISH"})()
 
-    c = {
-        "symbol": "RIVERUSDT",
-        "s3_trigger": 15.756,
-        "m15_df": df,
-        "s3_adx": 46.6,
+    sig = {
+        "strategy": "S3",
+        "trigger": 15.756,
         "s3_sl": 14.99,
-        "s3_reason": "test",
-        "s3_sr_resistance_pct": 11.6,
-        "priority_rank": 1,
+        "snap_adx": 46.6,
+        "snap_entry_trigger": 15.756,
+        "snap_sl": 14.99,
+        "snap_rr": None,
+        "snap_sentiment": "BULLISH",
+        "snap_sr_clearance_pct": 11.6,
     }
-    b._execute_s3(c, 1000.0)
+    b._fire_s3("RIVERUSDT", sig, 15.756, 1000.0)
 
     # Snapshot must be saved — find any file in tmp_path
     files = list(tmp_path.glob("*_open.json"))
@@ -118,7 +111,6 @@ def test_bot_saves_open_snapshot_s3(tmp_path, monkeypatch):
     assert snap["event"] == "open"
     assert snap["interval"] == config_s3.S3_LTF_INTERVAL
     assert snap["symbol"] == "RIVERUSDT"
-    assert len(snap["candles"]) == 25
     assert snap["event_price"] == 15.756
 
 

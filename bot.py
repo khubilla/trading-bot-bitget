@@ -256,13 +256,11 @@ class MTFBot:
         self.last_scan_time  = 0
         self.qualified_pairs : list[str] = []
         self.sentiment       = None
-        # Entry watcher — pending signals waiting for price trigger
-        self.pending_signals: dict[str, dict] = {}
+        # Entry watcher — pending signals waiting for price trigger (all strategies)
+        self.pending_signals: dict[str, dict] = st.load_pending_signals()
         self._trade_lock = threading.Lock()
         # Priority evaluation — candidates collected each scan cycle (all strategies)
         self.candidates: list = []
-        # S6 two-phase entry watchers — persist across scan cycles
-        self.s6_watchers: dict[str, dict] = {}
 
         st.reset()
         st.set_status("RUNNING")
@@ -930,9 +928,6 @@ class MTFBot:
         # ── 7. Execute best candidates (priority-ranked across all strategies) ─ #
         self._execute_best_candidate(direction, balance)
 
-        # ── 8. Process S6 two-phase entry watchers ────────────────── #
-        self._process_s6_watchers()
-
     def _evaluate_pair(self, symbol: str, allowed_direction: str, balance: float) -> bool:
         htf_df   = tr.get_candles(symbol, config_s1.HTF_INTERVAL,   limit=15)
         ltf_df   = tr.get_candles(symbol, config_s1.LTF_INTERVAL,   limit=60)
@@ -1088,7 +1083,7 @@ class MTFBot:
             "s6_reason":      s6_reason,
             "s6_peak_level":  round(s6_peak_level, 8) if s6_peak_level else None,
             "s6_sl":          round(s6_sl,          8) if s6_sl          else None,
-            "s6_fakeout_seen": False,   # updated by _process_s6_watchers
+            "s6_fakeout_seen": False,
             "s5_reason": s5_reason,
             "s5_signal": s5_sig if s5_sig in ("LONG", "SHORT", "HOLD") else "PENDING",
             "s5_ob_low":  round(s5_ob_low,  8) if s5_ob_low  else None,
@@ -1456,214 +1451,6 @@ class MTFBot:
         }
         return True
 
-    def _execute_s2(self, c: dict, balance: float) -> bool:
-        symbol = c["symbol"]
-        if symbol in self.active_positions:
-            return False
-        mark_now = tr.get_mark_price(symbol)
-        s2_bh = c["s2_bh"]
-        if mark_now > s2_bh * (1 + config_s2.S2_MAX_ENTRY_BUFFER):
-            logger.info(f"[S2][{symbol}] ⏸️ LONG entry missed — price {mark_now:.5f} >{config_s2.S2_MAX_ENTRY_BUFFER*100:.0f}% above trigger {s2_bh:.5f}")
-            return False
-        # S2 setup: big spike candle → coil (consolidation under spike) → breakout.
-        # s2_bh is the coil top, NOT the spike high. The spike peak sits above the coil
-        # and is picked up as resistance, but S2 is designed to trade through it.
-        # Find the spike peak (highest high in the big-candle lookback window) and
-        # search for pre-existing resistance only above that level.
-        _daily = c["daily_df"]
-        _spike_peak = float(_daily["high"].iloc[-config_s2.S2_BIG_CANDLE_LOOKBACK:].max())
-        nearest_res = find_nearest_resistance(_daily, _spike_peak * 1.01)
-        if nearest_res is not None:
-            clearance = (nearest_res - mark_now) / mark_now
-            if clearance < config_s2.S2_MIN_SR_CLEARANCE:
-                logger.info(f"[S2][{symbol}] ⏸️ LONG skipped — resistance {nearest_res:.5f} only {clearance*100:.1f}% away")
-                st.add_scan_log(f"[S2][{symbol}] ⛔ Resistance {nearest_res:.5f} too close ({clearance*100:.1f}%)", "WARN")
-                return False
-        if config.CLAUDE_FILTER_ENABLED:
-            _sr_str = f"{round((nearest_res - mark_now) / mark_now * 100, 1)}%" if nearest_res else "none found"
-            _cd = claude_approve("S2", symbol, {
-                "RSI": round(c["s2_rsi"], 1), "S/R clearance": _sr_str,
-                "Sentiment": self.sentiment.direction,
-                "Entry": round(mark_now, 5), "SL": round(c["s2_bl"], 5),
-            })
-            if not _cd["approved"]:
-                logger.info(f"[S2][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
-                st.add_scan_log(f"[S2][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
-                return False
-        st.add_scan_log(f"[S2][{symbol}] 🟢 LONG | {c['s2_reason']} | rank=#{c['priority_rank']}", "SIGNAL")
-        trade = tr.open_long(symbol, box_low=c["s2_bl"], leverage=config_s2.S2_LEVERAGE,
-                             trade_size_pct=config_s2.S2_TRADE_SIZE_PCT * 0.5,
-                             take_profit_pct=config_s2.S2_TAKE_PROFIT_PCT,
-                             stop_loss_pct=config_s2.S2_STOP_LOSS_PCT,
-                             use_s2_exits=True)
-        trade["strategy"] = "S2"
-        trade["snap_daily_rsi"]        = round(c["s2_rsi"], 1)
-        trade["snap_box_range_pct"]    = round((s2_bh - c["s2_bl"]) / c["s2_bl"] * 100, 3) if s2_bh and c["s2_bl"] else None
-        trade["snap_sentiment"]        = self.sentiment.direction
-        trade["snap_sr_clearance_pct"] = round((nearest_res - mark_now) / mark_now * 100, 1) if nearest_res else None
-        trade["trade_id"] = uuid.uuid4().hex[:8]
-        _log_trade("S2_LONG", trade)
-        st.add_open_trade(trade)
-        try:
-            snapshot.save_snapshot(
-                trade_id=trade["trade_id"], event="open",
-                symbol=symbol, interval="1D",
-                candles=_df_to_candles(c["daily_df"]),
-                event_price=float(trade.get("entry", 0)),
-            )
-        except Exception as e:
-            logger.warning(f"[S2][{symbol}] snapshot save failed: {e}")
-        if PAPER_MODE: tr.tag_strategy(symbol, "S2")
-        self.active_positions[symbol] = {
-            "side": "LONG", "strategy": "S2",
-            "box_high": s2_bh if s2_bh else 0.0, "box_low": c["s2_bl"],
-            "scale_in_pending": True, "scale_in_after": time.time() + 3600,
-            "scale_in_trade_size_pct": config_s2.S2_TRADE_SIZE_PCT,
-            "trade_id": trade["trade_id"],
-        }
-        return True
-
-    def _execute_s3(self, c: dict, balance: float) -> bool:
-        symbol = c["symbol"]
-        if symbol in self.active_positions:
-            return False
-        mark_now = tr.get_mark_price(symbol)
-        s3_trigger = c["s3_trigger"]
-        if mark_now > s3_trigger * (1 + config_s3.S3_MAX_ENTRY_BUFFER):
-            logger.info(f"[S3][{symbol}] ⏸️ LONG entry missed — price {mark_now:.5f} >{config_s3.S3_MAX_ENTRY_BUFFER*100:.0f}% above trigger {s3_trigger:.5f}")
-            return False
-        # S3 is a pullback strategy: the swing high that caused the Stochastic to go
-        # oversold is the pre-pullback peak — it's part of the setup, not a resistance
-        # to avoid. Find that recent peak and search for resistance above it.
-        _m15 = c["m15_df"]
-        if _m15 is not None:
-            _recent_peak = float(_m15["high"].iloc[-50:].max())  # highest high in last ~12h
-            _res_floor   = _recent_peak * 1.01
-        else:
-            _res_floor = c["s3_trigger"]
-        nearest_res = find_nearest_resistance(_m15, _res_floor, lookback=300) if _m15 is not None else None
-        if nearest_res is not None:
-            clearance = (nearest_res - mark_now) / mark_now
-            if clearance < config_s3.S3_MIN_SR_CLEARANCE:
-                logger.info(f"[S3][{symbol}] ⏸️ LONG skipped — 15m resistance {nearest_res:.5f} only {clearance*100:.1f}% away")
-                st.add_scan_log(f"[S3][{symbol}] ⛔ 15m resistance {nearest_res:.5f} too close ({clearance*100:.1f}%)", "WARN")
-                return False
-        if config.CLAUDE_FILTER_ENABLED:
-            _sr_str = f"{c['s3_sr_resistance_pct']}%" if c["s3_sr_resistance_pct"] else "none found"
-            _cd = claude_approve("S3", symbol, {
-                "ADX": round(c["s3_adx"], 1) if c["s3_adx"] else "?",
-                "S/R clearance (15m)": _sr_str, "Sentiment": self.sentiment.direction,
-                "Entry": round(mark_now, 5), "SL": round(c["s3_sl"], 5),
-            })
-            if not _cd["approved"]:
-                logger.info(f"[S3][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
-                st.add_scan_log(f"[S3][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
-                return False
-        st.add_scan_log(f"[S3][{symbol}] 🟢 LONG | {c['s3_reason']} | rank=#{c['priority_rank']}", "SIGNAL")
-        trade = tr.open_long(symbol, sl_floor=c["s3_sl"], leverage=config_s3.S3_LEVERAGE,
-                             trade_size_pct=config_s3.S3_TRADE_SIZE_PCT, use_s3_exits=True)
-        trade["strategy"] = "S3"
-        trade["snap_adx"]              = round(c["s3_adx"], 1) if c["s3_adx"] else None
-        trade["snap_entry_trigger"]    = round(s3_trigger, 8)
-        trade["snap_sl"]               = round(c["s3_sl"], 8)
-        trade["snap_rr"]               = round(config_s3.S3_TRAILING_TRIGGER_PCT * s3_trigger / (s3_trigger - c["s3_sl"]), 2) \
-                                         if s3_trigger and c["s3_sl"] and s3_trigger > c["s3_sl"] else None
-        trade["snap_sentiment"]        = self.sentiment.direction
-        trade["snap_sr_clearance_pct"] = c["s3_sr_resistance_pct"]
-        trade["trade_id"] = uuid.uuid4().hex[:8]
-        _log_trade("S3_LONG", trade)
-        st.add_open_trade(trade)
-        try:
-            snapshot.save_snapshot(
-                trade_id=trade["trade_id"], event="open",
-                symbol=symbol, interval=config_s3.S3_LTF_INTERVAL,
-                candles=_df_to_candles(c["m15_df"]),
-                event_price=float(trade.get("entry", 0)),
-            )
-        except Exception as e:
-            logger.warning(f"[S3][{symbol}] snapshot save failed: {e}")
-        if PAPER_MODE: tr.tag_strategy(symbol, "S3")
-        self.active_positions[symbol] = {
-            "side": "LONG", "strategy": "S3",
-            "box_high": s3_trigger, "box_low": c["s3_sl"],
-            "trade_id": trade["trade_id"],
-        }
-        return True
-
-    def _execute_s4(self, c: dict, balance: float) -> bool:
-        symbol = c["symbol"]
-        if symbol in self.active_positions:
-            return False
-        mark_now        = tr.get_mark_price(symbol)
-        s4_trigger      = c["s4_trigger"]
-        prev_low_approx = s4_trigger / (1 - config_s4.S4_ENTRY_BUFFER)
-        too_far         = mark_now < prev_low_approx * (1 - config_s4.S4_MAX_ENTRY_BUFFER)
-        if too_far:
-            logger.info(
-                f"[S4][{symbol}] ⏸️ SHORT entry missed — "
-                f"price {mark_now:.5f} >{config_s4.S4_MAX_ENTRY_BUFFER*100:.0f}% below prev_low {prev_low_approx:.5f}"
-            )
-            return False
-        if mark_now > s4_trigger:
-            return False  # price not yet in entry window
-        spike_base = find_spike_base(c["daily_df"], price_ceiling=mark_now)
-        if spike_base is not None:
-            clearance = (mark_now - spike_base) / mark_now
-            if clearance < config_s4.S4_MIN_SR_CLEARANCE:
-                logger.info(f"[S4][{symbol}] ⏸️ SHORT skipped — pre-pump base {spike_base:.5f} only {clearance*100:.1f}% away")
-                st.add_scan_log(f"[S4][{symbol}] ⛔ Pre-pump base {spike_base:.5f} too close ({clearance*100:.1f}%)", "WARN")
-                return False
-        if config.CLAUDE_FILTER_ENABLED:
-            _sr_str = f"{round((mark_now - spike_base) / mark_now * 100, 1)}%" if spike_base else "none found"
-            _cd = claude_approve("S4", symbol, {
-                "RSI peak": round(c["s4_rsi_peak"], 1), "RSI divergence": str(c["s4_div"]),
-                "S/R clearance (spike base)": _sr_str, "Sentiment": self.sentiment.direction,
-                "Entry": round(s4_trigger, 5), "SL": round(c["s4_sl"], 5),
-            })
-            if not _cd["approved"]:
-                logger.info(f"[S4][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
-                st.add_scan_log(f"[S4][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
-                return False
-        st.add_scan_log(
-            f"[S4][{symbol}] 🔴 SHORT | spike={c['s4_body_pct']*100:.0f}% RSI={c['s4_rsi']:.1f} | "
-            f"entry≤{s4_trigger:.5f} @ {mark_now:.5f} | rank=#{c['priority_rank']}",
-            "SIGNAL"
-        )
-        s4_sl_actual = mark_now * (1 + 0.50 / config_s4.S4_LEVERAGE)
-        trade = tr.open_short(symbol, sl_floor=s4_sl_actual, leverage=config_s4.S4_LEVERAGE,
-                              trade_size_pct=config_s4.S4_TRADE_SIZE_PCT * 0.5, use_s4_exits=True)
-        trade["strategy"]              = "S4"
-        trade["snap_rsi"]              = round(c["s4_rsi"], 1)
-        trade["snap_rsi_peak"]         = round(c["s4_rsi_peak"], 1)
-        trade["snap_spike_body_pct"]   = round(c["s4_body_pct"] * 100, 1)
-        trade["snap_rsi_div"]          = c["s4_div"]
-        trade["snap_rsi_div_str"]      = c["s4_div_str"]
-        trade["snap_sl"]               = round(s4_sl_actual, 8)
-        trade["snap_sentiment"]        = self.sentiment.direction
-        trade["snap_sr_clearance_pct"] = round((mark_now - spike_base) / mark_now * 100, 1) if spike_base else None
-        trade["trade_id"] = uuid.uuid4().hex[:8]
-        _log_trade("S4_SHORT", trade)
-        st.add_open_trade(trade)
-        try:
-            snapshot.save_snapshot(
-                trade_id=trade["trade_id"], event="open",
-                symbol=symbol, interval="1D",
-                candles=_df_to_candles(c["daily_df"]),
-                event_price=float(trade.get("entry", 0)),
-            )
-        except Exception as e:
-            logger.warning(f"[S4][{symbol}] snapshot save failed: {e}")
-        if PAPER_MODE: tr.tag_strategy(symbol, "S4")
-        self.active_positions[symbol] = {
-            "side": "SHORT", "strategy": "S4",
-            "box_high": c["s4_sl"], "box_low": s4_trigger,
-            "scale_in_pending": True, "scale_in_after": time.time() + 3600,
-            "scale_in_trade_size_pct": config_s4.S4_TRADE_SIZE_PCT,
-            "s4_prev_low": prev_low_approx,
-            "trade_id": trade["trade_id"],
-        }
-        return True
-
     def _execute_s5(self, symbol: str, s5_sig: str, s5_trigger: float, s5_sl: float,
                     s5_tp: float, s5_ob_low: float, s5_ob_high: float,
                     s5_reason: str, m15_df, balance: float) -> bool:
@@ -1793,98 +1580,6 @@ class MTFBot:
                 "trade_id": trade["trade_id"],
             }
             return True
-
-    # ── S6 Execution ─────────────────────────────────────────────── #
-
-    def _execute_s6(self, w: dict) -> bool:
-        """Execute S6 SHORT after two-phase liquidity sweep is confirmed."""
-        symbol = w["symbol"]
-        if symbol in self.active_positions:
-            return False
-        mark_now = tr.get_mark_price(symbol)
-        sl_price  = mark_now * (1 + config_s6.S6_SL_PCT / config_s6.S6_LEVERAGE)
-        st.add_scan_log(
-            f"[S6][{symbol}] 🔴 SHORT | peak={w['peak_level']:.5f} | "
-            f"fakeout confirmed → entry @ {mark_now:.5f}",
-            "SIGNAL"
-        )
-        trade = tr.open_short(
-            symbol,
-            sl_floor       = sl_price,
-            leverage       = config_s6.S6_LEVERAGE,
-            trade_size_pct = config_s6.S6_TRADE_SIZE_PCT,
-            use_s6_exits   = True,
-        )
-        trade["strategy"]              = "S6"
-        trade["snap_s6_peak"]          = round(w["peak_level"], 8)
-        trade["snap_s6_drop_pct"]      = round(w["drop_pct"] * 100, 2)
-        trade["snap_s6_rsi_at_peak"]   = round(w["rsi_at_peak"], 1)
-        trade["snap_sentiment"]        = self.sentiment.direction if self.sentiment else None
-        trade["snap_sr_clearance_pct"] = None
-        trade["trade_id"] = uuid.uuid4().hex[:8]
-        _log_trade("S6_SHORT", trade)
-        st.add_open_trade(trade)
-        try:
-            snapshot.save_snapshot(
-                trade_id=trade["trade_id"], event="open",
-                symbol=symbol, interval="1D",
-                candles=_df_to_candles(w["daily_df"]),
-                event_price=float(trade.get("entry", 0)),
-            )
-        except Exception as e:
-            logger.warning(f"[S6][{symbol}] snapshot save failed: {e}")
-        if PAPER_MODE: tr.tag_strategy(symbol, "S6")
-        self.active_positions[symbol] = {
-            "side": "SHORT", "strategy": "S6",
-            "box_high": sl_price, "box_low": w["peak_level"],
-            "trade_id": trade["trade_id"],
-        }
-        del self.s6_watchers[symbol]
-        return True
-
-    def _process_s6_watchers(self) -> None:
-        """Check each S6 two-phase watcher against current mark price."""
-        if not self.s6_watchers:
-            return
-        now = time.time()
-        expired = []
-        for symbol, w in list(self.s6_watchers.items()):
-            # Cancel if sentiment flipped bullish
-            if self.sentiment and self.sentiment.direction == "BULLISH":
-                logger.info(f"[S6][{symbol}] 🚫 Watcher cancelled — sentiment flipped BULLISH")
-                st.add_scan_log(f"[S6][{symbol}] 🚫 Watcher cancelled (BULLISH)", "WARN")
-                expired.append(symbol)
-                continue
-            # Expire after 30 days
-            if now - w["detected_at"] > 30 * 86400:
-                logger.info(f"[S6][{symbol}] ⏰ Watcher expired (30 days)")
-                expired.append(symbol)
-                continue
-            if symbol in self.active_positions:
-                expired.append(symbol)
-                continue
-            try:
-                mark_now = tr.get_mark_price(symbol)
-            except Exception as e:
-                logger.debug(f"[S6][{symbol}] mark price fetch failed: {e}")
-                continue
-            peak = w["peak_level"]
-            if not w["fakeout_seen"]:
-                # Phase 1: wait for price to sweep above peak
-                if mark_now > peak:
-                    w["fakeout_seen"] = True
-                    st.patch_pair_state(symbol, {"s6_fakeout_seen": True})
-                    logger.info(f"[S6][{symbol}] 🚀 Phase 1 — fakeout above peak {peak:.5f} @ {mark_now:.5f}")
-                    st.add_scan_log(f"[S6][{symbol}] Phase 1 fakeout seen above {peak:.5f}", "INFO")
-            else:
-                # Phase 2: wait for price to drop back below peak → execute
-                if mark_now < peak:
-                    logger.info(f"[S6][{symbol}] 🎯 Phase 2 — entry triggered below peak {peak:.5f} @ {mark_now:.5f}")
-                    if not st.is_pair_paused(symbol):
-                        self._execute_s6(w)
-                    expired.append(symbol)
-        for symbol in expired:
-            self.s6_watchers.pop(symbol, None)
 
     # ── Entry Watcher ─────────────────────────────────────────────── #
 
@@ -2069,32 +1764,6 @@ class MTFBot:
         st.add_scan_log(
             f"[S6][{symbol}] 🕐 V-formation watcher | peak={candidate['s6_peak_level']:.5f}",
             "SIGNAL"
-        )
-
-    def _queue_s6_watcher(self, candidate: dict) -> None:
-        """Register a new S6 two-phase entry watcher for a symbol."""
-        symbol = candidate["symbol"]
-        self.s6_watchers[symbol] = {
-            "strategy":     "S6",
-            "symbol":       symbol,
-            "sig":          "PENDING_SHORT",
-            "peak_level":   candidate["s6_peak_level"],
-            "sl":           candidate["s6_sl"],
-            "drop_pct":     candidate["s6_drop_pct"],
-            "rsi_at_peak":  candidate["s6_rsi_at_peak"],
-            "reason":       candidate["s6_reason"],
-            "fakeout_seen": False,
-            "detected_at":  time.time(),
-            "daily_df":     candidate["daily_df"],
-        }
-        st.patch_pair_state(symbol, {"s6_fakeout_seen": False})
-        logger.info(
-            f"[S6][{symbol}] 🕐 V-formation watcher queued | "
-            f"peak={candidate['s6_peak_level']:.5f} | SL={candidate['s6_sl']:.5f} | "
-            f"drop={candidate['s6_drop_pct']*100:.1f}% | RSI={candidate['s6_rsi_at_peak']:.1f}"
-        )
-        st.add_scan_log(
-            f"[S6][{symbol}] 🕐 V-formation watcher | peak={candidate['s6_peak_level']:.5f}", "SIGNAL"
         )
 
     def _fire_s2(self, symbol: str, sig: dict, mark: float, balance: float) -> None:

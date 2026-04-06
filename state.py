@@ -71,7 +71,7 @@ def _write(s: dict):
 # ── Public API ────────────────────────────────────────────────────── #
 
 def reset():
-    """Reset runtime state but preserve trade_history, stats, and position_memory across restarts."""
+    """Reset runtime state but preserve trade_history, stats, position_memory, and pending_signals across restarts."""
     s = _read()
     fresh = dict(_default)
     fresh["trade_history"]   = s.get("trade_history", [])

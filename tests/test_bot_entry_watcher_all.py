@@ -78,6 +78,7 @@ def test_queue_s2_pending_stores_payload(monkeypatch):
     assert sig["s2_bh"] == 50000.0
     assert sig["s2_bl"] == 47000.0
     assert sig["priority_rank"] == 1
+    assert "expires" in sig
 
 
 def test_queue_s3_pending_stores_payload(monkeypatch):

@@ -251,3 +251,161 @@ def test_fire_s6_opens_short(monkeypatch):
            "expires": 9999999999}
     b._fire_s6("BNBUSDT", sig, mark=390.0, balance=1000.0)
     assert opened.get("sym") == "BNBUSDT"
+
+
+# ── Entry Watcher Loop Tests (S2 / S3 / S4 / S6 dispatch) ──────────────── #
+
+import time as _time
+
+
+def _make_s2_sig(mark_at_trigger=50000.0):
+    return {
+        "strategy": "S2", "side": "LONG",
+        "trigger": 50000.0, "s2_bh": 50000.0, "s2_bl": 47000.0,
+        "priority_rank": 1, "priority_score": 35.0,
+        "snap_daily_rsi": 62.5, "snap_box_range_pct": 6.3, "snap_sentiment": "NEUTRAL",
+        "expires": _time.time() + 86400,
+    }
+
+
+def _make_s3_sig():
+    return {
+        "strategy": "S3", "side": "LONG",
+        "trigger": 2000.0, "s3_sl": 1900.0,
+        "priority_rank": 2, "priority_score": 25.0,
+        "snap_adx": 28.5, "snap_entry_trigger": 2000.0, "snap_sl": 1900.0,
+        "snap_rr": 2.0, "snap_sentiment": "NEUTRAL", "snap_sr_clearance_pct": 10.0,
+        "expires": _time.time() + 86400,
+    }
+
+
+def _make_s4_sig():
+    return {
+        "strategy": "S4", "side": "SHORT",
+        "trigger": 95.0, "s4_sl": 105.0, "prev_low": 100.0,
+        "priority_rank": 3, "priority_score": 20.0,
+        "snap_rsi": 45.0, "snap_rsi_peak": 85.0, "snap_spike_body_pct": 65.0,
+        "snap_rsi_div": True, "snap_rsi_div_str": "RSI div", "snap_sentiment": "NEUTRAL",
+        "expires": _time.time() + 86400,
+    }
+
+
+def _make_s6_sig(fakeout_seen=False):
+    return {
+        "strategy": "S6", "side": "SHORT",
+        "peak_level": 400.0, "sl": 420.0,
+        "drop_pct": 0.35, "rsi_at_peak": 78.0,
+        "fakeout_seen": fakeout_seen,
+        "detected_at": _time.time(),
+        "snap_s6_peak": 400.0, "snap_s6_drop_pct": 35.0,
+        "snap_s6_rsi_at_peak": 78.0, "snap_sentiment": "BEARISH",
+        "expires": _time.time() + 86400,
+    }
+
+
+def _run_one_iteration(b, monkeypatch):
+    """Run _entry_watcher_loop for exactly one iteration by stopping it after time.sleep."""
+    def _stop_after_sleep(_duration):
+        b.running = False
+    monkeypatch.setattr(bot.time, "sleep", _stop_after_sleep)
+    b.running = True
+    b._entry_watcher_loop()
+
+
+def test_watcher_fires_s2_when_price_at_trigger(monkeypatch):
+    """When mark is in S2 trigger window, _fire_s2 is called and signal removed."""
+    b = _make_bot(monkeypatch)
+    b.pending_signals = {"BTCUSDT": _make_s2_sig()}
+    monkeypatch.setattr(bot.tr, "get_usdt_balance", lambda: 1000.0)
+    monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: 50000.0)
+    monkeypatch.setattr(bot.st, "get_pair_state",
+        lambda sym: {"s2_signal": "LONG"})
+    fired = []
+    monkeypatch.setattr(b, "_fire_s2",
+        lambda sym, sig, mark, bal: fired.append(sym) or
+        b.active_positions.update({sym: {"strategy": "S2"}}))
+    monkeypatch.setattr(bot.st, "save_pending_signals", lambda *a: None)
+    monkeypatch.setattr(bot.st, "is_pair_paused", lambda sym: False)
+    monkeypatch.setattr(bot.config, "MAX_CONCURRENT_TRADES", 5)
+
+    _run_one_iteration(b, monkeypatch)
+
+    assert "BTCUSDT" in fired
+    assert "BTCUSDT" not in b.pending_signals
+
+
+def test_watcher_cancels_s2_when_signal_gone(monkeypatch):
+    """When pair_states shows s2_signal='HOLD', pending is cancelled."""
+    b = _make_bot(monkeypatch)
+    b.pending_signals = {"BTCUSDT": _make_s2_sig()}
+    monkeypatch.setattr(bot.tr, "get_usdt_balance", lambda: 1000.0)
+    monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: 50000.0)
+    monkeypatch.setattr(bot.st, "get_pair_state",
+        lambda sym: {"s2_signal": "HOLD"})
+    monkeypatch.setattr(bot.st, "save_pending_signals", lambda *a: None)
+    _run_one_iteration(b, monkeypatch)
+    assert "BTCUSDT" not in b.pending_signals
+
+
+def test_watcher_cancels_s2_when_price_below_invalidation(monkeypatch):
+    """When mark < s2_bl, pending S2 is cancelled regardless of signal."""
+    b = _make_bot(monkeypatch)
+    b.pending_signals = {"BTCUSDT": _make_s2_sig()}
+    monkeypatch.setattr(bot.tr, "get_usdt_balance", lambda: 1000.0)
+    monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: 46000.0)  # below s2_bl=47000
+    monkeypatch.setattr(bot.st, "get_pair_state",
+        lambda sym: {"s2_signal": "LONG"})
+    monkeypatch.setattr(bot.st, "save_pending_signals", lambda *a: None)
+    _run_one_iteration(b, monkeypatch)
+    assert "BTCUSDT" not in b.pending_signals
+
+
+def test_watcher_s6_phase1_sets_fakeout_seen(monkeypatch):
+    """When mark > peak_level and fakeout_seen=False, fakeout_seen becomes True."""
+    b = _make_bot(monkeypatch)
+    b.pending_signals = {"BNBUSDT": _make_s6_sig(fakeout_seen=False)}
+    monkeypatch.setattr(bot.tr, "get_usdt_balance", lambda: 1000.0)
+    monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: 410.0)  # above peak 400
+    monkeypatch.setattr(bot.st, "get_pair_state",
+        lambda sym: {"s6_signal": "PENDING_SHORT"})
+    patched = {}
+    monkeypatch.setattr(bot.st, "patch_pair_state",
+        lambda sym, d: patched.update({sym: d}))
+    monkeypatch.setattr(bot.st, "save_pending_signals", lambda *a: None)
+    _run_one_iteration(b, monkeypatch)
+    assert b.pending_signals["BNBUSDT"]["fakeout_seen"] == True
+    assert patched.get("BNBUSDT", {}).get("s6_fakeout_seen") == True
+
+
+def test_watcher_s6_phase2_fires_when_below_peak(monkeypatch):
+    """When fakeout_seen=True and mark < peak_level, _fire_s6 is called."""
+    b = _make_bot(monkeypatch)
+    b.pending_signals = {"BNBUSDT": _make_s6_sig(fakeout_seen=True)}
+    monkeypatch.setattr(bot.tr, "get_usdt_balance", lambda: 1000.0)
+    monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: 390.0)  # below peak 400
+    monkeypatch.setattr(bot.st, "get_pair_state",
+        lambda sym: {"s6_signal": "PENDING_SHORT"})
+    fired = []
+    monkeypatch.setattr(b, "_fire_s6",
+        lambda sym, sig, mark, bal: fired.append(sym) or
+        b.active_positions.update({sym: {"strategy": "S6"}}))
+    monkeypatch.setattr(bot.st, "save_pending_signals", lambda *a: None)
+    monkeypatch.setattr(bot.st, "is_pair_paused", lambda sym: False)
+    monkeypatch.setattr(bot.config, "MAX_CONCURRENT_TRADES", 5)
+    _run_one_iteration(b, monkeypatch)
+    assert "BNBUSDT" in fired
+    assert "BNBUSDT" not in b.pending_signals
+
+
+def test_watcher_s6_cancels_on_bullish_sentiment(monkeypatch):
+    """S6 watcher cancels when sentiment is BULLISH."""
+    b = _make_bot(monkeypatch)
+    b.sentiment = type("S", (), {"direction": "BULLISH"})()
+    b.pending_signals = {"BNBUSDT": _make_s6_sig(fakeout_seen=True)}
+    monkeypatch.setattr(bot.tr, "get_usdt_balance", lambda: 1000.0)
+    monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: 390.0)
+    monkeypatch.setattr(bot.st, "get_pair_state",
+        lambda sym: {"s6_signal": "PENDING_SHORT"})
+    monkeypatch.setattr(bot.st, "save_pending_signals", lambda *a: None)
+    _run_one_iteration(b, monkeypatch)
+    assert "BNBUSDT" not in b.pending_signals

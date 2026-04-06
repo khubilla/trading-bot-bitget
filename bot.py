@@ -2434,33 +2434,164 @@ class MTFBot:
                             st.add_scan_log(f"[S5][{symbol}] ⏰ Limit expired — cancelled", "INFO")
                             self.pending_signals.pop(symbol, None)
 
-                    else:
-                        # ── Non-S5 (S3, etc.): legacy price-trigger path ── #
-                        # Expire stale signals
-                        if time.time() > sig["expires"]:
-                            logger.info(f"[{strategy}][{symbol}] ⏰ Pending signal expired — removing")
-                            st.add_scan_log(f"[{strategy}][{symbol}] ⏰ Pending expired", "INFO")
+                    elif strategy == "S2":
+                        # ── S2: breakout trigger + invalidation ───────── #
+                        ps = st.get_pair_state(symbol)
+                        if ps.get("s2_signal", "HOLD") not in ("LONG",):
+                            logger.info(f"[S2][{symbol}] 🚫 Signal gone — cancelling pending")
+                            st.add_scan_log(f"[S2][{symbol}] 🚫 Pending cancelled (signal gone)", "INFO")
                             self.pending_signals.pop(symbol, None)
+                            st.save_pending_signals(self.pending_signals)
                             continue
                         try:
                             mark = tr.get_mark_price(symbol)
                         except Exception:
                             continue
-                        side = sig["side"]
-                        trigger = sig["trigger"]
-                        triggered = (side == "LONG"  and mark >= trigger) or \
-                                    (side == "SHORT" and mark <= trigger)
-                        if triggered:
+                        s2_bh = sig["s2_bh"]
+                        s2_bl = sig["s2_bl"]
+                        if mark < s2_bl:
+                            logger.info(f"[S2][{symbol}] ❌ Invalidated — mark {mark:.5f} < box_low {s2_bl:.5f}")
+                            st.add_scan_log(f"[S2][{symbol}] ❌ Pending cancelled (price below box)", "INFO")
+                            self.pending_signals.pop(symbol, None)
+                            st.save_pending_signals(self.pending_signals)
+                            continue
+                        in_window = s2_bh <= mark <= s2_bh * (1 + config_s2.S2_MAX_ENTRY_BUFFER)
+                        if in_window:
                             with self._trade_lock:
                                 if symbol in self.active_positions:
                                     self.pending_signals.pop(symbol, None)
+                                    st.save_pending_signals(self.pending_signals)
                                     continue
                                 if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
                                     break
                                 if st.is_pair_paused(symbol):
                                     continue
-                                self._fire_pending(symbol, sig, mark, balance)
+                                self._fire_s2(symbol, sig, mark, balance)
                             self.pending_signals.pop(symbol, None)
+                            st.save_pending_signals(self.pending_signals)
+
+                    elif strategy == "S3":
+                        # ── S3: pullback trigger + invalidation ───────── #
+                        ps = st.get_pair_state(symbol)
+                        if ps.get("s3_signal", "HOLD") not in ("LONG",):
+                            logger.info(f"[S3][{symbol}] 🚫 Signal gone — cancelling pending")
+                            st.add_scan_log(f"[S3][{symbol}] 🚫 Pending cancelled (signal gone)", "INFO")
+                            self.pending_signals.pop(symbol, None)
+                            st.save_pending_signals(self.pending_signals)
+                            continue
+                        try:
+                            mark = tr.get_mark_price(symbol)
+                        except Exception:
+                            continue
+                        s3_sl = sig["s3_sl"]
+                        if mark < s3_sl:
+                            logger.info(f"[S3][{symbol}] ❌ Invalidated — mark {mark:.5f} < SL {s3_sl:.5f}")
+                            st.add_scan_log(f"[S3][{symbol}] ❌ Pending cancelled (price below SL)", "INFO")
+                            self.pending_signals.pop(symbol, None)
+                            st.save_pending_signals(self.pending_signals)
+                            continue
+                        s3_trigger = sig["trigger"]
+                        in_window = s3_trigger <= mark <= s3_trigger * (1 + config_s3.S3_MAX_ENTRY_BUFFER)
+                        if in_window:
+                            with self._trade_lock:
+                                if symbol in self.active_positions:
+                                    self.pending_signals.pop(symbol, None)
+                                    st.save_pending_signals(self.pending_signals)
+                                    continue
+                                if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
+                                    break
+                                if st.is_pair_paused(symbol):
+                                    continue
+                                self._fire_s3(symbol, sig, mark, balance)
+                            self.pending_signals.pop(symbol, None)
+                            st.save_pending_signals(self.pending_signals)
+
+                    elif strategy == "S4":
+                        # ── S4: spike-reversal trigger + invalidation ─── #
+                        ps = st.get_pair_state(symbol)
+                        if ps.get("s4_signal", "HOLD") not in ("SHORT",):
+                            logger.info(f"[S4][{symbol}] 🚫 Signal gone — cancelling pending")
+                            st.add_scan_log(f"[S4][{symbol}] 🚫 Pending cancelled (signal gone)", "INFO")
+                            self.pending_signals.pop(symbol, None)
+                            st.save_pending_signals(self.pending_signals)
+                            continue
+                        try:
+                            mark = tr.get_mark_price(symbol)
+                        except Exception:
+                            continue
+                        s4_sl = sig["s4_sl"]
+                        if mark > s4_sl:
+                            logger.info(f"[S4][{symbol}] ❌ Invalidated — mark {mark:.5f} > SL {s4_sl:.5f}")
+                            st.add_scan_log(f"[S4][{symbol}] ❌ Pending cancelled (price above SL)", "INFO")
+                            self.pending_signals.pop(symbol, None)
+                            st.save_pending_signals(self.pending_signals)
+                            continue
+                        s4_trigger = sig["trigger"]
+                        prev_low   = sig["prev_low"]
+                        in_window  = (mark <= s4_trigger and
+                                      mark >= prev_low * (1 - config_s4.S4_MAX_ENTRY_BUFFER))
+                        if in_window:
+                            with self._trade_lock:
+                                if symbol in self.active_positions:
+                                    self.pending_signals.pop(symbol, None)
+                                    st.save_pending_signals(self.pending_signals)
+                                    continue
+                                if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
+                                    break
+                                if st.is_pair_paused(symbol):
+                                    continue
+                                self._fire_s4(symbol, sig, mark, balance)
+                            self.pending_signals.pop(symbol, None)
+                            st.save_pending_signals(self.pending_signals)
+
+                    elif strategy == "S6":
+                        # ── S6: two-phase V-formation ─────────────────── #
+                        if self.sentiment and self.sentiment.direction == "BULLISH":
+                            logger.info(f"[S6][{symbol}] 🚫 Cancelled — sentiment BULLISH")
+                            st.add_scan_log(f"[S6][{symbol}] 🚫 Cancelled (BULLISH)", "WARN")
+                            self.pending_signals.pop(symbol, None)
+                            st.save_pending_signals(self.pending_signals)
+                            continue
+                        ps = st.get_pair_state(symbol)
+                        if ps.get("s6_signal", "HOLD") not in ("PENDING_SHORT",):
+                            logger.info(f"[S6][{symbol}] 🚫 Signal gone — cancelling watcher")
+                            self.pending_signals.pop(symbol, None)
+                            st.save_pending_signals(self.pending_signals)
+                            continue
+                        try:
+                            mark = tr.get_mark_price(symbol)
+                        except Exception:
+                            continue
+                        peak = sig["peak_level"]
+                        if not sig.get("fakeout_seen"):
+                            if mark > peak:
+                                sig["fakeout_seen"] = True
+                                st.patch_pair_state(symbol, {"s6_fakeout_seen": True})
+                                st.save_pending_signals(self.pending_signals)
+                                logger.info(f"[S6][{symbol}] 🚀 Phase 1 — fakeout above peak {peak:.5f}")
+                                st.add_scan_log(f"[S6][{symbol}] Phase 1 fakeout above {peak:.5f}", "INFO")
+                        else:
+                            if mark < peak:
+                                with self._trade_lock:
+                                    if symbol in self.active_positions:
+                                        self.pending_signals.pop(symbol, None)
+                                        st.save_pending_signals(self.pending_signals)
+                                        continue
+                                    if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
+                                        break
+                                    if st.is_pair_paused(symbol):
+                                        continue
+                                    self._fire_s6(symbol, sig, mark, balance)
+                                self.pending_signals.pop(symbol, None)
+                                st.save_pending_signals(self.pending_signals)
+
+                    else:
+                        # ── Unknown strategy: expire stale signals ──── #
+                        if time.time() > sig.get("expires", 0):
+                            logger.info(f"[{strategy}][{symbol}] ⏰ Pending signal expired — removing")
+                            st.add_scan_log(f"[{strategy}][{symbol}] ⏰ Pending expired", "INFO")
+                            self.pending_signals.pop(symbol, None)
+                            st.save_pending_signals(self.pending_signals)
 
             time.sleep(4)
 

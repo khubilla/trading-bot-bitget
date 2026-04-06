@@ -499,3 +499,40 @@ def test_collect_candles_returns_correct_window():
     assert len(candles) == (exit_i + 5) - (entry_i - 50)
     assert "t" in candles[0]
     assert "o" in candles[0]
+
+
+def test_calc_pnl_short_partial_then_tp():
+    import backtest_ig as bt
+    trade = _make_trade(side="SHORT", entry=40500.0, sl=41500.0, tp=38500.0)
+    # tp1 = 40500 - (41500 - 40500) = 39500
+    trade["partial_hit"]   = True
+    trade["partial_price"] = trade["tp1"]   # 39500
+    trade["exit_price"]    = 38500.0        # remainder hits full TP
+    pnl = bt._calc_pnl(trade)
+    # half at +1000pts (39500-40500 inverted), half at +2000pts → avg 1500
+    assert pnl == pytest.approx(1500.0)
+
+
+def test_collect_candles_clamps_start():
+    """When entry_i < before, start is clamped to 0."""
+    import backtest_ig as bt
+    n = 50
+    df = _make_df([[1_700_000_000_000 + i * 900_000, 100, 110, 90, 100, 0] for i in range(n)])
+    entry_i = 10
+    exit_i  = 20
+    candles = bt._collect_candles(df, entry_i, exit_i, before=50)
+    # start = max(0, 10 - 50) = 0; end = min(50, 25) = 25
+    assert candles[0]["t"] == 1_700_000_000_000  # first bar in df
+
+
+def test_collect_candles_clamps_end():
+    """When exit_i + 5 >= len(df), end is clamped to len(df)."""
+    import backtest_ig as bt
+    n = 20
+    df = _make_df([[1_700_000_000_000 + i * 900_000, 100, 110, 90, 100, 0] for i in range(n)])
+    entry_i = 5
+    exit_i  = 18  # exit_i + 5 = 23 > len(df)=20 → clamps to 20
+    candles = bt._collect_candles(df, entry_i, exit_i, before=0)
+    # start=5, end=min(20,23)=20 → 15 candles
+    assert len(candles) == 15
+    assert candles[-1]["t"] == 1_700_000_000_000 + 19 * 900_000  # last bar

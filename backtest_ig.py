@@ -232,3 +232,164 @@ def _collect_candles(df_15m: pd.DataFrame, entry_i: int, exit_i: int,
         }
         for _, r in rows.iterrows()
     ]
+
+
+# ── Simulation: full bar loop ──────────────────────────────────────── #
+
+def run_instrument(instrument: dict,
+                   df_1d: pd.DataFrame, df_1h: pd.DataFrame,
+                   df_15m: pd.DataFrame) -> dict:
+    """
+    Walk every 15m bar in chronological order.
+    Returns {"instrument": name, "trades": [...], "cancelled": [...]}.
+    """
+    name   = instrument["display_name"]
+    epic   = instrument["epic"]
+    trades:    list[dict] = []
+    cancelled: list[dict] = []
+
+    state   = "IDLE"
+    pending: dict | None = None
+    trade:   dict | None = None
+
+    # Skip first daily_limit+10 bars so EMA calculations have enough history
+    min_i = instrument["daily_limit"] + 10
+
+    for i in range(min_i, len(df_15m)):
+        bar = df_15m.iloc[i].to_dict()
+        ts  = int(bar["ts"])
+
+        # ── IN_TRADE ──────────────────────────────────────────────── #
+        if state == "IN_TRADE":
+            action, price = _check_trade(bar, trade, instrument)
+
+            if action == "partial_tp":
+                trade["partial_hit"]   = True
+                trade["partial_price"] = price
+                trade["sl_current"]    = trade["entry"]   # break-even
+
+            elif action in ("sl", "tp", "session_end"):
+                trade["exit_reason"] = action.upper()
+                trade["exit_price"]  = price
+                trade["exit_dt"]     = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+                trade["pnl_pts"]     = _calc_pnl(trade)
+                trade["candles"]     = _collect_candles(df_15m, trade["entry_i"], i)
+                trades.append(trade)
+                state = "IDLE"
+                trade = None
+
+        # ── PENDING ───────────────────────────────────────────────── #
+        elif state == "PENDING":
+            action, fill_price = _check_pending(bar, pending, instrument)
+
+            if action == "fill":
+                entry = fill_price
+                sl    = pending["sl"]
+                tp    = pending["tp"]
+                side  = pending["side"]
+                tp1   = (entry + (entry - sl)) if side == "LONG" else (entry - (sl - entry))
+                trade = {
+                    "instrument":  name,
+                    "side":        side,
+                    "entry_dt":    datetime.fromtimestamp(ts / 1000, tz=timezone.utc),
+                    "entry_i":     i,
+                    "trigger":     pending["trigger"],
+                    "entry":       entry,
+                    "sl":          sl,
+                    "tp":          tp,
+                    "tp1":         tp1,
+                    "ob_low":      pending["ob_low"],
+                    "ob_high":     pending["ob_high"],
+                    "partial_hit": False,
+                    "sl_current":  sl,
+                }
+                state   = "IN_TRADE"
+                pending = None
+
+            elif action in ("ob_invalid", "expired", "session_end"):
+                cancelled.append({
+                    "instrument": name,
+                    "reason":     action.upper(),
+                    "dt":         datetime.fromtimestamp(ts / 1000, tz=timezone.utc),
+                    "side":       pending["side"],
+                })
+                state   = "IDLE"
+                pending = None
+
+        # ── IDLE ──────────────────────────────────────────────────── #
+        else:
+            if not _in_session(ts, instrument):
+                continue
+
+            daily_df, htf_df, m15_df = _slice_windows(i, df_1d, df_1h, df_15m, instrument)
+
+            if len(daily_df) < instrument["s5_daily_ema_slow"] + 5:
+                continue
+            if htf_df.empty or m15_df.empty:
+                continue
+
+            ema_fast = float(calculate_ema(
+                daily_df["close"].astype(float), instrument["s5_daily_ema_fast"]
+            ).iloc[-1])
+            ema_slow = float(calculate_ema(
+                daily_df["close"].astype(float), instrument["s5_daily_ema_slow"]
+            ).iloc[-1])
+            allowed = "BULLISH" if ema_fast > ema_slow else "BEARISH"
+
+            try:
+                sig, trigger, sl, tp, ob_low, ob_high, _ = evaluate_s5(
+                    epic, daily_df, htf_df, m15_df, allowed, cfg=instrument
+                )
+            except Exception:
+                continue
+
+            if sig in ("PENDING_LONG", "PENDING_SHORT"):
+                pending = {
+                    "side":    "LONG" if sig == "PENDING_LONG" else "SHORT",
+                    "trigger": trigger,
+                    "sl":      sl,
+                    "tp":      tp,
+                    "ob_low":  ob_low,
+                    "ob_high": ob_high,
+                    "expires": ts + 4 * 3_600_000,   # 4h in ms
+                }
+                state = "PENDING"
+
+    return {"instrument": name, "trades": trades, "cancelled": cancelled}
+
+
+# ── Stats aggregation ──────────────────────────────────────────────── #
+
+def _compute_stats(result: dict) -> dict:
+    trades    = result["trades"]
+    cancelled = result["cancelled"]
+    wins      = [t for t in trades if t["pnl_pts"] > 0]
+    losses    = [t for t in trades if t["pnl_pts"] <= 0]
+    partials  = [t for t in trades if t.get("partial_hit")]
+
+    cancel_counts = {
+        "OB_INVALID":  sum(1 for c in cancelled if c["reason"] == "OB_INVALID"),
+        "EXPIRED":     sum(1 for c in cancelled if c["reason"] == "EXPIRED"),
+        "SESSION_END": sum(1 for c in cancelled if c["reason"] == "SESSION_END"),
+    }
+    total_signals = len(trades) + len(cancelled)
+    gross_win     = sum(t["pnl_pts"] for t in wins)  if wins   else 0.0
+    gross_loss    = abs(sum(t["pnl_pts"] for t in losses)) if losses else 0.0
+
+    return {
+        "name":          result["instrument"],
+        "signals":       total_signals,
+        "filled":        len(trades),
+        "fill_rate":     round(len(trades) / total_signals * 100, 1) if total_signals else 0.0,
+        "cancelled":     cancel_counts,
+        "wins":          len(wins),
+        "losses":        len(losses),
+        "win_rate":      round(len(wins) / len(trades) * 100, 1) if trades else 0.0,
+        "partial_rate":  round(len(partials) / len(trades) * 100, 1) if trades else 0.0,
+        "avg_win_pts":   round(gross_win  / len(wins),   1) if wins   else 0.0,
+        "avg_loss_pts":  round(-gross_loss / len(losses), 1) if losses else 0.0,
+        "profit_factor": round(gross_win / gross_loss, 2) if gross_loss > 0 else float("inf"),
+        "total_pnl_pts": round(sum(t["pnl_pts"] for t in trades), 1),
+        "trades":        trades,
+        "cancelled_list":cancelled,
+    }

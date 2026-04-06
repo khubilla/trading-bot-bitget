@@ -536,3 +536,118 @@ def test_collect_candles_clamps_end():
     # start=5, end=min(20,23)=20 → 15 candles
     assert len(candles) == 15
     assert candles[-1]["t"] == 1_700_000_000_000 + 19 * 900_000  # last bar
+
+
+# ── run_instrument integration tests ──────────────────────────────── #
+
+def _make_candle_series(n, start_ms, step_ms, base_price=40000.0):
+    rows = []
+    for i in range(n):
+        rows.append([
+            start_ms + i * step_ms,
+            base_price, base_price + 100, base_price - 100, base_price, 100,
+        ])
+    return _make_df(rows)
+
+
+def test_run_instrument_no_trades_when_evaluate_holds(monkeypatch):
+    """When evaluate_s5 always returns HOLD, no trades or cancels are produced."""
+    import backtest_ig as bt
+
+    monkeypatch.setattr(bt, "evaluate_s5",
+        lambda *a, **kw: ("HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, "no signal"))
+    monkeypatch.setattr(bt, "_in_session", lambda ts, inst: True)
+    monkeypatch.setattr(bt, "_is_session_end", lambda ts, inst: False)
+
+    inst   = _dummy_instrument()
+    n      = inst["daily_limit"] + 50
+    step   = 900_000
+    start  = 1_700_000_000_000
+    df_1d  = _make_candle_series(300, start - 300 * 86_400_000, 86_400_000)
+    df_1h  = _make_candle_series(300, start - 300 * 3_600_000,  3_600_000)
+    df_15m = _make_candle_series(n,   start,                    step)
+
+    result = bt.run_instrument(inst, df_1d, df_1h, df_15m)
+    assert result["trades"]    == []
+    assert result["cancelled"] == []
+
+
+def test_run_instrument_pending_fills_and_wins(monkeypatch):
+    """
+    evaluate_s5 returns PENDING_LONG once; trigger fills; full TP hit → 1 WIN trade.
+    """
+    import backtest_ig as bt
+
+    call_count = {"n": 0}
+
+    def mock_evaluate(*a, **kw):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return ("PENDING_LONG", 40500.0, 39500.0, 42500.0, 40000.0, 40500.0, "OB ok")
+        return ("HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, "hold")
+
+    monkeypatch.setattr(bt, "evaluate_s5", mock_evaluate)
+    monkeypatch.setattr(bt, "_in_session",    lambda ts, inst: True)
+    monkeypatch.setattr(bt, "_is_session_end", lambda ts, inst: False)
+    monkeypatch.setattr(bt, "calculate_ema",
+        lambda series, period: pd.Series([100.0] * len(series)))
+
+    inst  = _dummy_instrument()
+    start = 1_700_000_000_000
+    step  = 900_000
+
+    df_1d  = _make_candle_series(300, start - 300 * 86_400_000, 86_400_000)
+    df_1h  = _make_candle_series(300, start - 300 * 3_600_000,  3_600_000)
+
+    # Warm-up bars, then: bar hits trigger (low=40490), bar hits TP (high=42600)
+    n_warmup = inst["daily_limit"] + 10
+    rows = []
+    base = start
+    for i in range(n_warmup):
+        rows.append([base + i * step, 40000, 40100, 39900, 40050, 100])
+    # evaluate_s5 fires at index n_warmup → PENDING set
+    rows.append([base + n_warmup       * step, 40000, 40100, 39900, 40050, 100])
+    # next bar: low <= trigger (40500) → fill
+    rows.append([base + (n_warmup + 1) * step, 40400, 40600, 40490, 40500, 100])
+    # next bar: high >= tp1 (41500) → partial_tp fires, SL moves to break-even
+    rows.append([base + (n_warmup + 2) * step, 41000, 41600, 40800, 41400, 100])
+    # subsequent bars hold in trade (above break-even, below full TP)
+    for j in range(5):
+        rows.append([base + (n_warmup + 3 + j) * step, 41500, 41800, 41200, 41600, 100])
+    # TP bar: high >= tp (42500)
+    rows.append([base + (n_warmup + 8) * step, 42000, 42600, 41800, 42500, 100])
+
+    df_15m = _make_df(rows)
+    result = bt.run_instrument(inst, df_1d, df_1h, df_15m)
+
+    assert len(result["trades"]) == 1
+    t = result["trades"][0]
+    assert t["side"]        == "LONG"
+    assert t["exit_reason"] == "TP"
+    assert t["pnl_pts"]     > 0
+
+
+def test_compute_stats_basic():
+    import backtest_ig as bt
+
+    trades = [
+        {"pnl_pts": 2000.0, "partial_hit": True,  "exit_reason": "TP"},
+        {"pnl_pts": -1000.0,"partial_hit": False, "exit_reason": "SL"},
+    ]
+    cancelled = [
+        {"reason": "OB_INVALID"},
+        {"reason": "EXPIRED"},
+        {"reason": "OB_INVALID"},
+    ]
+    result = {"instrument": "US30", "trades": trades, "cancelled": cancelled}
+    stats  = bt._compute_stats(result)
+
+    assert stats["signals"]         == 5
+    assert stats["filled"]          == 2
+    assert stats["wins"]            == 1
+    assert stats["losses"]          == 1
+    assert stats["win_rate"]        == 50.0
+    assert stats["partial_rate"]    == 50.0
+    assert stats["cancelled"]["OB_INVALID"] == 2
+    assert stats["cancelled"]["EXPIRED"]    == 1
+    assert stats["total_pnl_pts"]   == pytest.approx(1000.0)

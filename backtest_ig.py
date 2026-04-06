@@ -107,3 +107,38 @@ def _is_session_end(ts_ms: int, instrument: dict) -> bool:
         return False
     eh, em = instrument["session_end"]
     return now.hour > eh or (now.hour == eh and now.minute >= em)
+
+
+# ── Simulation: PENDING state ──────────────────────────────────────── #
+
+def _check_pending(bar: dict, pending: dict, instrument: dict) -> tuple[str, float]:
+    """
+    Evaluate one 15m bar against a pending S5 signal.
+
+    Returns (action, fill_price):
+      action: "fill" | "ob_invalid" | "expired" | "session_end" | "hold"
+      fill_price: trigger price if action=="fill", else 0.0
+    """
+    ts   = int(bar["ts"])
+    lo   = float(bar["low"])
+    hi   = float(bar["high"])
+    buf  = instrument["s5_ob_invalidation_buffer_pct"]
+    side = pending["side"]
+
+    if _is_session_end(ts, instrument):
+        return "session_end", 0.0
+
+    if side == "LONG" and lo < pending["ob_low"] * (1 - buf):
+        return "ob_invalid", 0.0
+    if side == "SHORT" and hi > pending["ob_high"] * (1 + buf):
+        return "ob_invalid", 0.0
+
+    if ts > pending["expires"]:
+        return "expired", 0.0
+
+    if side == "LONG" and lo <= pending["trigger"]:
+        return "fill", pending["trigger"]
+    if side == "SHORT" and hi >= pending["trigger"]:
+        return "fill", pending["trigger"]
+
+    return "hold", 0.0

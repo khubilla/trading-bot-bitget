@@ -218,3 +218,94 @@ def test_is_session_end_weekend_returns_false():
     inst["session_end"] = (23, 59)
     ts = _ts_et(2026, 3, 7, 23, 59)  # Saturday
     assert bt._is_session_end(ts, inst) is False
+
+
+# ── PENDING state tests ────────────────────────────────────────────── #
+
+def _make_pending(side="LONG", trigger=40500.0, ob_low=40000.0, ob_high=40500.0,
+                  sl=39500.0, tp=42000.0, expires_offset_ms=4*3600*1000,
+                  base_ts=1_700_000_000_000):
+    return {
+        "side":    side,
+        "trigger": trigger,
+        "sl":      sl,
+        "tp":      tp,
+        "ob_low":  ob_low,
+        "ob_high": ob_high,
+        "expires": base_ts + expires_offset_ms,
+    }
+
+
+def _make_bar(ts=1_700_000_000_000, lo=40200.0, hi=40600.0, op=40300.0, cl=40400.0):
+    return {"ts": ts, "open": op, "high": hi, "low": lo, "close": cl, "vol": 100}
+
+
+def test_pending_fill_long():
+    import backtest_ig as bt
+    inst    = _dummy_instrument()
+    pending = _make_pending(side="LONG", trigger=40500.0)
+    bar     = _make_bar(ts=pending["expires"] - 1000, lo=40490.0, hi=40600.0)  # low <= trigger
+    action, price = bt._check_pending(bar, pending, inst)
+    assert action == "fill"
+    assert price == 40500.0
+
+
+def test_pending_no_fill_long_bar_above_trigger():
+    import backtest_ig as bt
+    inst    = _dummy_instrument()
+    pending = _make_pending(side="LONG", trigger=40500.0)
+    bar     = _make_bar(ts=pending["expires"] - 1000, lo=40510.0, hi=40600.0)  # low > trigger
+    action, _ = bt._check_pending(bar, pending, inst)
+    assert action == "hold"
+
+
+def test_pending_fill_short():
+    import backtest_ig as bt
+    inst    = _dummy_instrument()
+    pending = _make_pending(side="SHORT", trigger=40000.0)
+    bar     = _make_bar(ts=pending["expires"] - 1000, lo=39900.0, hi=40010.0)  # high >= trigger
+    action, price = bt._check_pending(bar, pending, inst)
+    assert action == "fill"
+    assert price == 40000.0
+
+
+def test_pending_ob_invalid_long():
+    import backtest_ig as bt
+    inst    = _dummy_instrument()
+    inst["s5_ob_invalidation_buffer_pct"] = 0.001
+    pending = _make_pending(side="LONG", ob_low=40000.0)
+    # bar low < ob_low * (1 - 0.001) = 39960
+    bar = _make_bar(ts=pending["expires"] - 1000, lo=39950.0, hi=40200.0)
+    action, _ = bt._check_pending(bar, pending, inst)
+    assert action == "ob_invalid"
+
+
+def test_pending_ob_invalid_short():
+    import backtest_ig as bt
+    inst    = _dummy_instrument()
+    inst["s5_ob_invalidation_buffer_pct"] = 0.001
+    pending = _make_pending(side="SHORT", ob_high=40500.0)
+    # bar high > ob_high * (1 + 0.001) = 40540.5
+    bar = _make_bar(ts=pending["expires"] - 1000, lo=40400.0, hi=40550.0)
+    action, _ = bt._check_pending(bar, pending, inst)
+    assert action == "ob_invalid"
+
+
+def test_pending_expired():
+    import backtest_ig as bt
+    inst    = _dummy_instrument()
+    pending = _make_pending(base_ts=1_700_000_000_000, expires_offset_ms=0)
+    # bar ts > expires
+    bar = _make_bar(ts=pending["expires"] + 1, lo=40200.0, hi=40400.0)
+    action, _ = bt._check_pending(bar, pending, inst)
+    assert action == "expired"
+
+
+def test_pending_session_end_cancels(monkeypatch):
+    import backtest_ig as bt
+    inst    = _dummy_instrument()
+    pending = _make_pending()
+    bar     = _make_bar(ts=pending["expires"] - 1000, lo=40200.0, hi=40400.0)
+    monkeypatch.setattr(bt, "_is_session_end", lambda ts, i: True)
+    action, _ = bt._check_pending(bar, pending, inst)
+    assert action == "session_end"

@@ -184,3 +184,51 @@ def _check_trade(bar: dict, trade: dict, instrument: dict) -> tuple[str, float]:
         return "tp", trade["tp"]
 
     return "hold", 0.0
+
+
+# ── Simulation helpers ─────────────────────────────────────────────── #
+
+def _slice_windows(i: int, df_1d: pd.DataFrame, df_1h: pd.DataFrame,
+                   df_15m: pd.DataFrame, instrument: dict) -> tuple:
+    """Slice daily/1H/15m DataFrames to the view available at bar i."""
+    bar_ts = int(df_15m.iloc[i]["ts"])
+    daily  = df_1d[df_1d["ts"] <= bar_ts].tail(instrument["daily_limit"])
+    htf    = df_1h[df_1h["ts"] <= bar_ts].tail(instrument["htf_limit"])
+    m15    = df_15m.iloc[max(0, i - instrument["m15_limit"] + 1): i + 1]
+    return (
+        daily.reset_index(drop=True),
+        htf.reset_index(drop=True),
+        m15.reset_index(drop=True),
+    )
+
+
+def _calc_pnl(trade: dict) -> float:
+    """PnL in points. Accounts for 2-leg structure (partial + remainder)."""
+    side   = trade["side"]
+    entry  = trade["entry"]
+    exit_p = trade["exit_price"]
+    sign   = 1 if side == "LONG" else -1
+
+    if trade.get("partial_hit"):
+        partial_pts = sign * (trade["tp1"] - entry)
+        remain_pts  = sign * (exit_p - entry)
+        return partial_pts * 0.5 + remain_pts * 0.5
+    return sign * (exit_p - entry)
+
+
+def _collect_candles(df_15m: pd.DataFrame, entry_i: int, exit_i: int,
+                     before: int = 50) -> list[dict]:
+    """Return ~100 15m candles centred around the trade for the chart."""
+    start = max(0, entry_i - before)
+    end   = min(len(df_15m), exit_i + 5)
+    rows  = df_15m.iloc[start:end]
+    return [
+        {
+            "t": int(r["ts"]),
+            "o": round(float(r["open"]),  2),
+            "h": round(float(r["high"]),  2),
+            "l": round(float(r["low"]),   2),
+            "c": round(float(r["close"]), 2),
+        }
+        for _, r in rows.iterrows()
+    ]

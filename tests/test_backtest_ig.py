@@ -425,3 +425,77 @@ def test_trade_hold_when_no_level_hit():
     bar = _make_bar(ts=1_700_001_000_000, lo=40200.0, hi=40800.0)
     action, _ = bt._check_trade(bar, trade, inst)
     assert action == "hold"
+
+
+# ── Window slicing + PnL tests ─────────────────────────────────────── #
+
+def _make_ts_series(n, start_ms=1_700_000_000_000, step_ms=900_000):
+    """Generate n timestamps spaced step_ms apart."""
+    return [start_ms + i * step_ms for i in range(n)]
+
+
+def test_slice_windows_caps_to_limits():
+    import backtest_ig as bt
+    inst = _dummy_instrument()
+    inst["daily_limit"] = 5
+    inst["htf_limit"]   = 3
+    inst["m15_limit"]   = 10
+
+    n1d   = 20
+    n1h   = 15
+    n15m  = 50
+    step_day  = 86_400_000
+    step_1h   = 3_600_000
+    step_15m  = 900_000
+
+    df_1d  = _make_df([[1_699_000_000_000 + i * step_day,  100,110,90,100,0] for i in range(n1d)])
+    df_1h  = _make_df([[1_699_000_000_000 + i * step_1h,   100,110,90,100,0] for i in range(n1h)])
+    df_15m = _make_df([[1_700_000_000_000 + i * step_15m,  100,110,90,100,0] for i in range(n15m)])
+
+    # Use bar index i=40 (well inside all windows)
+    daily, htf, m15 = bt._slice_windows(40, df_1d, df_1h, df_15m, inst)
+    assert len(daily) <= inst["daily_limit"]
+    assert len(htf)   <= inst["htf_limit"]
+    assert len(m15)   <= inst["m15_limit"]
+
+
+def test_calc_pnl_long_full_tp():
+    import backtest_ig as bt
+    trade = _make_trade(side="LONG", entry=40500.0, sl=39500.0, tp=42500.0)
+    trade["partial_hit"] = False
+    trade["exit_price"]  = 42500.0
+    pnl = bt._calc_pnl(trade)
+    assert pnl == pytest.approx(2000.0)
+
+
+def test_calc_pnl_long_partial_then_tp():
+    import backtest_ig as bt
+    trade = _make_trade(side="LONG", entry=40500.0, sl=39500.0, tp=42500.0)
+    # tp1 = 40500 + 1000 = 41500
+    trade["partial_hit"]   = True
+    trade["partial_price"] = trade["tp1"]   # 41500
+    trade["exit_price"]    = 42500.0        # remainder hits full TP
+    pnl = bt._calc_pnl(trade)
+    # half at +1000pts, half at +2000pts → avg 1500
+    assert pnl == pytest.approx(1500.0)
+
+
+def test_calc_pnl_short_sl():
+    import backtest_ig as bt
+    trade = _make_trade(side="SHORT", entry=40500.0, sl=41500.0, tp=38500.0)
+    trade["partial_hit"] = False
+    trade["exit_price"]  = 41500.0   # SL hit
+    pnl = bt._calc_pnl(trade)
+    assert pnl == pytest.approx(-1000.0)
+
+
+def test_collect_candles_returns_correct_window():
+    import backtest_ig as bt
+    n = 200
+    df = _make_df([[1_700_000_000_000 + i * 900_000, 100, 110, 90, 100, 0] for i in range(n)])
+    entry_i = 100
+    exit_i  = 120
+    candles = bt._collect_candles(df, entry_i, exit_i, before=50)
+    assert len(candles) == (exit_i + 5) - (entry_i - 50)
+    assert "t" in candles[0]
+    assert "o" in candles[0]

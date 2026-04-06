@@ -61,6 +61,8 @@ Pure daily-chart strategy targeting post-squeeze breakouts.
 
 **Entry window:** price must be within 1–4% above the breakout trigger — entry is skipped if already missed.
 
+**Entry execution:** signal is queued to the 4-second entry watcher. The watcher polls mark price every 4s and fires the trade the moment price enters the window. If the daily signal disappears before the window is hit (e.g. price reverses, RSI drops), the pending entry is cancelled automatically.
+
 **Scale-in:** opens at 2.5% margin initially; adds remaining 2.5% after 1 hour if price is still within the entry window.
 
 **Risk:** 10x leverage · 5% of total portfolio · SL at box low · 50% partial close at +10% · 10% trailing stop on remainder
@@ -85,6 +87,8 @@ Long-only pullback strategy on the 15m timeframe.
 
 **Entry window:** price must be within 1–4% above the entry trigger.
 
+**Entry execution:** signal is queued to the 4-second entry watcher. Fires when price enters the window. Cancelled automatically if the 15m signal invalidates before the trigger is hit.
+
 **Risk:** 10x leverage · 5% of total portfolio · SL below pullback pivot low · 50% partial close at +10% · 10% trailing stop on remainder
 
 ---
@@ -100,6 +104,8 @@ Short-only strategy targeting reversals after momentum spikes.
 5. Entry: price breaches 1% below the previous day's low (intraday)
 
 **Entry window:** price must be 1–4% below the previous day's low — entry is skipped if already too far.
+
+**Entry execution:** signal is queued to the 4-second entry watcher. Fires when price drops into the window. Cancelled automatically if the daily signal invalidates or price rises above the SL level before trigger is hit.
 
 **Scale-in:** opens at 2.5% margin initially; adds remaining 2.5% after 1 hour if price is still within the entry window.
 
@@ -145,9 +151,10 @@ Short-only daily strategy targeting liquidity sweeps that fail to hold above a p
 4. Price has recovered a minimum ratio from the spike low back toward the peak (filters U-bottoms)
 5. No post-pivot candle has already exceeded peak level (fakeout watcher handles Phase 2)
 
-**Two-phase watcher:**
+**Two-phase watcher (4-second resolution):**
 - **Phase 1:** Waits for price to exceed `peak_level` (the fakeout sweep)
 - **Phase 2:** Waits for price to drop back below `peak_level` — SHORT entered on confirmation
+- Watcher runs in the 4-second entry thread and checks signal validity each cycle. Cancelled automatically if the S6 signal disappears or market turns BULLISH.
 
 **Risk:** 10x leverage · SL above spike high · 50% partial close at +10% · 10% trailing stop on remainder
 

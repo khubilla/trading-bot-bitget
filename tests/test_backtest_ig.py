@@ -199,3 +199,22 @@ def test_not_session_end_before_boundary():
     inst["session_end"] = (23, 59)
     ts = _ts_et(2026, 3, 10, 10, 0)
     assert bt._is_session_end(ts, inst) is False
+
+
+def test_not_in_session_at_session_end_boundary():
+    """A bar at exactly session_end time is outside the session (half-open interval)."""
+    import backtest_ig as bt
+    inst = _dummy_instrument()
+    inst["session_start"] = (9, 30)
+    inst["session_end"]   = (16, 0)
+    ts = _ts_et(2026, 3, 10, 16, 0)  # Monday 16:00 ET — exactly at session_end
+    assert bt._in_session(ts, inst) is False
+
+
+def test_is_session_end_weekend_returns_false():
+    """_is_session_end returns False on weekends even if time matches."""
+    import backtest_ig as bt
+    inst = _dummy_instrument()
+    inst["session_end"] = (23, 59)
+    ts = _ts_et(2026, 3, 7, 23, 59)  # Saturday
+    assert bt._is_session_end(ts, inst) is False

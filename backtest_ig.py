@@ -106,4 +106,4 @@ def _is_session_end(ts_ms: int, instrument: dict) -> bool:
     if now.weekday() >= 5:
         return False
     eh, em = instrument["session_end"]
-    return now.hour == eh and now.minute >= em
+    return now.hour > eh or (now.hour == eh and now.minute >= em)

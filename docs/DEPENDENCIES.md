@@ -307,8 +307,11 @@ ls data/snapshots/ 2>/dev/null | head -5 || echo "No snapshots yet"
   "qualified_pairs": list[str],# Pairs that passed S/R and volatility filters
   "pair_states": dict,        # Per-pair strategy analysis (see below)
   "sentiment": dict,          # Global sentiment state
+  "pending_signals": dict,    # Per-symbol entry watcher payloads (S2/S3/S4/S5/S6); survives restarts
 }
 ```
+
+**pending_signals:** Each key is a symbol. Value is a strategy-specific dict with at minimum `strategy`, `side`, `trigger` (or `peak_level` for S6), `expires`. Written by `state.save_pending_signals()`, read on startup via `state.load_pending_signals()`. Preserved across `reset()`. **Not consumed by dashboard** — bot-internal only.
 
 **pair_states structure:**
 

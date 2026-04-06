@@ -2084,6 +2084,234 @@ class MTFBot:
             f"[S6][{symbol}] 🕐 V-formation watcher | peak={candidate['s6_peak_level']:.5f}", "SIGNAL"
         )
 
+    def _fire_s2(self, symbol: str, sig: dict, mark: float, balance: float) -> None:
+        """Open S2 LONG at fire time. Runs S/R check against pair_states."""
+        ps = st.get_pair_state(symbol)
+        sr_resistance = ps.get("s2_sr_resistance_price")
+        if sr_resistance is not None:
+            clearance = (sr_resistance - mark) / mark
+            if clearance < config_s2.S2_MIN_SR_CLEARANCE:
+                logger.info(
+                    f"[S2][{symbol}] ⏸️ Fire skipped — resistance {sr_resistance:.5f} "
+                    f"only {clearance*100:.1f}% away"
+                )
+                st.add_scan_log(
+                    f"[S2][{symbol}] ⛔ Fire: resistance too close ({clearance*100:.1f}%)", "WARN"
+                )
+                self.pending_signals.pop(symbol, None)
+                st.save_pending_signals(self.pending_signals)
+                return
+        if config.CLAUDE_FILTER_ENABLED:
+            _sr_str = f"{round((sr_resistance - mark) / mark * 100, 1)}%" if sr_resistance else "none found"
+            _cd = claude_approve("S2", symbol, {
+                "RSI": sig.get("snap_daily_rsi", "?"),
+                "S/R clearance": _sr_str,
+                "Sentiment": sig.get("snap_sentiment", "?"),
+                "Entry": round(mark, 5), "SL": round(sig["s2_bl"], 5),
+            })
+            if not _cd["approved"]:
+                logger.info(f"[S2][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
+                st.add_scan_log(f"[S2][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
+                self.pending_signals.pop(symbol, None)
+                st.save_pending_signals(self.pending_signals)
+                return
+        st.add_scan_log(f"[S2][{symbol}] 🟢 LONG fired @ {mark:.5f}", "SIGNAL")
+        trade = tr.open_long(
+            symbol, box_low=sig["s2_bl"], leverage=config_s2.S2_LEVERAGE,
+            trade_size_pct=config_s2.S2_TRADE_SIZE_PCT * 0.5,
+            take_profit_pct=config_s2.S2_TAKE_PROFIT_PCT,
+            stop_loss_pct=config_s2.S2_STOP_LOSS_PCT,
+            use_s2_exits=True,
+        )
+        trade["strategy"]              = "S2"
+        trade["snap_daily_rsi"]        = sig.get("snap_daily_rsi")
+        trade["snap_box_range_pct"]    = sig.get("snap_box_range_pct")
+        trade["snap_sentiment"]        = sig.get("snap_sentiment")
+        trade["snap_sr_clearance_pct"] = round((sr_resistance - mark) / mark * 100, 1) \
+                                         if sr_resistance else None
+        trade["trade_id"] = uuid.uuid4().hex[:8]
+        _log_trade("S2_LONG", trade)
+        st.add_open_trade(trade)
+        try:
+            snapshot.save_snapshot(
+                trade_id=trade["trade_id"], event="open",
+                symbol=symbol, interval="1D", candles=[],
+                event_price=float(trade.get("entry", 0)),
+            )
+        except Exception as e:
+            logger.warning(f"[S2][{symbol}] snapshot save failed: {e}")
+        if PAPER_MODE: tr.tag_strategy(symbol, "S2")
+        self.active_positions[symbol] = {
+            "side": "LONG", "strategy": "S2",
+            "box_high": sig["s2_bh"], "box_low": sig["s2_bl"],
+            "scale_in_pending": True, "scale_in_after": time.time() + 3600,
+            "scale_in_trade_size_pct": config_s2.S2_TRADE_SIZE_PCT,
+            "trade_id": trade["trade_id"],
+        }
+
+    def _fire_s3(self, symbol: str, sig: dict, mark: float, balance: float) -> None:
+        """Open S3 LONG at fire time. Runs S/R check against pair_states."""
+        ps = st.get_pair_state(symbol)
+        sr_resistance = ps.get("s3_sr_resistance_price")
+        if sr_resistance is not None:
+            clearance = (sr_resistance - mark) / mark
+            if clearance < config_s3.S3_MIN_SR_CLEARANCE:
+                logger.info(
+                    f"[S3][{symbol}] ⏸️ Fire skipped — resistance {sr_resistance:.5f} "
+                    f"only {clearance*100:.1f}% away"
+                )
+                st.add_scan_log(
+                    f"[S3][{symbol}] ⛔ Fire: resistance too close ({clearance*100:.1f}%)", "WARN"
+                )
+                self.pending_signals.pop(symbol, None)
+                st.save_pending_signals(self.pending_signals)
+                return
+        if config.CLAUDE_FILTER_ENABLED:
+            _sr_str = f"{round((sr_resistance - mark) / mark * 100, 1)}%" if sr_resistance else "none found"
+            _cd = claude_approve("S3", symbol, {
+                "ADX": sig.get("snap_adx", "?"),
+                "S/R clearance (15m)": _sr_str,
+                "Sentiment": sig.get("snap_sentiment", "?"),
+                "Entry": round(mark, 5), "SL": round(sig["s3_sl"], 5),
+            })
+            if not _cd["approved"]:
+                logger.info(f"[S3][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
+                st.add_scan_log(f"[S3][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
+                self.pending_signals.pop(symbol, None)
+                st.save_pending_signals(self.pending_signals)
+                return
+        st.add_scan_log(f"[S3][{symbol}] 🟢 LONG fired @ {mark:.5f}", "SIGNAL")
+        trade = tr.open_long(
+            symbol, sl_floor=sig["s3_sl"], leverage=config_s3.S3_LEVERAGE,
+            trade_size_pct=config_s3.S3_TRADE_SIZE_PCT, use_s3_exits=True,
+        )
+        trade["strategy"]              = "S3"
+        trade["snap_adx"]              = sig.get("snap_adx")
+        trade["snap_entry_trigger"]    = sig.get("snap_entry_trigger")
+        trade["snap_sl"]               = sig.get("snap_sl")
+        trade["snap_rr"]               = sig.get("snap_rr")
+        trade["snap_sentiment"]        = sig.get("snap_sentiment")
+        trade["snap_sr_clearance_pct"] = sig.get("snap_sr_clearance_pct")
+        trade["trade_id"] = uuid.uuid4().hex[:8]
+        _log_trade("S3_LONG", trade)
+        st.add_open_trade(trade)
+        try:
+            snapshot.save_snapshot(
+                trade_id=trade["trade_id"], event="open",
+                symbol=symbol, interval=config_s3.S3_LTF_INTERVAL, candles=[],
+                event_price=float(trade.get("entry", 0)),
+            )
+        except Exception as e:
+            logger.warning(f"[S3][{symbol}] snapshot save failed: {e}")
+        if PAPER_MODE: tr.tag_strategy(symbol, "S3")
+        self.active_positions[symbol] = {
+            "side": "LONG", "strategy": "S3",
+            "box_high": sig["trigger"], "box_low": sig["s3_sl"],
+            "trade_id": trade["trade_id"],
+        }
+
+    def _fire_s4(self, symbol: str, sig: dict, mark: float, balance: float) -> None:
+        """Open S4 SHORT at fire time. Runs S/R check against pair_states."""
+        ps = st.get_pair_state(symbol)
+        sr_support_pct = ps.get("s4_sr_support_pct")
+        if sr_support_pct is not None and sr_support_pct < config_s4.S4_MIN_SR_CLEARANCE * 100:
+            logger.info(
+                f"[S4][{symbol}] ⏸️ Fire skipped — support clearance {sr_support_pct:.1f}% too small"
+            )
+            st.add_scan_log(
+                f"[S4][{symbol}] ⛔ Fire: support too close ({sr_support_pct:.1f}%)", "WARN"
+            )
+            self.pending_signals.pop(symbol, None)
+            st.save_pending_signals(self.pending_signals)
+            return
+        if config.CLAUDE_FILTER_ENABLED:
+            _sr_str = f"{sr_support_pct:.1f}%" if sr_support_pct else "none found"
+            _cd = claude_approve("S4", symbol, {
+                "RSI peak": sig.get("snap_rsi_peak", "?"),
+                "RSI divergence": str(sig.get("snap_rsi_div", "?")),
+                "S/R clearance (spike base)": _sr_str,
+                "Sentiment": sig.get("snap_sentiment", "?"),
+                "Entry": round(mark, 5), "SL": round(sig["s4_sl"], 5),
+            })
+            if not _cd["approved"]:
+                logger.info(f"[S4][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
+                st.add_scan_log(f"[S4][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
+                self.pending_signals.pop(symbol, None)
+                st.save_pending_signals(self.pending_signals)
+                return
+        s4_sl_actual = mark * (1 + 0.50 / config_s4.S4_LEVERAGE)
+        st.add_scan_log(
+            f"[S4][{symbol}] 🔴 SHORT fired @ {mark:.5f} | entry≤{sig['trigger']:.5f}", "SIGNAL"
+        )
+        trade = tr.open_short(
+            symbol, sl_floor=s4_sl_actual, leverage=config_s4.S4_LEVERAGE,
+            trade_size_pct=config_s4.S4_TRADE_SIZE_PCT * 0.5, use_s4_exits=True,
+        )
+        trade["strategy"]              = "S4"
+        trade["snap_rsi"]              = sig.get("snap_rsi")
+        trade["snap_rsi_peak"]         = sig.get("snap_rsi_peak")
+        trade["snap_spike_body_pct"]   = sig.get("snap_spike_body_pct")
+        trade["snap_rsi_div"]          = sig.get("snap_rsi_div")
+        trade["snap_rsi_div_str"]      = sig.get("snap_rsi_div_str")
+        trade["snap_sl"]               = round(s4_sl_actual, 8)
+        trade["snap_sentiment"]        = sig.get("snap_sentiment")
+        trade["snap_sr_clearance_pct"] = sr_support_pct
+        trade["trade_id"] = uuid.uuid4().hex[:8]
+        _log_trade("S4_SHORT", trade)
+        st.add_open_trade(trade)
+        try:
+            snapshot.save_snapshot(
+                trade_id=trade["trade_id"], event="open",
+                symbol=symbol, interval="1D", candles=[],
+                event_price=float(trade.get("entry", 0)),
+            )
+        except Exception as e:
+            logger.warning(f"[S4][{symbol}] snapshot save failed: {e}")
+        if PAPER_MODE: tr.tag_strategy(symbol, "S4")
+        self.active_positions[symbol] = {
+            "side": "SHORT", "strategy": "S4",
+            "box_high": sig["s4_sl"], "box_low": sig["trigger"],
+            "scale_in_pending": True, "scale_in_after": time.time() + 3600,
+            "scale_in_trade_size_pct": config_s4.S4_TRADE_SIZE_PCT,
+            "s4_prev_low": sig["prev_low"],
+            "trade_id": trade["trade_id"],
+        }
+
+    def _fire_s6(self, symbol: str, sig: dict, mark: float, balance: float) -> None:
+        """Open S6 SHORT after two-phase fakeout confirmed."""
+        sl_price = mark * (1 + config_s6.S6_SL_PCT / config_s6.S6_LEVERAGE)
+        st.add_scan_log(
+            f"[S6][{symbol}] 🔴 SHORT | peak={sig['peak_level']:.5f} | "
+            f"fakeout confirmed → entry @ {mark:.5f}", "SIGNAL"
+        )
+        trade = tr.open_short(
+            symbol, sl_floor=sl_price, leverage=config_s6.S6_LEVERAGE,
+            trade_size_pct=config_s6.S6_TRADE_SIZE_PCT, use_s6_exits=True,
+        )
+        trade["strategy"]              = "S6"
+        trade["snap_s6_peak"]          = sig.get("snap_s6_peak")
+        trade["snap_s6_drop_pct"]      = sig.get("snap_s6_drop_pct")
+        trade["snap_s6_rsi_at_peak"]   = sig.get("snap_s6_rsi_at_peak")
+        trade["snap_sentiment"]        = sig.get("snap_sentiment")
+        trade["snap_sr_clearance_pct"] = None
+        trade["trade_id"] = uuid.uuid4().hex[:8]
+        _log_trade("S6_SHORT", trade)
+        st.add_open_trade(trade)
+        try:
+            snapshot.save_snapshot(
+                trade_id=trade["trade_id"], event="open",
+                symbol=symbol, interval="1D", candles=[],
+                event_price=float(trade.get("entry", 0)),
+            )
+        except Exception as e:
+            logger.warning(f"[S6][{symbol}] snapshot save failed: {e}")
+        if PAPER_MODE: tr.tag_strategy(symbol, "S6")
+        self.active_positions[symbol] = {
+            "side": "SHORT", "strategy": "S6",
+            "box_high": sl_price, "box_low": sig["peak_level"],
+            "trade_id": trade["trade_id"],
+        }
+
     def _entry_watcher_loop(self) -> None:
         """Background thread — polls every 4s for:
         1. S5 pending signals: poll order fill status + OB invalidation + expiry

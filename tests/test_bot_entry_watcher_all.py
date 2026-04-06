@@ -132,3 +132,122 @@ def test_queue_saves_pending_signals(monkeypatch):
                         lambda signals: saved.update(signals))
     b._queue_s2_pending(_make_s2_candidate())
     assert "BTCUSDT" in saved
+
+
+def _make_pair_state(s2_sr=None, s3_sr=None, s4_sr_pct=None,
+                     s2_signal="LONG", s3_signal="LONG", s4_signal="SHORT"):
+    return {
+        "s2_sr_resistance_price": s2_sr,
+        "s2_signal": s2_signal,
+        "s3_sr_resistance_price": s3_sr,
+        "s3_signal": s3_signal,
+        "s4_sr_support_pct": s4_sr_pct,
+        "s4_signal": s4_signal,
+    }
+
+
+def test_fire_s2_opens_long_when_sr_clear(monkeypatch):
+    b = _make_bot(monkeypatch)
+    monkeypatch.setattr(bot.config_s2, "S2_MIN_SR_CLEARANCE", 0.05)
+    monkeypatch.setattr(bot.st, "get_pair_state",
+        lambda sym: _make_pair_state(s2_sr=55000.0))  # 10% above mark=50000
+    opened = {}
+    monkeypatch.setattr(bot.tr, "open_long",
+        lambda sym, **kw: opened.update({"sym": sym}) or
+        {"symbol": sym, "side": "LONG", "entry": 50000.0, "sl": 47000.0,
+         "tp": None, "qty": "0.001", "leverage": 10, "margin": 0.5})
+    monkeypatch.setattr(bot.st, "add_open_trade", lambda *a, **kw: None)
+    monkeypatch.setattr(bot, "_log_trade", lambda *a, **kw: None)
+    monkeypatch.setattr(bot.snapshot, "save_snapshot", lambda **kw: None)
+
+    sig = {
+        "strategy": "S2", "side": "LONG", "trigger": 50000.0,
+        "s2_bh": 50000.0, "s2_bl": 47000.0,
+        "snap_daily_rsi": 62.5, "snap_box_range_pct": 6.3,
+        "snap_sentiment": "NEUTRAL",
+        "expires": 9999999999,
+    }
+    b._fire_s2("BTCUSDT", sig, mark=50000.0, balance=1000.0)
+    assert opened.get("sym") == "BTCUSDT"
+
+
+def test_fire_s2_skips_when_sr_too_close(monkeypatch):
+    b = _make_bot(monkeypatch)
+    monkeypatch.setattr(bot.st, "get_pair_state",
+        lambda sym: _make_pair_state(s2_sr=50200.0))  # only 0.4% clearance
+    opened = {}
+    monkeypatch.setattr(bot.tr, "open_long",
+        lambda sym, **kw: opened.update({"sym": sym}) or {})
+
+    sig = {"strategy": "S2", "side": "LONG", "trigger": 50000.0,
+           "s2_bh": 50000.0, "s2_bl": 47000.0,
+           "snap_daily_rsi": 62.5, "snap_box_range_pct": 6.3,
+           "snap_sentiment": "NEUTRAL", "expires": 9999999999}
+    b._fire_s2("BTCUSDT", sig, mark=50000.0, balance=1000.0)
+    assert "sym" not in opened, "Must not open trade when S/R too close"
+
+
+def test_fire_s3_opens_long_when_sr_clear(monkeypatch):
+    b = _make_bot(monkeypatch)
+    monkeypatch.setattr(bot.config_s3, "S3_MIN_SR_CLEARANCE", 0.05)
+    monkeypatch.setattr(bot.st, "get_pair_state",
+        lambda sym: _make_pair_state(s3_sr=2200.0))  # 10% above mark=2000
+    opened = {}
+    monkeypatch.setattr(bot.tr, "open_long",
+        lambda sym, **kw: opened.update({"sym": sym}) or
+        {"symbol": sym, "side": "LONG", "entry": 2000.0, "sl": 1900.0,
+         "tp": None, "qty": "0.1", "leverage": 10, "margin": 20.0})
+    monkeypatch.setattr(bot.st, "add_open_trade", lambda *a, **kw: None)
+    monkeypatch.setattr(bot, "_log_trade", lambda *a, **kw: None)
+    monkeypatch.setattr(bot.snapshot, "save_snapshot", lambda **kw: None)
+
+    sig = {"strategy": "S3", "side": "LONG", "trigger": 2000.0,
+           "s3_sl": 1900.0, "snap_adx": 28.5, "snap_entry_trigger": 2000.0,
+           "snap_sl": 1900.0, "snap_rr": 2.0, "snap_sentiment": "NEUTRAL",
+           "snap_sr_clearance_pct": 10.0, "expires": 9999999999}
+    b._fire_s3("ETHUSDT", sig, mark=2000.0, balance=1000.0)
+    assert opened.get("sym") == "ETHUSDT"
+
+
+def test_fire_s4_opens_short_when_sr_clear(monkeypatch):
+    b = _make_bot(monkeypatch)
+    monkeypatch.setattr(bot.config_s4, "S4_MIN_SR_CLEARANCE", 0.05)
+    monkeypatch.setattr(bot.st, "get_pair_state",
+        lambda sym: _make_pair_state(s4_sr_pct=8.0))  # 8% > min clearance
+    opened = {}
+    monkeypatch.setattr(bot.tr, "open_short",
+        lambda sym, **kw: opened.update({"sym": sym}) or
+        {"symbol": sym, "side": "SHORT", "entry": 95.0, "sl": 105.0,
+         "tp": None, "qty": "10", "leverage": 10, "margin": 5.0})
+    monkeypatch.setattr(bot.st, "add_open_trade", lambda *a, **kw: None)
+    monkeypatch.setattr(bot, "_log_trade", lambda *a, **kw: None)
+    monkeypatch.setattr(bot.snapshot, "save_snapshot", lambda **kw: None)
+
+    sig = {"strategy": "S4", "side": "SHORT", "trigger": 95.0,
+           "s4_sl": 105.0, "prev_low": 100.0,
+           "snap_rsi": 45.0, "snap_rsi_peak": 85.0,
+           "snap_spike_body_pct": 65.0, "snap_rsi_div": True,
+           "snap_rsi_div_str": "RSI divergence", "snap_sentiment": "NEUTRAL",
+           "expires": 9999999999}
+    b._fire_s4("SOLUSDT", sig, mark=95.0, balance=1000.0)
+    assert opened.get("sym") == "SOLUSDT"
+
+
+def test_fire_s6_opens_short(monkeypatch):
+    b = _make_bot(monkeypatch)
+    opened = {}
+    monkeypatch.setattr(bot.tr, "open_short",
+        lambda sym, **kw: opened.update({"sym": sym}) or
+        {"symbol": sym, "side": "SHORT", "entry": 390.0, "sl": 410.0,
+         "tp": None, "qty": "5", "leverage": 10, "margin": 20.0})
+    monkeypatch.setattr(bot.st, "add_open_trade", lambda *a, **kw: None)
+    monkeypatch.setattr(bot, "_log_trade", lambda *a, **kw: None)
+    monkeypatch.setattr(bot.snapshot, "save_snapshot", lambda **kw: None)
+
+    sig = {"strategy": "S6", "side": "SHORT", "peak_level": 400.0,
+           "sl": 420.0, "drop_pct": 0.35, "rsi_at_peak": 78.0,
+           "snap_s6_peak": 400.0, "snap_s6_drop_pct": 35.0,
+           "snap_s6_rsi_at_peak": 78.0, "snap_sentiment": "BEARISH",
+           "expires": 9999999999}
+    b._fire_s6("BNBUSDT", sig, mark=390.0, balance=1000.0)
+    assert opened.get("sym") == "BNBUSDT"

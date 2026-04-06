@@ -128,6 +128,10 @@ def patch_pair_state(symbol: str, patch: dict):
     s["pair_states"][symbol] = {**existing, **patch, "updated_at": _now()}
     _write(s)
 
+def get_pair_state(symbol: str) -> dict:
+    """Return the pair_states entry for symbol, or {} if not present."""
+    return _read().get("pair_states", {}).get(symbol, {})
+
 def add_open_trade(trade: dict):
     s = _read()
     if not trade.get("opened_at"):

@@ -42,7 +42,8 @@ _default: dict = {
         "wins":         0,
         "losses":       0,
         "total_pnl":    0.0,
-    }
+    },
+    "pending_signals": {},   # survives reset(): {symbol: {strategy, side, trigger, ...}}
 }
 
 
@@ -75,7 +76,8 @@ def reset():
     fresh = dict(_default)
     fresh["trade_history"]   = s.get("trade_history", [])
     fresh["stats"]           = s.get("stats", dict(_default["stats"]))
-    fresh["position_memory"] = s.get("position_memory", {})
+    fresh["position_memory"]  = s.get("position_memory", {})
+    fresh["pending_signals"]  = s.get("pending_signals", {})
     _write(fresh)
 
 def set_status(status: str):
@@ -165,6 +167,16 @@ def update_open_trade_mark_price(symbol: str, mark_price: float):
             t["mark_price"] = mark_price
             break
     _write(s)
+
+def save_pending_signals(signals: dict) -> None:
+    """Persist the full pending_signals dict to state.json."""
+    s = _read()
+    s["pending_signals"] = signals
+    _write(s)
+
+def load_pending_signals() -> dict:
+    """Load pending_signals from state.json. Returns {} if not present."""
+    return _read().get("pending_signals", {})
 
 def update_open_trade_sl(symbol: str, new_sl: float):
     s = _read()

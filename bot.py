@@ -263,6 +263,9 @@ class MTFBot:
         self.candidates: list = []
         # S6 two-phase entry watchers — persist across scan cycles
         self.s6_watchers: dict[str, dict] = {}
+        # Deferred PnL reconcile — {symbol: {trade_id, opened_at, entry, partial_pnl, side, strategy, row_timestamp}}
+        # Written when get_history_position returns None at close time; retried each tick.
+        self._pending_reconcile: dict[str, dict] = {}
 
         st.reset()
         st.set_status("RUNNING")
@@ -484,7 +487,73 @@ class MTFBot:
                 st.add_scan_log(f"Tick error: {e}", "ERROR")
             time.sleep(config.POLL_INTERVAL_SEC)
 
+    def _flush_pending_reconcile(self):
+        """Retry get_history_position for any trade whose close PnL wasn't available at close time.
+        Patches the PENDING_RECONCILE row in trades.csv in-place when the API settles."""
+        if not self._pending_reconcile:
+            return
+        for sym in list(self._pending_reconcile.keys()):
+            pr = self._pending_reconcile[sym]
+            hist = tr.get_history_position(
+                sym,
+                open_time_iso=pr.get("opened_at"),
+                entry_price=pr.get("entry"),
+                retries=1,
+                retry_delay=0,
+            )
+            if hist is None:
+                continue  # still not settled — try again next tick
+            partial_pnl = pr.get("partial_pnl", 0.0)
+            close_pnl   = round(hist["pnl"] - partial_pnl, 4)
+            total_pnl   = close_pnl + partial_pnl
+            result      = "WIN" if total_pnl >= 0 else "LOSS"
+            exit_price  = hist.get("exit_price")
+            pnl_pct     = None
+            if exit_price and pr.get("ot_entry") and pr.get("leverage"):
+                _chg = (exit_price - pr["ot_entry"]) / pr["ot_entry"] if pr.get("side") == "LONG" \
+                       else (pr["ot_entry"] - exit_price) / pr["ot_entry"]
+                pnl_pct = round(_chg * pr["leverage"] * 100, 2)
+
+            # Patch the placeholder row in trades.csv
+            try:
+                with open(config.TRADE_LOG, newline="") as f:
+                    rows = list(csv.DictReader(f))
+                    fieldnames = csv.DictReader(open(config.TRADE_LOG)).fieldnames
+                patched = False
+                for row in rows:
+                    if (row.get("trade_id") == pr["trade_id"]
+                            and "_CLOSE" in row.get("action", "")
+                            and row.get("exit_reason") == "PENDING_RECONCILE"):
+                        row["pnl"]          = str(close_pnl)
+                        row["result"]       = result
+                        row["exit_reason"]  = ""
+                        row["exit_price"]   = str(round(exit_price, 8)) if exit_price else ""
+                        if pnl_pct is not None:
+                            row["pnl_pct"]  = str(pnl_pct)
+                        patched = True
+                        break
+                if patched:
+                    with open(config.TRADE_LOG, "w", newline="") as f:
+                        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore", restval="")
+                        w.writeheader()
+                        w.writerows(rows)
+                    # Fix up stats — result may differ from placeholder LOSS
+                    _rebuild_stats_from_csv(config.TRADE_LOG)
+                    logger.info(
+                        f"[{pr['strategy']}][{sym}] ✅ Reconciled PnL={close_pnl:+.4f} "
+                        f"({result}) exit={exit_price}"
+                    )
+                    st.add_scan_log(
+                        f"[{pr['strategy']}][{sym}] Reconciled {result} | PnL={total_pnl:+.4f}", "INFO"
+                    )
+            except Exception as e:
+                logger.warning(f"[{pr['strategy']}][{sym}] reconcile patch failed: {e}")
+                continue
+
+            del self._pending_reconcile[sym]
+
     def _tick(self):
+        self._flush_pending_reconcile()
         now = time.time()
 
         # ── 1. Rescan ────────────────────────────────────────────── #
@@ -792,6 +861,7 @@ class MTFBot:
                     pnl_pct     = None
                     exit_reason = ""
                     _lc         = None
+                    _exit_price = None
                     if PAPER_MODE:
                         _lc = tr.get_last_close(sym)
                         if _lc:
@@ -812,9 +882,32 @@ class MTFBot:
                         if _hist is not None:
                             last_pnl   = _hist["pnl"] - ap.get("partial_pnl", 0.0)
                             _exit_price = _hist.get("exit_price")  # actual closeAvgPrice from Bitget
-                        # API unsettled after retries: fall back to unrealised_pnl
-                        elif ap.get("partial_pnl"):
-                            last_pnl += ap["partial_pnl"]
+                        else:
+                            # API not yet settled — write placeholder row and retry next tick
+                            _row_ts = datetime.now(timezone.utc).isoformat()
+                            _log_trade(f"{ap['strategy']}_CLOSE", {
+                                "trade_id":    ap.get("trade_id", ""),
+                                "symbol":      sym, "side": ap["side"],
+                                "pnl":         0, "result": "",
+                                "exit_reason": "PENDING_RECONCILE",
+                            })
+                            self._pending_reconcile[sym] = {
+                                "trade_id":    ap.get("trade_id", ""),
+                                "opened_at":   _ot_opened,
+                                "entry":       _ot_entry,
+                                "partial_pnl": ap.get("partial_pnl", 0.0),
+                                "side":        ap["side"],
+                                "strategy":    ap["strategy"],
+                                "row_ts":      _row_ts,
+                                "leverage":    float(_ot.get("leverage") or 1) if _ot else 1,
+                                "ot_entry":    float(_ot.get("entry") or 0) if _ot else 0,
+                            }
+                            logger.warning(f"[{ap['strategy']}][{sym}] PnL pending — placeholder written, will reconcile next tick")
+                            st.close_trade(sym, "LOSS", 0)  # temporary; overwritten by reconcile
+                            st.clear_position_memory(sym)
+                            del self.active_positions[sym]
+                            continue
+
                     # Total PnL for dashboard = close portion + any already-logged partial
                     total_pnl = last_pnl + ap.get("partial_pnl", 0.0)
                     result = "WIN" if total_pnl >= 0 else "LOSS"
@@ -1924,6 +2017,121 @@ class MTFBot:
         )
         st.add_scan_log(
             f"[S5][{symbol}] 🕐 PENDING {side} | trigger={trigger:.5f} | TP={tp:.5f}", "SIGNAL"
+        )
+
+    def _queue_s2_pending(self, c: dict) -> None:
+        """Queue an S2 LONG breakout for the entry watcher."""
+        symbol = c["symbol"]
+        self.pending_signals[symbol] = {
+            "strategy":           "S2",
+            "side":               "LONG",
+            "trigger":            c["s2_bh"],
+            "s2_bh":              c["s2_bh"],
+            "s2_bl":              c["s2_bl"],
+            "priority_rank":      c.get("priority_rank", 999),
+            "priority_score":     c.get("priority_score", 0.0),
+            "snap_daily_rsi":     round(c["s2_rsi"], 1),
+            "snap_box_range_pct": round((c["s2_bh"] - c["s2_bl"]) / c["s2_bl"] * 100, 3)
+                                  if c["s2_bh"] and c["s2_bl"] else None,
+            "snap_sentiment":     self.sentiment.direction if self.sentiment else "?",
+        }
+        st.save_pending_signals(self.pending_signals)
+        logger.info(
+            f"[S2][{symbol}] 🕐 PENDING LONG queued | "
+            f"trigger={c['s2_bh']:.5f} | SL={c['s2_bl']:.5f}"
+        )
+        st.add_scan_log(
+            f"[S2][{symbol}] 🕐 PENDING LONG | trigger={c['s2_bh']:.5f}", "SIGNAL"
+        )
+
+    def _queue_s3_pending(self, c: dict) -> None:
+        """Queue an S3 LONG pullback for the entry watcher."""
+        symbol = c["symbol"]
+        s3_trigger = c["s3_trigger"]
+        s3_sl      = c["s3_sl"]
+        rr = round(config_s3.S3_TRAILING_TRIGGER_PCT * s3_trigger / (s3_trigger - s3_sl), 2) \
+             if s3_trigger and s3_sl and s3_trigger > s3_sl else None
+        self.pending_signals[symbol] = {
+            "strategy":           "S3",
+            "side":               "LONG",
+            "trigger":            s3_trigger,
+            "s3_sl":              s3_sl,
+            "priority_rank":      c.get("priority_rank", 999),
+            "priority_score":     c.get("priority_score", 0.0),
+            "snap_adx":           round(c["s3_adx"], 1) if c.get("s3_adx") else None,
+            "snap_entry_trigger": round(s3_trigger, 8),
+            "snap_sl":            round(s3_sl, 8),
+            "snap_rr":            rr,
+            "snap_sentiment":     self.sentiment.direction if self.sentiment else "?",
+            "snap_sr_clearance_pct": c.get("s3_sr_resistance_pct"),
+        }
+        st.save_pending_signals(self.pending_signals)
+        logger.info(
+            f"[S3][{symbol}] 🕐 PENDING LONG queued | "
+            f"trigger={s3_trigger:.5f} | SL={s3_sl:.5f}"
+        )
+        st.add_scan_log(
+            f"[S3][{symbol}] 🕐 PENDING LONG | trigger={s3_trigger:.5f}", "SIGNAL"
+        )
+
+    def _queue_s4_pending(self, c: dict) -> None:
+        """Queue an S4 SHORT spike-reversal for the entry watcher."""
+        symbol = c["symbol"]
+        s4_trigger = c["s4_trigger"]
+        s4_sl      = c["s4_sl"]
+        prev_low_approx = s4_trigger / (1 - config_s4.S4_ENTRY_BUFFER)
+        self.pending_signals[symbol] = {
+            "strategy":             "S4",
+            "side":                 "SHORT",
+            "trigger":              s4_trigger,
+            "s4_sl":                s4_sl,
+            "prev_low":             prev_low_approx,
+            "priority_rank":        c.get("priority_rank", 999),
+            "priority_score":       c.get("priority_score", 0.0),
+            "snap_rsi":             round(c["s4_rsi"], 1),
+            "snap_rsi_peak":        round(c["s4_rsi_peak"], 1),
+            "snap_spike_body_pct":  round(c["s4_body_pct"] * 100, 1),
+            "snap_rsi_div":         c["s4_div"],
+            "snap_rsi_div_str":     c["s4_div_str"],
+            "snap_sentiment":       self.sentiment.direction if self.sentiment else "?",
+        }
+        st.save_pending_signals(self.pending_signals)
+        logger.info(
+            f"[S4][{symbol}] 🕐 PENDING SHORT queued | "
+            f"trigger≤{s4_trigger:.5f} | SL={s4_sl:.5f}"
+        )
+        st.add_scan_log(
+            f"[S4][{symbol}] 🕐 PENDING SHORT | trigger≤{s4_trigger:.5f}", "SIGNAL"
+        )
+
+    def _queue_s6_pending(self, candidate: dict) -> None:
+        """Queue an S6 two-phase V-formation watcher into pending_signals."""
+        symbol = candidate["symbol"]
+        self.pending_signals[symbol] = {
+            "strategy":           "S6",
+            "side":               "SHORT",
+            "peak_level":         candidate["s6_peak_level"],
+            "sl":                 candidate["s6_sl"],
+            "drop_pct":           candidate["s6_drop_pct"],
+            "rsi_at_peak":        candidate["s6_rsi_at_peak"],
+            "fakeout_seen":       False,
+            "detected_at":        time.time(),
+            "snap_s6_peak":       round(candidate["s6_peak_level"], 8),
+            "snap_s6_drop_pct":   round(candidate["s6_drop_pct"] * 100, 2),
+            "snap_s6_rsi_at_peak": round(candidate["s6_rsi_at_peak"], 1),
+            "snap_sentiment":     self.sentiment.direction if self.sentiment else None,
+            "priority_rank":      candidate.get("priority_rank", 999),
+            "priority_score":     candidate.get("priority_score", 0.0),
+        }
+        st.patch_pair_state(symbol, {"s6_fakeout_seen": False})
+        st.save_pending_signals(self.pending_signals)
+        logger.info(
+            f"[S6][{symbol}] 🕐 V-formation watcher queued | "
+            f"peak={candidate['s6_peak_level']:.5f} | SL={candidate['s6_sl']:.5f}"
+        )
+        st.add_scan_log(
+            f"[S6][{symbol}] 🕐 V-formation watcher | peak={candidate['s6_peak_level']:.5f}",
+            "SIGNAL"
         )
 
     def _queue_s6_watcher(self, candidate: dict) -> None:

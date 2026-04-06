@@ -273,6 +273,7 @@ def run_instrument(instrument: dict,
                 trade["exit_price"]  = price
                 trade["exit_dt"]     = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
                 trade["pnl_pts"]     = _calc_pnl(trade)
+                trade["pnl_pct"]     = round(trade["pnl_pts"] / trade["entry"] * 100, 3)
                 trade["candles"]     = _collect_candles(df_15m, trade["entry_i"], i)
                 trades.append(trade)
                 state = "IDLE"

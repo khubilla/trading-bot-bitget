@@ -394,3 +394,300 @@ def _compute_stats(result: dict) -> dict:
         "trades":        trades,
         "cancelled_list":cancelled,
     }
+
+
+# ── Report builder ─────────────────────────────────────────────────── #
+
+def build_report(all_stats: list[dict], run_time: str) -> str:
+    """Build a self-contained dark-theme HTML report with inline chart data."""
+
+    def col(v):
+        if isinstance(v, (int, float)):
+            return "#00d68f" if v > 0 else "#ff4d6a" if v < 0 else "#8899aa"
+        return "#c9d8e8"
+
+    def card(label, val, sfx=""):
+        return (f'<div class="stat"><div class="stat-label">{label}</div>'
+                f'<div class="stat-val" style="color:{col(val)}">{val}{sfx}</div></div>')
+
+    def stats_grid(s):
+        return (
+            f'<div class="grid">'
+            f'{card("Signals",       s["signals"])}'
+            f'{card("Filled",        s["filled"])}'
+            f'{card("Fill Rate",     s["fill_rate"], "%")}'
+            f'{card("Win Rate",      s["win_rate"],  "%")}'
+            f'{card("Partial Rate",  s["partial_rate"], "%")}'
+            f'{card("Total PnL",     s["total_pnl_pts"], " pts")}'
+            f'{card("Avg Win",       s["avg_win_pts"],  " pts")}'
+            f'{card("Avg Loss",      s["avg_loss_pts"], " pts")}'
+            f'{card("Profit Factor", s["profit_factor"])}'
+            f'<div class="stat"><div class="stat-label">Cancelled</div>'
+            f'<div style="font-size:11px;color:#8899aa;padding-top:4px">'
+            f'OB: {s["cancelled"]["OB_INVALID"]}<br>'
+            f'Exp: {s["cancelled"]["EXPIRED"]}<br>'
+            f'Sess: {s["cancelled"]["SESSION_END"]}'
+            f'</div></div>'
+            f'</div>'
+        )
+
+    def trade_table(trades, inst_id):
+        if not trades:
+            return '<p style="color:#8899aa;padding:20px">No completed trades</p>'
+        rows = ""
+        for idx, t in enumerate(sorted(trades, key=lambda x: x["entry_dt"], reverse=True)):
+            rc  = "#00d68f" if t["pnl_pts"] > 0 else "#ff4d6a"
+            pc  = col(t["pnl_pts"])
+            sid = "LONG" if t["side"] == "LONG" else "SHORT"
+            sc  = "#00d68f" if sid == "LONG" else "#ff4d6a"
+            prt = "✓" if t.get("partial_hit") else "—"
+            edt = t["exit_dt"].strftime("%Y-%m-%d %H:%M") if t.get("exit_dt") else "—"
+            edt_entry = t["entry_dt"].strftime("%Y-%m-%d %H:%M") if t.get("entry_dt") else "—"
+            chart_btn = ""
+            if t.get("candles"):
+                cdata = json.dumps(t["candles"])
+                meta  = json.dumps({
+                    "side":    t["side"],
+                    "entry":   t["entry"],
+                    "sl":      t["sl"],
+                    "tp":      t["tp"],
+                    "tp1":     t["tp1"],
+                    "ob_low":  t["ob_low"],
+                    "ob_high": t["ob_high"],
+                    "exit_price":  t.get("exit_price", 0),
+                    "exit_reason": t.get("exit_reason", ""),
+                    "partial_hit": t.get("partial_hit", False),
+                    "partial_price": t.get("partial_price", 0),
+                })
+                chart_btn = (
+                    f'<button class="chart-btn" '
+                    f'onclick=\'openChart("{inst_id}",{idx},{cdata},{meta})\'>Chart</button>'
+                )
+            rows += (
+                f'<tr>'
+                f'<td>{edt_entry}</td>'
+                f'<td style="color:{sc}">{sid}</td>'
+                f'<td>{t["entry"]:.1f}</td>'
+                f'<td>{t["sl"]:.1f}</td>'
+                f'<td>{t["tp"]:.1f}</td>'
+                f'<td>{prt}</td>'
+                f'<td>{t.get("exit_reason","—")}</td>'
+                f'<td>{edt}</td>'
+                f'<td>{t.get("exit_price",0):.1f}</td>'
+                f'<td style="color:{pc}">{t["pnl_pts"]:+.1f}</td>'
+                f'<td>{chart_btn}</td>'
+                f'</tr>'
+            )
+        return (
+            f'<div style="overflow-x:auto"><table><thead><tr>'
+            f'<th>Entry</th><th>Side</th><th>Entry$</th><th>SL</th><th>TP</th>'
+            f'<th>Partial</th><th>Exit Reason</th><th>Exit Time</th>'
+            f'<th>Exit$</th><th>PnL (pts)</th><th></th>'
+            f'</tr></thead><tbody>{rows}</tbody></table></div>'
+        )
+
+    # Build per-instrument sections
+    inst_sections = ""
+    tab_headers   = '<div class="tab active" onclick="sw(\'overall\')">Overall</div>'
+    for s in all_stats:
+        iid = s["name"].lower()
+        tab_headers += f'<div class="tab" onclick="sw(\'{iid}\')">{s["name"]} ({s["filled"]})</div>'
+
+    overall_trades = []
+    for s in all_stats:
+        overall_trades.extend(s["trades"])
+    ovr_pnl  = round(sum(t["pnl_pts"] for t in overall_trades), 1)
+    ovr_wins = sum(1 for t in overall_trades if t["pnl_pts"] > 0)
+    ovr_wr   = round(ovr_wins / len(overall_trades) * 100, 1) if overall_trades else 0
+
+    for s in all_stats:
+        iid = s["name"].lower()
+        inst_sections += (
+            f'<div id="t{iid}" class="tc">'
+            f'<h2>{s["name"]}</h2>'
+            f'{stats_grid(s)}'
+            f'{trade_table(s["trades"], iid)}'
+            f'</div>'
+        )
+
+    return f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>IG Backtest Report — {run_time}</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#0d1117;color:#c9d8e8;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;padding:24px}}
+h1{{font-size:22px;color:#e8f0f8;margin-bottom:4px}}
+h2{{font-size:15px;color:#8899aa;margin:28px 0 14px;border-bottom:1px solid #1e2d3d;padding-bottom:8px}}
+.meta{{color:#8899aa;font-size:12px;margin-bottom:28px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:12px;margin-bottom:20px}}
+.stat{{background:#111827;border:1px solid #1e2d3d;border-radius:8px;padding:14px}}
+.stat-label{{font-size:10px;color:#8899aa;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}}
+.stat-val{{font-size:20px;font-weight:700}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}
+th{{background:#0d1117;color:#8899aa;padding:8px 12px;text-align:left;font-size:11px;text-transform:uppercase;position:sticky;top:0}}
+td{{padding:8px 12px;border-bottom:1px solid #1a2535}}
+tr:hover td{{background:#1a2535}}
+.tabs{{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}}
+.tab{{padding:8px 20px;border-radius:8px;cursor:pointer;border:1px solid #1e2d3d;background:#111827;color:#8899aa;font-size:13px}}
+.tab.active{{background:#1e3a5f;border-color:#60a5fa;color:#60a5fa}}
+.tc{{display:none}}.tc.active{{display:block}}
+.chart-btn{{background:#1e2d3d;border:1px solid #334155;color:#60a5fa;padding:3px 10px;border-radius:5px;cursor:pointer;font-size:11px}}
+.chart-btn:hover{{background:#1e3a5f}}
+.overlay{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:100;align-items:center;justify-content:center}}
+.overlay.open{{display:flex}}
+.modal{{background:#111827;border:1px solid #1e2d3d;border-radius:12px;padding:20px;max-width:900px;width:95%;position:relative}}
+.modal-header{{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}}
+.modal-title{{font-size:14px;font-weight:600;color:#e8f0f8}}
+.close-btn{{background:none;border:1px solid #334155;color:#8899aa;border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px}}
+.close-btn:hover{{border-color:#f85149;color:#f85149}}
+canvas{{display:block;width:100%;height:380px}}
+</style></head><body>
+<h1>IG S5 Backtest Report</h1>
+<div class="meta">Run: {run_time} | Instruments: {", ".join(s["name"] for s in all_stats)}</div>
+
+<h2>Overall</h2>
+<div class="grid">
+{card("Total Trades", len(overall_trades))}
+{card("Win Rate", ovr_wr, "%")}
+{card("Total PnL", ovr_pnl, " pts")}
+</div>
+
+<div class="tabs">{tab_headers}</div>
+
+<div id="toverall" class="tc active">
+<p style="color:#8899aa;font-size:12px;padding:4px 0 16px">Combined across all instruments</p>
+{"".join(f'<h3 style="color:#8899aa;font-size:13px;margin:16px 0 8px">{s["name"]}</h3>{stats_grid(s)}' for s in all_stats)}
+</div>
+{inst_sections}
+
+<!-- Chart modal -->
+<div class="overlay" id="chartOverlay" onclick="closeChart(event)">
+  <div class="modal" id="chartModal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <div class="modal-title" id="chartTitle">Chart</div>
+      <button class="close-btn" onclick="closeChart()">Close</button>
+    </div>
+    <div id="chartLegend" style="font-size:11px;color:#8899aa;margin-bottom:8px;display:flex;gap:16px;flex-wrap:wrap"></div>
+    <canvas id="chartCanvas"></canvas>
+  </div>
+</div>
+
+<script>
+function sw(t){{
+  document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));
+  document.querySelectorAll('.tc').forEach(e=>e.classList.remove('active'));
+  document.querySelector('.tab[onclick="sw(\\''+t+'\\')"]').classList.add('active');
+  document.getElementById('t'+t).classList.add('active');
+}}
+
+function closeChart(e){{
+  if(!e||e.target===document.getElementById('chartOverlay'))
+    document.getElementById('chartOverlay').classList.remove('open');
+}}
+
+function openChart(instId, tradeIdx, candles, meta){{
+  const side = meta.side;
+  document.getElementById('chartTitle').textContent =
+    instId.toUpperCase()+' · '+side+' · Entry '+meta.entry.toFixed(1);
+  const items=[
+    ['#3fb950','Entry '+meta.entry.toFixed(1)],
+    ['#ff4d6a','SL '+meta.sl.toFixed(1)],
+    ['#60a5fa','TP '+meta.tp.toFixed(1)],
+    ['#a371f7','TP1 '+meta.tp1.toFixed(1)],
+  ];
+  if(meta.partial_hit) items.push(['#e3b341','Partial '+meta.partial_price.toFixed(1)]);
+  items.push([meta.exit_reason==='TP'?'#00d68f':'#ff4d6a',
+    meta.exit_reason+' '+meta.exit_price.toFixed(1)]);
+  document.getElementById('chartLegend').innerHTML=items.map(([c,l])=>
+    `<span style="display:flex;align-items:center;gap:4px">
+      <span style="width:8px;height:8px;background:${{c}};border-radius:2px;display:inline-block"></span>
+      <span>${{l}}</span></span>`).join('');
+  document.getElementById('chartOverlay').classList.add('open');
+  requestAnimationFrame(()=>_drawBacktestChart(
+    document.getElementById('chartCanvas'), candles, meta));
+}}
+
+function _drawBacktestChart(canvas, candles, meta){{
+  const dpr=window.devicePixelRatio||1;
+  const W=canvas.offsetWidth||800, H=canvas.offsetHeight||380;
+  canvas.width=W*dpr; canvas.height=H*dpr;
+  const ctx=canvas.getContext('2d');
+  ctx.scale(dpr,dpr);
+  const PAD_L=10,PAD_R=10,PAD_T=20,PAD_B=20;
+  const chartW=W-PAD_L-PAD_R, chartH=H-PAD_T-PAD_B;
+
+  const levels=[meta.sl,meta.tp,meta.tp1,meta.entry,
+    meta.exit_price,(meta.partial_hit?meta.partial_price:null)].filter(Boolean);
+  const allPrices=[...candles.flatMap(c=>[c.h,c.l]),...levels].filter(Boolean);
+  const priceMin=Math.min(...allPrices)*0.9995;
+  const priceMax=Math.max(...allPrices)*1.0005;
+  const priceRange=priceMax-priceMin||1;
+
+  function yp(p){{return PAD_T+chartH*(1-(p-priceMin)/priceRange);}}
+  function xp(i){{return PAD_L+i*(chartW/candles.length);}}
+  const candleW=Math.max(1,chartW/candles.length-1);
+
+  ctx.fillStyle='#0d1117';
+  ctx.fillRect(0,0,W,H);
+
+  // OB zone
+  if(meta.ob_low&&meta.ob_high){{
+    ctx.fillStyle='rgba(96,165,250,0.08)';
+    ctx.fillRect(PAD_L,yp(meta.ob_high),chartW,yp(meta.ob_low)-yp(meta.ob_high));
+  }}
+
+  // Levels
+  const lvls=[
+    {{p:meta.sl,       c:'#ff4d6a', dash:[4,3]}},
+    {{p:meta.tp,       c:'#60a5fa', dash:[4,3]}},
+    {{p:meta.tp1,      c:'#a371f7', dash:[3,3]}},
+    {{p:meta.entry,    c:'#3fb950', dash:[]}},
+    {{p:meta.exit_price,c:meta.exit_reason==='TP'?'#00d68f':'#ff4d6a',dash:[2,2]}},
+  ];
+  if(meta.partial_hit)lvls.push({{p:meta.partial_price,c:'#e3b341',dash:[3,3]}});
+  lvls.forEach(l=>{{
+    if(!l.p)return;
+    ctx.strokeStyle=l.c; ctx.lineWidth=1;
+    ctx.setLineDash(l.dash);
+    ctx.beginPath();
+    ctx.moveTo(PAD_L,yp(l.p)); ctx.lineTo(W-PAD_R,yp(l.p));
+    ctx.stroke();
+  }});
+  ctx.setLineDash([]);
+
+  // Candles
+  candles.forEach((c,i)=>{{
+    const x=xp(i);
+    const isGreen=c.c>=c.o;
+    const bodyColor=isGreen?'#3fb950':'#f85149';
+    ctx.strokeStyle=bodyColor; ctx.lineWidth=1;
+    ctx.beginPath();
+    ctx.moveTo(x+candleW/2,yp(c.h));
+    ctx.lineTo(x+candleW/2,yp(c.l));
+    ctx.stroke();
+    const bTop=yp(Math.max(c.o,c.c));
+    const bH=Math.max(1,Math.abs(yp(c.o)-yp(c.c)));
+    ctx.fillStyle=bodyColor;
+    ctx.fillRect(x,bTop,candleW,bH);
+  }});
+
+  // Entry marker
+  const entryTs=meta.entry;
+  const entryIdx=candles.findIndex(c=>Math.abs(c.c-entryTs)<entryTs*0.001);
+  if(entryIdx>=0){{
+    ctx.fillStyle='rgba(63,185,80,0.15)';
+    ctx.fillRect(xp(entryIdx),PAD_T,candleW,chartH);
+  }}
+}}
+</script>
+<script>
+// Tab switch fix for overall
+document.querySelectorAll('.tab').forEach((el,i)=>{{
+  const fn=el.getAttribute('onclick');
+  if(fn)el.addEventListener('click',function(){{
+    document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));
+    this.classList.add('active');
+  }},true);
+}});
+</script>
+</body></html>"""

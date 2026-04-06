@@ -409,3 +409,45 @@ def test_watcher_s6_cancels_on_bullish_sentiment(monkeypatch):
     monkeypatch.setattr(bot.st, "save_pending_signals", lambda *a: None)
     _run_one_iteration(b, monkeypatch)
     assert "BNBUSDT" not in b.pending_signals
+
+
+# ── _execute_best_candidate queuing tests (S2 / S3 / S4 / S6) ──────────── #
+
+def _make_full_bot(monkeypatch) -> bot.MTFBot:
+    b = _make_bot(monkeypatch)
+    b.candidates = []
+    b.sentiment  = type("S", (), {"direction": "NEUTRAL"})()
+    monkeypatch.setattr(bot.st, "is_pair_paused", lambda sym: False)
+    monkeypatch.setattr(bot.st, "patch_pair_state", lambda *a, **kw: None)
+    return b
+
+
+def test_execute_best_candidate_queues_s2(monkeypatch):
+    """S2 LONG candidate is queued (not executed immediately) via _execute_best_candidate."""
+    b = _make_full_bot(monkeypatch)
+    queued = []
+    monkeypatch.setattr(b, "_queue_s2_pending", lambda c: queued.append(c["symbol"]))
+    b.candidates = [dict(_make_s2_candidate(), sig="LONG")]
+    b._execute_best_candidate("BULLISH", 1000.0)
+    assert "BTCUSDT" in queued
+
+
+def test_execute_best_candidate_does_not_requeue_existing_s2(monkeypatch):
+    """If S2 already in pending_signals, _execute_best_candidate skips re-queuing."""
+    b = _make_full_bot(monkeypatch)
+    b.pending_signals["BTCUSDT"] = _make_s2_sig()
+    queued = []
+    monkeypatch.setattr(b, "_queue_s2_pending", lambda c: queued.append(c["symbol"]))
+    b.candidates = [dict(_make_s2_candidate(), sig="LONG")]
+    b._execute_best_candidate("BULLISH", 1000.0)
+    assert queued == [], "Should not re-queue if already pending"
+
+
+def test_execute_best_candidate_queues_s6(monkeypatch):
+    """S6 PENDING_SHORT uses _queue_s6_pending (not _queue_s6_watcher)."""
+    b = _make_full_bot(monkeypatch)
+    queued = []
+    monkeypatch.setattr(b, "_queue_s6_pending", lambda c: queued.append(c["symbol"]))
+    b.candidates = [dict(_make_s6_candidate(), sig="PENDING_SHORT")]
+    b._execute_best_candidate("BEARISH", 1000.0)
+    assert "BNBUSDT" in queued

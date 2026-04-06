@@ -1228,9 +1228,6 @@ class MTFBot:
 
         _dispatchers = {
             "S1": self._execute_s1,
-            "S2": self._execute_s2,
-            "S3": self._execute_s3,
-            "S4": self._execute_s4,
         }
 
         for candidate in ranked:
@@ -1240,16 +1237,17 @@ class MTFBot:
 
             if sig in ("PENDING_LONG", "PENDING_SHORT"):
                 if strategy == "S6":
-                    if sym not in self.s6_watchers and not st.is_pair_paused(sym):
-                        self._queue_s6_watcher(candidate)
-                elif sym not in self.pending_signals and not st.is_pair_paused(sym):
-                    # S5 PENDING — queue with rank so entry watcher respects ordering
-                    self._queue_s5_pending(
-                        sym, sig, candidate["trigger"], candidate["sl"], candidate["tp"],
-                        candidate["ob_low"], candidate["ob_high"], candidate["m15_df"],
-                        priority_rank=candidate["priority_rank"],
-                        priority_score=candidate["priority_score"],
-                    )
+                    if sym not in self.pending_signals and not st.is_pair_paused(sym):
+                        self._queue_s6_pending(candidate)
+                elif strategy == "S5":
+                    if sym not in self.pending_signals and not st.is_pair_paused(sym):
+                        # S5 PENDING — queue with rank so entry watcher respects ordering
+                        self._queue_s5_pending(
+                            sym, sig, candidate["trigger"], candidate["sl"], candidate["tp"],
+                            candidate["ob_low"], candidate["ob_high"], candidate["m15_df"],
+                            priority_rank=candidate["priority_rank"],
+                            priority_score=candidate["priority_score"],
+                        )
                 continue
 
             # Immediate LONG/SHORT — stop if slots full
@@ -1258,7 +1256,22 @@ class MTFBot:
             if sym in self.active_positions or st.is_pair_paused(sym):
                 continue
 
-            if strategy == "S5":
+            if strategy == "S2":
+                if sym not in self.pending_signals:
+                    min_bal = 5.0 / (config_s2.S2_TRADE_SIZE_PCT * config_s2.S2_LEVERAGE)
+                    if balance >= min_bal:
+                        self._queue_s2_pending(candidate)
+            elif strategy == "S3":
+                if sym not in self.pending_signals:
+                    min_bal = 5.0 / (config_s3.S3_TRADE_SIZE_PCT * config_s3.S3_LEVERAGE)
+                    if balance >= min_bal:
+                        self._queue_s3_pending(candidate)
+            elif strategy == "S4":
+                if sym not in self.pending_signals:
+                    min_bal = 5.0 / (config_s4.S4_TRADE_SIZE_PCT * config_s4.S4_LEVERAGE)
+                    if balance >= min_bal:
+                        self._queue_s4_pending(candidate)
+            elif strategy == "S5":
                 min_bal = 5.0 / (config_s5.S5_TRADE_SIZE_PCT * config_s5.S5_LEVERAGE)
                 if balance < min_bal:
                     continue

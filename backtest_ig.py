@@ -446,6 +446,8 @@ def build_report(all_stats: list[dict], run_time: str) -> str:
             chart_btn = ""
             if t.get("candles"):
                 cdata = json.dumps(t["candles"])
+                entry_ts_ms = int(t["entry_dt"].timestamp() * 1000) if t.get("entry_dt") else 0
+                exit_ts_ms  = int(t["exit_dt"].timestamp() * 1000)  if t.get("exit_dt")  else 0
                 meta  = json.dumps({
                     "side":    t["side"],
                     "entry":   t["entry"],
@@ -458,6 +460,8 @@ def build_report(all_stats: list[dict], run_time: str) -> str:
                     "exit_reason": t.get("exit_reason", ""),
                     "partial_hit": t.get("partial_hit", False),
                     "partial_price": t.get("partial_price", 0),
+                    "entry_ts": entry_ts_ms,
+                    "exit_ts":  exit_ts_ms,
                 })
                 chart_btn = (
                     f'<button class="chart-btn" '
@@ -671,12 +675,19 @@ function _drawBacktestChart(canvas, candles, meta){{
     ctx.fillRect(x,bTop,candleW,bH);
   }});
 
-  // Entry marker
-  const entryTs=meta.entry;
-  const entryIdx=candles.findIndex(c=>Math.abs(c.c-entryTs)<entryTs*0.001);
+  // Entry marker (green highlight)
+  const entryIdx=candles.findIndex(c=>c.t===meta.entry_ts);
   if(entryIdx>=0){{
     ctx.fillStyle='rgba(63,185,80,0.15)';
     ctx.fillRect(xp(entryIdx),PAD_T,candleW,chartH);
+  }}
+
+  // Exit marker (colored highlight)
+  const exitColor=meta.exit_reason==='TP'?'rgba(0,214,143,0.15)':'rgba(255,77,106,0.15)';
+  const exitIdx=candles.findIndex(c=>c.t===meta.exit_ts);
+  if(exitIdx>=0){{
+    ctx.fillStyle=exitColor;
+    ctx.fillRect(xp(exitIdx),PAD_T,candleW,chartH);
   }}
 }}
 </script>

@@ -309,3 +309,119 @@ def test_pending_session_end_cancels(monkeypatch):
     monkeypatch.setattr(bt, "_is_session_end", lambda ts, i: True)
     action, _ = bt._check_pending(bar, pending, inst)
     assert action == "session_end"
+
+
+# ── IN_TRADE state tests ───────────────────────────────────────────── #
+
+def _make_trade(side="LONG", entry=40500.0, sl=39500.0, tp=42500.0):
+    tp1 = (entry + (entry - sl)) if side == "LONG" else (entry - (sl - entry))
+    return {
+        "side":        side,
+        "entry":       entry,
+        "sl":          sl,
+        "tp":          tp,
+        "tp1":         tp1,
+        "sl_current":  sl,
+        "partial_hit": False,
+    }
+
+
+def test_trade_partial_tp_long():
+    import backtest_ig as bt
+    inst  = _dummy_instrument()
+    trade = _make_trade(side="LONG", entry=40500.0, sl=39500.0)
+    # tp1 = 40500 + (40500 - 39500) = 41500
+    bar = _make_bar(ts=1_700_001_000_000, lo=40400.0, hi=41600.0)
+    action, price = bt._check_trade(bar, trade, inst)
+    assert action == "partial_tp"
+    assert price == trade["tp1"]
+
+
+def test_trade_partial_tp_short():
+    import backtest_ig as bt
+    inst  = _dummy_instrument()
+    trade = _make_trade(side="SHORT", entry=40500.0, sl=41500.0, tp=38500.0)
+    # tp1 = 40500 - (41500 - 40500) = 39500
+    bar = _make_bar(ts=1_700_001_000_000, lo=39400.0, hi=40600.0)
+    action, price = bt._check_trade(bar, trade, inst)
+    assert action == "partial_tp"
+    assert price == trade["tp1"]
+
+
+def test_trade_sl_long():
+    import backtest_ig as bt
+    inst  = _dummy_instrument()
+    trade = _make_trade(side="LONG", entry=40500.0, sl=39500.0)
+    bar   = _make_bar(ts=1_700_001_000_000, lo=39400.0, hi=40200.0)
+    action, price = bt._check_trade(bar, trade, inst)
+    assert action == "sl"
+    assert price == 39500.0
+
+
+def test_trade_sl_short():
+    import backtest_ig as bt
+    inst  = _dummy_instrument()
+    trade = _make_trade(side="SHORT", entry=40500.0, sl=41500.0, tp=38500.0)
+    bar   = _make_bar(ts=1_700_001_000_000, lo=40400.0, hi=41600.0)
+    action, price = bt._check_trade(bar, trade, inst)
+    assert action == "sl"
+    assert price == 41500.0
+
+
+def test_trade_tp_long():
+    import backtest_ig as bt
+    inst  = _dummy_instrument()
+    trade = _make_trade(side="LONG", entry=40500.0, sl=39500.0, tp=42500.0)
+    trade["partial_hit"] = True  # partial already taken
+    trade["sl_current"]  = trade["entry"]
+    bar = _make_bar(ts=1_700_001_000_000, lo=41000.0, hi=42600.0)
+    action, price = bt._check_trade(bar, trade, inst)
+    assert action == "tp"
+    assert price == 42500.0
+
+
+def test_trade_tp_short():
+    import backtest_ig as bt
+    inst  = _dummy_instrument()
+    trade = _make_trade(side="SHORT", entry=40500.0, sl=41500.0, tp=38500.0)
+    trade["partial_hit"] = True
+    trade["sl_current"]  = trade["entry"]
+    bar = _make_bar(ts=1_700_001_000_000, lo=38400.0, hi=39000.0)
+    action, price = bt._check_trade(bar, trade, inst)
+    assert action == "tp"
+    assert price == 38500.0
+
+
+def test_trade_breakeven_sl_after_partial():
+    """After partial TP, SL moves to entry. A bar touching entry triggers SL."""
+    import backtest_ig as bt
+    inst  = _dummy_instrument()
+    trade = _make_trade(side="LONG", entry=40500.0, sl=39500.0, tp=42500.0)
+    trade["partial_hit"] = True
+    trade["sl_current"]  = trade["entry"]  # break-even
+    # bar low touches entry price
+    bar = _make_bar(ts=1_700_001_000_000, lo=40500.0, hi=40800.0)
+    action, price = bt._check_trade(bar, trade, inst)
+    assert action == "sl"
+    assert price == 40500.0
+
+
+def test_trade_session_end_closes(monkeypatch):
+    import backtest_ig as bt
+    inst  = _dummy_instrument()
+    trade = _make_trade()
+    bar   = _make_bar(ts=1_700_001_000_000, lo=40200.0, hi=40600.0, cl=40400.0)
+    monkeypatch.setattr(bt, "_is_session_end", lambda ts, i: True)
+    action, price = bt._check_trade(bar, trade, inst)
+    assert action == "session_end"
+    assert price == 40400.0  # close price
+
+
+def test_trade_hold_when_no_level_hit():
+    import backtest_ig as bt
+    inst  = _dummy_instrument()
+    trade = _make_trade(side="LONG", entry=40500.0, sl=39500.0, tp=42500.0)
+    # bar range doesn't hit tp1, sl, or tp
+    bar = _make_bar(ts=1_700_001_000_000, lo=40200.0, hi=40800.0)
+    action, _ = bt._check_trade(bar, trade, inst)
+    assert action == "hold"

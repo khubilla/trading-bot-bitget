@@ -142,3 +142,45 @@ def _check_pending(bar: dict, pending: dict, instrument: dict) -> tuple[str, flo
         return "fill", pending["trigger"]
 
     return "hold", 0.0
+
+
+# ── Simulation: IN_TRADE state ─────────────────────────────────────── #
+
+def _check_trade(bar: dict, trade: dict, instrument: dict) -> tuple[str, float]:
+    """
+    Evaluate one 15m bar against an open trade.
+
+    Returns (action, price):
+      action: "partial_tp" | "sl" | "tp" | "session_end" | "hold"
+      price:  the level that was hit (or bar close for session_end)
+    """
+    ts   = int(bar["ts"])
+    lo   = float(bar["low"])
+    hi   = float(bar["high"])
+    cl   = float(bar["close"])
+    side = trade["side"]
+    sl   = trade.get("sl_current", trade["sl"])
+
+    if _is_session_end(ts, instrument):
+        return "session_end", cl
+
+    # Partial TP check (1:1 R:R) — takes priority before SL
+    if not trade.get("partial_hit"):
+        if side == "LONG"  and hi >= trade["tp1"]:
+            return "partial_tp", trade["tp1"]
+        if side == "SHORT" and lo <= trade["tp1"]:
+            return "partial_tp", trade["tp1"]
+
+    # SL check (uses sl_current which may be break-even after partial)
+    if side == "LONG"  and lo <= sl:
+        return "sl", sl
+    if side == "SHORT" and hi >= sl:
+        return "sl", sl
+
+    # Full TP check
+    if side == "LONG"  and hi >= trade["tp"]:
+        return "tp", trade["tp"]
+    if side == "SHORT" and lo <= trade["tp"]:
+        return "tp", trade["tp"]
+
+    return "hold", 0.0

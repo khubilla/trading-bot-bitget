@@ -12,6 +12,7 @@ is_connected() -> bool
 needs_reauth() -> bool
 get_mark_price(epic: str) -> float   # 0.0 if not yet received
 """
+import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -146,12 +147,49 @@ class _MarketListener:
 
 
 class _TradeListener:
-    """Placeholder — implemented in Task 5."""
     def __init__(self, callback):
         self._callback = callback
 
     def onItemUpdate(self, update) -> None:
-        pass
+        self._handle_wou(update.getValue("WOU"))
+        self._handle_opu(update.getValue("OPU"))
+
+    def _handle_wou(self, raw) -> None:
+        if not raw:
+            return
+        try:
+            data = json.loads(raw)
+        except Exception as e:
+            logger.warning(f"ig_stream: WOU JSON parse error: {e}")
+            return
+        if not data:
+            return
+        if data.get("status") == "DELETED" and data.get("dealStatus") == "ACCEPTED":
+            deal_id    = data.get("dealId", "")
+            fill_price = float(data.get("level") or 0)
+            logger.info(f"ig_stream: WOU fill — dealId={deal_id} level={fill_price}")
+            try:
+                self._callback("WOU_FILL", deal_id, fill_price)
+            except Exception as e:
+                logger.error(f"ig_stream: trade_callback error on WOU_FILL: {e}")
+
+    def _handle_opu(self, raw) -> None:
+        if not raw:
+            return
+        try:
+            data = json.loads(raw)
+        except Exception as e:
+            logger.warning(f"ig_stream: OPU JSON parse error: {e}")
+            return
+        if not data:
+            return
+        if data.get("status") == "DELETED":
+            deal_id = data.get("dealId", "")
+            logger.info(f"ig_stream: OPU close — dealId={deal_id}")
+            try:
+                self._callback("OPU_CLOSE", deal_id, None)
+            except Exception as e:
+                logger.error(f"ig_stream: trade_callback error on OPU_CLOSE: {e}")
 
     def onSubscription(self) -> None:
         logger.info("ig_stream: TRADE subscription active")

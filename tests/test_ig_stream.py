@@ -149,3 +149,88 @@ def test_status_disconnected_will_not_retry_sets_needs_reauth():
     listener.onStatusChange("DISCONNECTED:WILL-NOT-RETRY")
     assert ig_stream._connected is False
     assert ig_stream._needs_reauth is True
+
+
+import json as _json
+
+
+def _make_trade_update(wou_data=None, opu_data=None):
+    """Build a fake LS update object for the TRADE item."""
+    class FakeUpdate:
+        def getItemName(self): return "TRADE:ACC123"
+        def getValue(self, field):
+            if field == "WOU":
+                return _json.dumps(wou_data) if wou_data else None
+            if field == "OPU":
+                return _json.dumps(opu_data) if opu_data else None
+            return None
+    return FakeUpdate()
+
+
+def test_trade_listener_fires_wou_fill_callback():
+    """WOU status=DELETED + dealStatus=ACCEPTED → callback('WOU_FILL', deal_id, fill_price)."""
+    received = []
+    listener = ig_stream._TradeListener(lambda *a: received.append(a))
+
+    update = _make_trade_update(wou_data={
+        "status": "DELETED",
+        "dealStatus": "ACCEPTED",
+        "dealId": "DEAL001",
+        "level": 4650.5,
+    })
+    listener.onItemUpdate(update)
+    assert received == [("WOU_FILL", "DEAL001", 4650.5)]
+
+
+def test_trade_listener_ignores_wou_non_fill():
+    """WOU status=OPEN → no callback."""
+    received = []
+    listener = ig_stream._TradeListener(lambda *a: received.append(a))
+
+    update = _make_trade_update(wou_data={"status": "OPEN", "dealId": "DEAL001"})
+    listener.onItemUpdate(update)
+    assert received == []
+
+
+def test_trade_listener_fires_opu_close_callback():
+    """OPU status=DELETED → callback('OPU_CLOSE', deal_id, None)."""
+    received = []
+    listener = ig_stream._TradeListener(lambda *a: received.append(a))
+
+    update = _make_trade_update(opu_data={"status": "DELETED", "dealId": "POS001"})
+    listener.onItemUpdate(update)
+    assert received == [("OPU_CLOSE", "POS001", None)]
+
+
+def test_trade_listener_ignores_opu_non_close():
+    """OPU status=OPEN → no callback."""
+    received = []
+    listener = ig_stream._TradeListener(lambda *a: received.append(a))
+
+    update = _make_trade_update(opu_data={"status": "OPEN", "dealId": "POS001"})
+    listener.onItemUpdate(update)
+    assert received == []
+
+
+def test_trade_listener_handles_none_fields_gracefully():
+    """Update with no WOU/OPU fields → no error, no callback."""
+    received = []
+    listener = ig_stream._TradeListener(lambda *a: received.append(a))
+
+    update = _make_trade_update()  # both None
+    listener.onItemUpdate(update)
+    assert received == []
+
+
+def test_trade_listener_handles_invalid_json_gracefully():
+    """Malformed JSON in WOU field → warning logged, no error raised."""
+    received = []
+    listener = ig_stream._TradeListener(lambda *a: received.append(a))
+
+    class BadUpdate:
+        def getItemName(self): return "TRADE:ACC123"
+        def getValue(self, field):
+            return "{not valid json" if field == "WOU" else None
+
+    listener.onItemUpdate(BadUpdate())
+    assert received == []  # no crash, no callback

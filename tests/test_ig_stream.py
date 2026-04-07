@@ -71,3 +71,28 @@ def test_refresh_session_clears_cached_session():
     ig_client._session = object()  # put something in the cache
     ig_client._refresh_session()
     assert ig_client._session is None
+
+
+def test_get_mark_price_uses_stream_cache_when_available():
+    """ig_client.get_mark_price() returns stream value without REST call when cache has price."""
+    from unittest.mock import patch
+    import ig_client as ig
+
+    ig_stream._mark_cache["EPIC_TEST"] = 9999.5
+
+    with patch.object(ig._get_session(), "get", side_effect=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("REST should not be called"))):
+        result = ig.get_mark_price("EPIC_TEST")
+    assert result == 9999.5
+
+
+def test_get_mark_price_falls_back_to_rest_when_stream_zero():
+    """ig_client.get_mark_price() falls back to REST when stream cache is empty (returns 0.0)."""
+    from unittest.mock import patch
+    import ig_client as ig
+
+    ig_stream._mark_cache.clear()  # cache empty → returns 0.0
+
+    mock_resp = {"snapshot": {"bid": 100.0, "offer": 102.0}}
+    with patch.object(ig._get_session(), "get", return_value=mock_resp):
+        result = ig.get_mark_price("EPIC_NOCACHE")
+    assert result == 101.0

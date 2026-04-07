@@ -280,7 +280,15 @@ def get_candles(epic: str, interval: str, limit: int = 100) -> pd.DataFrame:
 
 
 def get_mark_price(epic: str) -> float:
-    """Current mid price (bid+offer)/2 from /markets/{epic}."""
+    """Current mid price. Reads from Lightstreamer cache when available; falls back to REST."""
+    try:
+        import ig_stream
+        price = ig_stream.get_mark_price(epic)
+        if price > 0:
+            return price
+    except ImportError:
+        pass
+    # REST fallback (paper mode, backtest, stream not yet connected)
     try:
         data = _get_session().get(f"/markets/{epic}", version="1")
         snap = data.get("snapshot", {})

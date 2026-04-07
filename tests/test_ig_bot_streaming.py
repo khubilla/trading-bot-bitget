@@ -103,3 +103,69 @@ def test_on_stream_event_opu_close_calls_handle_position_closed(monkeypatch, tmp
     assert len(closed_calls) == 1
     assert closed_calls[0][1] == "SL_OR_TP"
     assert closed_calls[0][0] == 4620.0   # mark price passed through correctly
+
+
+# ── _tick() stream-guard tests ────────────────────────────────── #
+
+import ig_stream
+
+
+def test_tick_pauses_when_stream_disconnected_live_mode(monkeypatch, tmp_path):
+    """_tick() returns early without calling _tick_instrument when stream is down (live, non-paper)."""
+    bot = _make_bot(monkeypatch, tmp_path)
+    bot.paper = False  # pretend live mode
+
+    monkeypatch.setattr(ig_stream, "_connected", False)
+    monkeypatch.setattr(ig_stream, "_needs_reauth", False)
+
+    called = []
+    monkeypatch.setattr(bot, "_tick_instrument", lambda inst, now: called.append(inst))
+
+    bot._tick()
+
+    assert called == [], "_tick_instrument must not be called when stream is disconnected"
+
+
+def test_tick_runs_normally_in_paper_mode_regardless_of_stream(monkeypatch, tmp_path):
+    """_tick() in paper mode ignores stream state entirely."""
+    bot = _make_bot(monkeypatch, tmp_path)
+    assert bot.paper is True
+
+    monkeypatch.setattr(ig_stream, "_connected", False)  # stream "down"
+
+    called = []
+    monkeypatch.setattr(bot, "_tick_instrument", lambda inst, now: called.append(inst))
+
+    bot._tick()
+
+    assert len(called) == len(config_ig.INSTRUMENTS), "all instruments should tick in paper mode"
+
+
+def test_tick_triggers_reauth_when_needs_reauth(monkeypatch, tmp_path):
+    """When needs_reauth() is True, _tick() refreshes session and restarts stream."""
+    bot = _make_bot(monkeypatch, tmp_path)
+    bot.paper = False
+
+    monkeypatch.setattr(ig_stream, "_needs_reauth", True)
+    monkeypatch.setattr(ig_stream, "_connected", False)
+
+    refresh_called = []
+    start_called   = []
+    monkeypatch.setattr(ig, "_refresh_session", lambda: refresh_called.append(1))
+    monkeypatch.setattr(ig_stream, "stop", lambda: None)
+    monkeypatch.setattr(ig_stream, "start", lambda **kw: start_called.append(kw))
+
+    # Provide fake session credentials
+    monkeypatch.setattr(ig, "get_stream_credentials", lambda: {
+        "account_id": "ACC1", "cst": "cst1", "xst": "xst1",
+        "ls_endpoint": "https://ls.ig.com",
+    })
+
+    tick_instrument_calls = []
+    monkeypatch.setattr(bot, "_tick_instrument", lambda inst, now: tick_instrument_calls.append(inst))
+
+    bot._tick()
+
+    assert refresh_called == [1], "_refresh_session must be called"
+    assert len(start_called) == 1, "ig_stream.start must be called"
+    assert tick_instrument_calls == [], "_tick_instrument must NOT run this tick"

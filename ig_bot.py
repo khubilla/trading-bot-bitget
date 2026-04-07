@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pandas as pd
 import ig_client as ig
+import ig_stream
 import config_ig
 
 from strategy import evaluate_s5, find_swing_low_target, find_swing_high_target, calculate_ema
@@ -619,15 +620,34 @@ class IGBot:
     # ── Main tick ─────────────────────────────────────────────── #
 
     def _tick(self) -> None:
-        self._heartbeat()
-        now = _now_et()
-        for instrument in config_ig.INSTRUMENTS:
-            try:
-                self._tick_instrument(instrument, now)
-            except Exception:
-                logger.exception("tick error for %s", instrument.get("display_name", "?"))
-            finally:
-                self._current_instrument = None
+        if not self.paper:
+            if ig_stream.needs_reauth():
+                logger.info("Stream token expired — refreshing session")
+                ig._refresh_session()
+                creds = ig.get_stream_credentials()
+                ig_stream.stop()
+                ig_stream.start(
+                    epics          = [i["epic"] for i in config_ig.INSTRUMENTS],
+                    account_id     = creds["account_id"],
+                    cst            = creds["cst"],
+                    xst            = creds["xst"],
+                    ls_endpoint    = creds["ls_endpoint"],
+                    trade_callback = self._on_stream_event,
+                )
+                return  # skip this tick; resume on next poll
+            if not ig_stream.is_connected():
+                logger.warning("Stream disconnected — pausing tick")
+                return
+        with self._stream_lock:
+            self._heartbeat()
+            now = _now_et()
+            for instrument in config_ig.INSTRUMENTS:
+                try:
+                    self._tick_instrument(instrument, now)
+                except Exception:
+                    logger.exception("tick error for %s", instrument.get("display_name", "?"))
+                finally:
+                    self._current_instrument = None
 
     def _tick_instrument(self, instrument: dict, now: datetime) -> None:
         # Set current instrument so _get_candles and helpers can resolve epic/config

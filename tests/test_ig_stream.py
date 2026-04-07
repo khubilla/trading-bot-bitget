@@ -40,7 +40,7 @@ def test_needs_reauth_false_initially():
 def test_get_stream_credentials_returns_expected_keys():
     """get_stream_credentials() returns dict with required keys after login."""
     from unittest.mock import patch, MagicMock
-    import ig_client
+    import ig_client as ig_c
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -49,12 +49,16 @@ def test_get_stream_credentials_returns_expected_keys():
         "accountId": "ACC123",
         "lightstreamerEndpoint": "https://ls.ig.com",
     }
-    with patch("requests.post", return_value=mock_resp):
-        with patch.object(ig_client, "_session", None):
-            ig_client._refresh_session()
-            # Trigger login
-            session = ig_client._get_session()
-            creds = ig_client.get_stream_credentials()
+
+    original_session = ig_c._session
+    try:
+        ig_c._session = None
+        with patch("requests.post", return_value=mock_resp):
+            ig_c._get_session()
+            creds = ig_c.get_stream_credentials()
+    finally:
+        ig_c._session = original_session
+
     assert creds["account_id"]  == "ACC123"
     assert creds["cst"]         == "test-cst"
     assert creds["xst"]         == "test-xst"

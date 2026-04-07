@@ -174,10 +174,18 @@ def _get_session() -> _IGSession:
 def get_stream_credentials() -> dict:
     """Return streaming auth details captured during the last login.
 
+    Initiates login if no session exists. Raises RuntimeError if
+    ls_endpoint was not returned by IG (check IG_ACC_TYPE and account
+    permissions).
+
     Returns a dict with keys: account_id, cst, xst, ls_endpoint.
-    Call after _get_session() has been invoked.
     """
     sess = _get_session()
+    if not sess._ls_endpoint:
+        raise RuntimeError(
+            "IG login did not return a lightstreamerEndpoint — "
+            "check IG_ACC_TYPE and account permissions"
+        )
     return {
         "account_id":  sess._account_id_from_login or sess._account_id,
         "cst":         sess._cst,

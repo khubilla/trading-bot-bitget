@@ -26,6 +26,24 @@ _RESOLUTION = {
     "1m":  "MINUTE",
 }
 
+# ── Candle cache ─────────────────────────────────────────────── #
+# Keyed by (epic, interval, limit). Value: (fetched_at, DataFrame).
+# TTL = one candle period so we re-fetch at most once per bar.
+_INTERVAL_SECONDS = {
+    "1D":  86400,
+    "1H":  3600,
+    "15m": 900,
+    "5m":  300,
+    "3m":  180,
+    "1m":  60,
+}
+_candle_cache: dict[tuple, tuple[float, pd.DataFrame]] = {}
+
+
+def clear_candle_cache() -> None:
+    """Flush the in-memory candle cache (useful in tests)."""
+    _candle_cache.clear()
+
 
 # ── Session management ──────────────────────────────────────── #
 
@@ -45,6 +63,8 @@ class _IGSession:
         self._account_id = account_id
         self._cst        = ""
         self._token      = ""
+        self._ls_endpoint  = ""
+        self._account_id_from_login = ""
         self._lock       = threading.Lock()
 
     def login(self) -> None:
@@ -71,6 +91,9 @@ class _IGSession:
         self._token = resp.headers.get("X-SECURITY-TOKEN", "")
         if not self._cst or not self._token:
             raise RuntimeError("IG login succeeded but no tokens in response headers")
+        resp_json = resp.json()
+        self._ls_endpoint           = resp_json.get("lightstreamerEndpoint", "")
+        self._account_id_from_login = resp_json.get("accountId", self._account_id)
         logger.info("IG session established")
 
     def _headers(self, version: str) -> dict:
@@ -148,6 +171,27 @@ def _get_session() -> _IGSession:
     return _session
 
 
+def get_stream_credentials() -> dict:
+    """Return streaming auth details captured during the last login.
+
+    Returns a dict with keys: account_id, cst, xst, ls_endpoint.
+    Call after _get_session() has been invoked.
+    """
+    sess = _get_session()
+    return {
+        "account_id":  sess._account_id_from_login or sess._account_id,
+        "cst":         sess._cst,
+        "xst":         sess._token,
+        "ls_endpoint": sess._ls_endpoint,
+    }
+
+
+def _refresh_session() -> None:
+    """Clear the cached session so the next _get_session() performs a fresh login."""
+    global _session
+    _session = None
+
+
 # ── Market data ──────────────────────────────────────────────── #
 
 def get_candles(epic: str, interval: str, limit: int = 100) -> pd.DataFrame:
@@ -155,7 +199,18 @@ def get_candles(epic: str, interval: str, limit: int = 100) -> pd.DataFrame:
     Fetch OHLCV candles from IG.
     Returns DataFrame with columns: ts (Unix ms), open, high, low, close, vol
     sorted ascending (oldest first) — same schema as trader.py.
+
+    Results are cached for one candle period (TTL = interval duration) to
+    avoid burning through IG's weekly historical-data allowance.
     """
+    cache_key = (epic, interval, limit)
+    ttl = _INTERVAL_SECONDS.get(interval, 60)
+    cached = _candle_cache.get(cache_key)
+    if cached is not None:
+        fetched_at, df = cached
+        if time.time() - fetched_at < ttl:
+            return df
+
     resolution = _RESOLUTION.get(interval, interval)
     try:
         data = _get_session().get(
@@ -212,6 +267,7 @@ def get_candles(epic: str, interval: str, limit: int = 100) -> pd.DataFrame:
     if bad.any():
         logger.debug(f"get_candles({epic},{interval}): dropped {bad.sum()} invalid candle(s)")
         df = df[~bad].reset_index(drop=True)
+    _candle_cache[cache_key] = (time.time(), df)
     return df
 
 
@@ -443,18 +499,31 @@ def _place_working_order(epic: str, direction: str, limit_price: float,
     """
     if currency is None:
         currency = config_ig.INSTRUMENTS[0]["currency"]
+    level = round(limit_price, 1)
+    # Use distances (relative to trigger level) rather than absolute levels —
+    # more reliable across instrument types and avoids spread-related rejections.
+    if direction == "SELL":
+        stop_dist  = round(sl_price - level, 1)
+        limit_dist = round(level - tp_price, 1)
+    else:
+        stop_dist  = round(level - sl_price, 1)
+        limit_dist = round(tp_price - level, 1)
     body = {
-        "epic":          epic,
-        "direction":     direction,
-        "size":          size,
-        "level":         limit_price,
-        "type":          "LIMIT",
-        "timeInForce":   "GOOD_TILL_CANCELLED",
-        "stopLevel":     sl_price,
-        "limitLevel":    tp_price,
-        "currencyCode":  currency,
-        "expiry":        "-",
+        "epic":           epic,
+        "direction":      direction,
+        "size":           size,
+        "level":          level,
+        "type":           "LIMIT",
+        "timeInForce":    "GOOD_TILL_CANCELLED",
+        "stopDistance":   max(stop_dist,  1.0),
+        "limitDistance":  max(limit_dist, 1.0),
+        "currencyCode":   currency,
+        "expiry":         "-",
+        "forceOpen":      True,
+        "guaranteedStop": False,
+        "trailingStop":   False,
     }
+    logger.debug(f"place_working_order body: {body}")
     try:
         resp = _get_session().post("/workingorders/otc", body=body, version="2")
     except Exception as e:

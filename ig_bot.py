@@ -578,8 +578,8 @@ class IGBot:
                         po   = self._pending_orders.get(name)
                         if po and po.get("deal_id") == deal_id:
                             self._current_instrument = inst
-                            self._pending_orders[name] = None
                             self._handle_pending_filled(fill_price)
+                            self._pending_orders[name] = None
                             self._save_state()
                             logger.info(f"[{name}] [STREAM] WOU fill handled: {deal_id} @ {fill_price}")
                             break

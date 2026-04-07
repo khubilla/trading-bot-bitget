@@ -63,7 +63,7 @@ def start(
     from lightstreamer.client import LightstreamerClient, Subscription
 
     ls_password = f"CST-{cst}|XST-{xst}"
-    client = LightstreamerClient(ls_endpoint)
+    client = LightstreamerClient(ls_endpoint, "DEFAULT")
     client.connectionDetails.setUser(account_id)
     client.connectionDetails.setPassword(ls_password)
     client.addListener(_StatusListener())

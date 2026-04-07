@@ -571,31 +571,34 @@ class IGBot:
         Acquires _stream_lock to prevent concurrent mutation with _tick().
         """
         with self._stream_lock:
-            if event_type == "WOU_FILL":
-                for inst in config_ig.INSTRUMENTS:
-                    name = inst["display_name"]
-                    po   = self._pending_orders.get(name)
-                    if po and po.get("deal_id") == deal_id:
-                        self._current_instrument = inst
-                        self._handle_pending_filled(fill_price)
-                        self._pending_orders[name] = None
-                        self._save_state()
-                        logger.info(f"[{name}] [STREAM] WOU fill handled: {deal_id} @ {fill_price}")
-                        break
-                else:
-                    logger.warning(f"[STREAM] WOU_FILL for unknown deal_id={deal_id}, ignoring")
-            elif event_type == "OPU_CLOSE":
-                for inst in config_ig.INSTRUMENTS:
-                    name = inst["display_name"]
-                    pos  = self._positions.get(name)
-                    if pos and pos.get("deal_id") == deal_id:
-                        self._current_instrument = inst
-                        mark = ig.get_mark_price(inst["epic"])
-                        self._handle_position_closed(mark, inst, exit_reason="SL_OR_TP")
-                        logger.info(f"[{name}] [STREAM] OPU close handled: {deal_id}")
-                        break
-                else:
-                    logger.warning(f"[STREAM] OPU_CLOSE for unknown deal_id={deal_id}, ignoring")
+            try:
+                if event_type == "WOU_FILL":
+                    for inst in config_ig.INSTRUMENTS:
+                        name = inst["display_name"]
+                        po   = self._pending_orders.get(name)
+                        if po and po.get("deal_id") == deal_id:
+                            self._current_instrument = inst
+                            self._pending_orders[name] = None
+                            self._handle_pending_filled(fill_price)
+                            self._save_state()
+                            logger.info(f"[{name}] [STREAM] WOU fill handled: {deal_id} @ {fill_price}")
+                            break
+                    else:
+                        logger.warning(f"[STREAM] WOU_FILL for unknown deal_id={deal_id}, ignoring")
+                elif event_type == "OPU_CLOSE":
+                    for inst in config_ig.INSTRUMENTS:
+                        name = inst["display_name"]
+                        pos  = self._positions.get(name)
+                        if pos and pos.get("deal_id") == deal_id:
+                            self._current_instrument = inst
+                            mark = ig.get_mark_price(inst["epic"])
+                            self._handle_position_closed(mark, inst, exit_reason="SL_OR_TP")
+                            logger.info(f"[{name}] [STREAM] OPU close handled: {deal_id}")
+                            break
+                    else:
+                        logger.warning(f"[STREAM] OPU_CLOSE for unknown deal_id={deal_id}, ignoring")
+            finally:
+                self._current_instrument = None
 
     def run(self) -> None:
         signal.signal(signal.SIGINT,  self.stop)

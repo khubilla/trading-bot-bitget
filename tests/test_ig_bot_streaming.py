@@ -2,7 +2,7 @@
 Tests for IGBot streaming integration.
 Covers _on_stream_event() dispatch and _tick() pause/reauth behaviour.
 """
-import sys, os, time, tempfile, json
+import sys, os, time, json
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import pytest
@@ -11,20 +11,19 @@ import ig_client as ig
 import config_ig
 
 
-def _make_bot(monkeypatch):
+def _make_bot(monkeypatch, tmp_path):
     """Return an IGBot in paper mode with no external calls."""
-    tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
-    tmp.close()
-    monkeypatch.setattr(config_ig, "STATE_FILE", tmp.name)
+    state_file = str(tmp_path / "test_state.json")
+    monkeypatch.setattr(config_ig, "STATE_FILE", state_file)
     bot = ig_bot.IGBot(paper=True)
     return bot
 
 
 # ── _on_stream_event ──────────────────────────────────────────── #
 
-def test_on_stream_event_wou_fill_calls_handle_pending_filled(monkeypatch):
+def test_on_stream_event_wou_fill_calls_handle_pending_filled(monkeypatch, tmp_path):
     """WOU_FILL event for known deal_id calls _handle_pending_filled and clears pending."""
-    bot = _make_bot(monkeypatch)
+    bot = _make_bot(monkeypatch, tmp_path)
     inst = config_ig.INSTRUMENTS[0]
     name = inst["display_name"]
 
@@ -49,9 +48,9 @@ def test_on_stream_event_wou_fill_calls_handle_pending_filled(monkeypatch):
     assert bot._pending_orders[name] is None
 
 
-def test_on_stream_event_wou_fill_ignores_unknown_deal_id(monkeypatch):
+def test_on_stream_event_wou_fill_ignores_unknown_deal_id(monkeypatch, tmp_path):
     """WOU_FILL for unknown deal_id causes no error and no state mutation."""
-    bot = _make_bot(monkeypatch)
+    bot = _make_bot(monkeypatch, tmp_path)
     inst = config_ig.INSTRUMENTS[0]
     name = inst["display_name"]
 
@@ -70,9 +69,9 @@ def test_on_stream_event_wou_fill_ignores_unknown_deal_id(monkeypatch):
     assert bot._pending_orders[name]["deal_id"] == "DEAL_KNOWN"  # unchanged
 
 
-def test_on_stream_event_opu_close_calls_handle_position_closed(monkeypatch):
+def test_on_stream_event_opu_close_calls_handle_position_closed(monkeypatch, tmp_path):
     """OPU_CLOSE event for known deal_id calls _handle_position_closed."""
-    bot = _make_bot(monkeypatch)
+    bot = _make_bot(monkeypatch, tmp_path)
     inst = config_ig.INSTRUMENTS[0]
     name = inst["display_name"]
 
@@ -103,3 +102,4 @@ def test_on_stream_event_opu_close_calls_handle_position_closed(monkeypatch):
 
     assert len(closed_calls) == 1
     assert closed_calls[0][1] == "SL_OR_TP"
+    assert closed_calls[0][0] == 4620.0   # mark price passed through correctly

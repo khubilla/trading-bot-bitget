@@ -396,7 +396,7 @@ def _compute_stats(result: dict) -> dict:
     }
 
 
-# ── Report builder ─────────────────────────────────────────────────── #
+# ── Report builder ────────────────────────────────────────────────── #
 
 def build_report(all_stats: list[dict], run_time: str) -> str:
     """Build a self-contained dark-theme HTML report with inline chart data."""
@@ -702,3 +702,73 @@ document.querySelectorAll('.tab').forEach((el,i)=>{{
 }});
 </script>
 </body></html>"""
+
+
+# ── CLI ────────────────────────────────────────────────────────────── #
+
+def main():
+    parser = argparse.ArgumentParser(description="IG S5 walk-forward backtest")
+    parser.add_argument("--no-fetch",    action="store_true",
+                        help="Use cached parquet only (skip yfinance)")
+    parser.add_argument("--instrument",  default=None,
+                        help="Run single instrument only (e.g. US30)")
+    parser.add_argument("--output",      default="backtest_ig_report.html",
+                        help="Output HTML file path")
+    args = parser.parse_args()
+
+    instruments = [
+        inst for inst in INSTRUMENTS
+        if args.instrument is None or inst["display_name"] == args.instrument
+    ]
+    if not instruments:
+        print(f"No instruments matched '{args.instrument}'. Available: "
+              f"{[i['display_name'] for i in INSTRUMENTS]}")
+        return
+
+    all_stats = []
+    for instrument in instruments:
+        name = instrument["display_name"]
+        print(f"\n[{name}] Loading candles...")
+        try:
+            df_1d  = load_candles(name, "1D",  no_fetch=args.no_fetch)
+            df_1h  = load_candles(name, "1H",  no_fetch=args.no_fetch)
+            df_15m = load_candles(name, "15m", no_fetch=args.no_fetch)
+        except Exception as e:
+            print(f"  Failed to load candles: {e}")
+            continue
+
+        print(f"  1D:  {len(df_1d)} bars")
+        print(f"  1H:  {len(df_1h)} bars")
+        print(f"  15m: {len(df_15m)} bars")
+
+        if df_1d.empty or df_1h.empty or df_15m.empty:
+            print(f"  Empty data — skipping {name}")
+            continue
+
+        print(f"[{name}] Running simulation...")
+        result = run_instrument(instrument, df_1d, df_1h, df_15m)
+        stats  = _compute_stats(result)
+        all_stats.append(stats)
+
+        print(f"  Signals:    {stats['signals']}")
+        print(f"  Filled:     {stats['filled']}  ({stats['fill_rate']}%)")
+        print(f"  Win rate:   {stats['win_rate']}%")
+        print(f"  Total PnL:  {stats['total_pnl_pts']:+.1f} pts")
+        print(f"  Cancelled:  OB={stats['cancelled']['OB_INVALID']}  "
+              f"Exp={stats['cancelled']['EXPIRED']}  "
+              f"Sess={stats['cancelled']['SESSION_END']}")
+
+    if not all_stats:
+        print("\nNo results to report.")
+        return
+
+    run_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    html     = build_report(all_stats, run_time)
+
+    with open(args.output, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"\nReport written -> {args.output}")
+
+
+if __name__ == "__main__":
+    main()

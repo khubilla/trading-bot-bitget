@@ -651,3 +651,44 @@ def test_compute_stats_basic():
     assert stats["cancelled"]["OB_INVALID"] == 2
     assert stats["cancelled"]["EXPIRED"]    == 1
     assert stats["total_pnl_pts"]   == pytest.approx(1000.0)
+
+
+# ── main() smoke test ──────────────────────────────────────────────── #
+
+def test_main_no_fetch_produces_html(tmp_path, monkeypatch):
+    """main() with mocked data returns without error and writes HTML."""
+    import backtest_ig as bt
+
+    # Provide pre-cached parquet for all timeframes
+    start  = 1_700_000_000_000
+    inst   = _dummy_instrument()
+    n_warmup = inst["daily_limit"] + 20
+
+    df_1d  = _make_candle_series(300, start - 300 * 86_400_000, 86_400_000)
+    df_1h  = _make_candle_series(300, start - 300 * 3_600_000,  3_600_000)
+    df_15m = _make_candle_series(n_warmup + 10, start, 900_000)
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    for interval, df in [("1D", df_1d), ("1H", df_1h), ("15m", df_15m)]:
+        df.to_parquet(cache / f"US30_{interval}.parquet", index=False)
+        df.to_parquet(cache / f"GOLD_{interval}.parquet", index=False)
+
+    monkeypatch.setattr(bt, "_CACHE_DIR", cache)
+    monkeypatch.setattr(bt, "evaluate_s5",
+        lambda *a, **kw: ("HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, "hold"))
+    monkeypatch.setattr(bt, "_in_session",    lambda ts, inst: True)
+    monkeypatch.setattr(bt, "_is_session_end", lambda ts, inst: False)
+    monkeypatch.setattr(bt, "calculate_ema",
+        lambda series, period: pd.Series([100.0] * len(series)))
+
+    out = tmp_path / "report.html"
+    import sys
+    monkeypatch.setattr(sys, "argv",
+        ["backtest_ig.py", "--no-fetch", "--output", str(out)])
+
+    bt.main()
+    assert out.exists()
+    content = out.read_text()
+    assert "IG S5 Backtest Report" in content
+    assert "US30" in content

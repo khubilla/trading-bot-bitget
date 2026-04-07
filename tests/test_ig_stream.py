@@ -2,6 +2,7 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import json as _json
 import pytest
 import ig_stream
 
@@ -151,9 +152,6 @@ def test_status_disconnected_will_not_retry_sets_needs_reauth():
     assert ig_stream._needs_reauth is True
 
 
-import json as _json
-
-
 def _make_trade_update(wou_data=None, opu_data=None):
     """Build a fake LS update object for the TRADE item."""
     class FakeUpdate:
@@ -234,3 +232,26 @@ def test_trade_listener_handles_invalid_json_gracefully():
 
     listener.onItemUpdate(BadUpdate())
     assert received == []  # no crash, no callback
+
+
+def test_trade_listener_ignores_wou_deleted_rejected():
+    received = []
+    listener = ig_stream._TradeListener(lambda *a: received.append(a))
+    update = _make_trade_update(wou_data={
+        "status": "DELETED", "dealStatus": "REJECTED",
+        "dealId": "DEAL_CANCELLED", "level": 4650.0,
+    })
+    listener.onItemUpdate(update)
+    assert received == []
+
+
+def test_trade_listener_handles_non_numeric_level_gracefully():
+    received = []
+    listener = ig_stream._TradeListener(lambda *a: received.append(a))
+    update = _make_trade_update(wou_data={
+        "status": "DELETED", "dealStatus": "ACCEPTED",
+        "dealId": "DEAL001", "level": "N/A",
+    })
+    listener.onItemUpdate(update)
+    assert len(received) == 1
+    assert received[0][2] == 0.0

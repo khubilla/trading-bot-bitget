@@ -166,7 +166,11 @@ class _TradeListener:
             return
         if data.get("status") == "DELETED" and data.get("dealStatus") == "ACCEPTED":
             deal_id    = data.get("dealId", "")
-            fill_price = float(data.get("level") or 0)
+            try:
+                fill_price = float(data.get("level") or 0)
+            except (TypeError, ValueError):
+                logger.warning("ig_stream: WOU level not numeric: %r", data.get("level"))
+                fill_price = 0.0
             logger.info(f"ig_stream: WOU fill — dealId={deal_id} level={fill_price}")
             try:
                 self._callback("WOU_FILL", deal_id, fill_price)

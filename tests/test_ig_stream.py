@@ -96,3 +96,56 @@ def test_get_mark_price_falls_back_to_rest_when_stream_zero():
     with patch.object(ig._get_session(), "get", return_value=mock_resp):
         result = ig.get_mark_price("EPIC_NOCACHE")
     assert result == 101.0
+
+
+def test_market_listener_updates_cache():
+    """_MarketListener.onItemUpdate() writes BID to _mark_cache."""
+    ig_stream._mark_cache.clear()
+
+    class FakeUpdate:
+        def getItemName(self): return "MARKET:GOLD_EPIC"
+        def getValue(self, field):
+            return "4650.5" if field == "BID" else "4651.0"
+
+    listener = ig_stream._MarketListener()
+    listener.onItemUpdate(FakeUpdate())
+    assert ig_stream._mark_cache["GOLD_EPIC"] == 4650.5
+
+
+def test_market_listener_ignores_none_bid():
+    """_MarketListener.onItemUpdate() does not write cache when BID is None."""
+    ig_stream._mark_cache.clear()
+
+    class FakeUpdate:
+        def getItemName(self): return "MARKET:EPIC_NULL"
+        def getValue(self, field): return None
+
+    listener = ig_stream._MarketListener()
+    listener.onItemUpdate(FakeUpdate())
+    assert ig_stream._mark_cache.get("EPIC_NULL") is None
+
+
+def test_status_connected_sets_connected_true():
+    ig_stream._connected    = False
+    ig_stream._needs_reauth = False
+    listener = ig_stream._StatusListener()
+    listener.onStatusChange("CONNECTED:WS-STREAMING")
+    assert ig_stream._connected is True
+    assert ig_stream._needs_reauth is False
+
+
+def test_status_disconnected_will_retry_sets_connected_false():
+    ig_stream._connected = True
+    listener = ig_stream._StatusListener()
+    listener.onStatusChange("DISCONNECTED:WILL-RETRY")
+    assert ig_stream._connected is False
+    assert ig_stream._needs_reauth is False
+
+
+def test_status_disconnected_will_not_retry_sets_needs_reauth():
+    ig_stream._connected    = True
+    ig_stream._needs_reauth = False
+    listener = ig_stream._StatusListener()
+    listener.onStatusChange("DISCONNECTED:WILL-NOT-RETRY")
+    assert ig_stream._connected is False
+    assert ig_stream._needs_reauth is True

@@ -48,6 +48,13 @@ def start(
 ) -> None:
     """Connect to Lightstreamer and set up MARKET (+ optionally TRADE) subscriptions."""
     global _client, _connected, _needs_reauth, _mark_cache
+    # Disconnect any live client before replacing it
+    if _client is not None:
+        try:
+            _client.disconnect()
+        except Exception:
+            pass
+        _client = None
     _mark_cache   = {}
     _connected    = False
     _needs_reauth = False
@@ -114,7 +121,7 @@ class _StatusListener:
     def onServerError(self, errorCode: int, errorMessage: str) -> None:
         logger.error(f"ig_stream: server error {errorCode}: {errorMessage}")
 
-    def onPropertyChange(self, property: str) -> None:
+    def onPropertyChange(self, prop: str) -> None:
         pass
 
 

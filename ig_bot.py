@@ -1286,7 +1286,6 @@ if __name__ == "__main__":
             )
             logger.info("Lightstreamer streaming started")
         except Exception as e:
-            logger.error(f"Failed to start streaming: {e} — running without streaming (REST polling only)")
-            # Bot remains functional using REST fallback via get_mark_price()
+            logger.error(f"Failed to start streaming: {e} — ticks will pause until stream connects")
 
     bot.run()

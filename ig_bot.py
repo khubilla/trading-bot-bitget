@@ -14,6 +14,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 import uuid
 import zoneinfo
@@ -346,6 +347,7 @@ class IGBot:
     def __init__(self, paper: bool = False):
         self.paper       = paper
         self.running     = True
+        self._stop_event = threading.Event()
         # Per-instrument state dicts — keyed by display_name (e.g. "US30")
         self._positions: dict      = {}
         self._pending_orders: dict = {}
@@ -360,6 +362,7 @@ class IGBot:
         self._candle_cache: dict[tuple, pd.DataFrame] = {}
         self._scan_signals: dict = {}   # keyed by display_name; latest evaluate_s5 output per instrument
         self._scan_log: list     = []   # last 20 scan entries, newest first
+        self._stream_lock = threading.Lock()
 
         _first = config_ig.INSTRUMENTS[0]
         mode = "PAPER" if paper else f"LIVE ({config_ig.IG_ACC_TYPE})"
@@ -562,6 +565,38 @@ class IGBot:
         })
         self._scan_log = self._scan_log[:20]
 
+    def _on_stream_event(self, event_type: str, deal_id: str, fill_price: float) -> None:
+        """
+        Called from the Lightstreamer thread when a fill or position close arrives.
+        Acquires _stream_lock to prevent concurrent mutation with _tick().
+        """
+        with self._stream_lock:
+            if event_type == "WOU_FILL":
+                for inst in config_ig.INSTRUMENTS:
+                    name = inst["display_name"]
+                    po   = self._pending_orders.get(name)
+                    if po and po.get("deal_id") == deal_id:
+                        self._current_instrument = inst
+                        self._handle_pending_filled(fill_price)
+                        self._pending_orders[name] = None
+                        self._save_state()
+                        logger.info(f"[{name}] [STREAM] WOU fill handled: {deal_id} @ {fill_price}")
+                        break
+                else:
+                    logger.warning(f"[STREAM] WOU_FILL for unknown deal_id={deal_id}, ignoring")
+            elif event_type == "OPU_CLOSE":
+                for inst in config_ig.INSTRUMENTS:
+                    name = inst["display_name"]
+                    pos  = self._positions.get(name)
+                    if pos and pos.get("deal_id") == deal_id:
+                        self._current_instrument = inst
+                        mark = ig.get_mark_price(inst["epic"])
+                        self._handle_position_closed(mark, inst, exit_reason="SL_OR_TP")
+                        logger.info(f"[{name}] [STREAM] OPU close handled: {deal_id}")
+                        break
+                else:
+                    logger.warning(f"[STREAM] OPU_CLOSE for unknown deal_id={deal_id}, ignoring")
+
     def run(self) -> None:
         signal.signal(signal.SIGINT,  self.stop)
         signal.signal(signal.SIGTERM, self.stop)
@@ -571,11 +606,12 @@ class IGBot:
                 self._tick()
             except Exception as e:
                 logger.error(f"Tick error: {e}", exc_info=True)
-            time.sleep(config_ig.POLL_INTERVAL_SEC)
+            self._stop_event.wait(timeout=config_ig.POLL_INTERVAL_SEC)
 
     def stop(self, *_) -> None:
         logger.info("Shutting down IGBot")
         self.running = False
+        self._stop_event.set()
 
     # ── Main tick ─────────────────────────────────────────────── #
 
@@ -804,29 +840,39 @@ class IGBot:
             return True
 
         elif status == "open":
-            # Check OB invalidation
+            cancel_reason = None
+
+            # 1. 15m OB invalidation — price breaks OB outer edge
             if side == "LONG" and mark < pending_order["ob_low"] * (1 - instrument["s5_ob_invalidation_buffer_pct"]):
-                try:
-                    ig.cancel_working_order(deal_id)
-                except Exception as e:
-                    logger.warning(f"[{name}] [S5] cancel_working_order error: {e}")
-                logger.info(f"[{name}] [S5] OB invalidated — cancelled limit order {deal_id}")
-                self._pending_orders[name] = None
-                self._save_state()
+                cancel_reason = "OB invalidated (price below ob_low)"
             elif side == "SHORT" and mark > pending_order["ob_high"] * (1 + instrument["s5_ob_invalidation_buffer_pct"]):
-                try:
-                    ig.cancel_working_order(deal_id)
-                except Exception as e:
-                    logger.warning(f"[{name}] [S5] cancel_working_order error: {e}")
-                logger.info(f"[{name}] [S5] OB invalidated — cancelled limit order {deal_id}")
-                self._pending_orders[name] = None
-                self._save_state()
+                cancel_reason = "OB invalidated (price above ob_high)"
+
+            # 2. Expiry
             elif time.time() > pending_order["expires"]:
+                cancel_reason = "Limit order expired"
+
+            # 3. HTF direction change — re-evaluate daily EMA + 1H BOS using cached candles
+            #    (no extra API calls between candle boundaries)
+            else:
+                daily_df = self._get_candles("1D", instrument["daily_limit"])
+                htf_df   = self._get_candles("1H", instrument["htf_limit"])
+                m15_df   = self._get_candles("15m", instrument["m15_limit"])
+                if not (daily_df.empty or htf_df.empty or m15_df.empty):
+                    ema_fast = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_fast"]).iloc[-1])
+                    ema_slow = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_slow"]).iloc[-1])
+                    allowed_direction = "BULLISH" if ema_fast > ema_slow else "BEARISH"
+                    sig, *_ = evaluate_s5(instrument["epic"], daily_df, htf_df, m15_df, allowed_direction, cfg=instrument)
+                    expected = "PENDING_LONG" if side == "LONG" else "PENDING_SHORT"
+                    if sig != expected:
+                        cancel_reason = f"HTF conditions no longer valid (sig={sig})"
+
+            if cancel_reason:
                 try:
                     ig.cancel_working_order(deal_id)
                 except Exception as e:
                     logger.warning(f"[{name}] [S5] cancel_working_order error: {e}")
-                logger.info(f"[{name}] [S5] Limit order expired — cancelled {deal_id}")
+                logger.info(f"[{name}] [S5] 🚫 {cancel_reason} — cancelled {deal_id}")
                 self._pending_orders[name] = None
                 self._save_state()
             return True  # still pending (or just cleared)
@@ -1021,7 +1067,7 @@ class IGBot:
             return
         try:
             epic  = instrument["epic"]
-            cs_df = ig.get_candles(epic, instrument["s5_ltf_interval"], limit=instrument["s5_swing_lookback"] + 5)
+            cs_df = self._get_candles(instrument["s5_ltf_interval"], instrument["s5_swing_lookback"] + 5, epic=epic)
             if cs_df.empty or len(cs_df) < 3:
                 return
 

@@ -1271,4 +1271,22 @@ if __name__ == "__main__":
             sys.exit(1)
 
     bot = IGBot(paper=paper_mode)
+
+    if not paper_mode:
+        # Start Lightstreamer streaming (live mode only)
+        try:
+            creds = ig.get_stream_credentials()
+            ig_stream.start(
+                epics          = [i["epic"] for i in config_ig.INSTRUMENTS],
+                account_id     = creds["account_id"],
+                cst            = creds["cst"],
+                xst            = creds["xst"],
+                ls_endpoint    = creds["ls_endpoint"],
+                trade_callback = bot._on_stream_event,
+            )
+            logger.info("Lightstreamer streaming started")
+        except Exception as e:
+            logger.error(f"Failed to start streaming: {e} — running without streaming (REST polling only)")
+            # Bot remains functional using REST fallback via get_mark_price()
+
     bot.run()

@@ -12,7 +12,6 @@ is_connected() -> bool
 needs_reauth() -> bool
 get_mark_price(epic: str) -> float   # 0.0 if not yet received
 """
-import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -61,3 +60,4 @@ def stop() -> None:
         _client = None
     _connected    = False
     _needs_reauth = False
+    _mark_cache.clear()

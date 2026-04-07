@@ -2,7 +2,17 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import pytest
 import ig_stream
+
+@pytest.fixture(autouse=True)
+def reset_ig_stream_state():
+    ig_stream._mark_cache.clear()
+    ig_stream._connected    = False
+    ig_stream._needs_reauth = False
+    ig_stream._client       = None
+    yield
+    ig_stream._mark_cache.clear()
 
 
 def test_get_mark_price_returns_zero_when_empty():
@@ -13,7 +23,6 @@ def test_get_mark_price_returns_zero_when_empty():
 def test_get_mark_price_returns_cached_value():
     ig_stream._mark_cache["EPIC1"] = 1234.5
     assert ig_stream.get_mark_price("EPIC1") == 1234.5
-    ig_stream._mark_cache.clear()
 
 
 def test_is_connected_false_initially():

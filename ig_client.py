@@ -286,7 +286,7 @@ def get_mark_price(epic: str) -> float:
         price = ig_stream.get_mark_price(epic)
         if price > 0:
             return price
-    except ImportError:
+    except Exception:
         pass
     # REST fallback (paper mode, backtest, stream not yet connected)
     try:

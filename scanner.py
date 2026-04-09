@@ -21,7 +21,10 @@ Sentiment formula
 import logging
 from dataclasses import dataclass
 import bitget_client as bc
-from config import MIN_VOLUME_USDT, MAX_PRICE_USDT, PRODUCT_TYPE, SENTIMENT_THRESHOLD
+from config import (
+    MIN_VOLUME_USDT, MAX_PRICE_USDT, PRODUCT_TYPE, SENTIMENT_THRESHOLD,
+    LIQUIDITY_CHECK_ENABLED, MIN_OB_DEPTH_USDT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +38,26 @@ class SentimentResult:
     total_pairs:    int
     green_volume:   float
     red_volume:     float
+
+def _filter_by_liquidity(pairs: list[str], depth_map: dict[str, float]) -> list[str]:
+    """
+    Remove pairs whose top-of-book USDT depth is below MIN_OB_DEPTH_USDT.
+    depth_map: symbol → bidSz×bidPr + askSz×askPr (from ticker loop).
+    Conservative: symbols absent from depth_map treated as depth=0 (excluded).
+    """
+    liquid   = []
+    excluded = []
+    for sym in pairs:
+        if depth_map.get(sym, 0.0) >= MIN_OB_DEPTH_USDT:
+            liquid.append(sym)
+        else:
+            excluded.append(sym)
+    if excluded:
+        logger.info(
+            f"Liquidity filter: removed {len(excluded)} illiquid pair(s): "
+            + ", ".join(f"{s}(${depth_map.get(s, 0.0):.0f})" for s in excluded)
+        )
+    return liquid
 
 def get_qualified_pairs_and_sentiment() -> tuple[list[str], SentimentResult]:
     """

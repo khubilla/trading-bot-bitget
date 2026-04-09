@@ -91,6 +91,7 @@ class TestLiquidityFilterIntegration:
         monkeypatch.setattr(scanner.bc, "get_public", lambda *a, **kw: _mock_response(tickers))
         pairs, _ = scanner.get_qualified_pairs_and_sentiment()
         assert "ARIAUSDT" in pairs
+        assert "LIQUIDUSDT" in pairs  # ← add this
 
     def test_missing_bid_ask_sz_excluded(self, monkeypatch):
         """Pairs where ticker lacks bidSz/askSz get depth=0 and are excluded."""

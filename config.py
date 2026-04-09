@@ -37,6 +37,10 @@ MIN_VOLUME_USDT   = 5_000_000   # 24h quote volume filter (5 million USDT)
 MAX_PRICE_USDT    = 150         # Exclude pairs priced above this (set high to include BTC/ETH if desired)
 SCAN_INTERVAL_SEC = 60           # Re-scan all pairs every 60 seconds
 
+# --- Liquidity Filter ---
+LIQUIDITY_CHECK_ENABLED = True
+MIN_OB_DEPTH_USDT       = 50_000   # bidSz×bidPr + askSz×askPr must meet this
+
 # --- Bot Behaviour ---
 MAX_CONCURRENT_TRADES = 10   # Max simultaneous open positions across all strategies
 POLL_INTERVAL_SEC     = 15  # Seconds between each evaluation cycle

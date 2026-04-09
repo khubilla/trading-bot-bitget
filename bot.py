@@ -241,8 +241,9 @@ def _rebuild_stats_from_csv(csv_path: str):
         logger.warning(f"Stats rebuild from CSV failed: {e}")
         return
     if wins + losses > 0:
-        st.set_stats(wins, losses, round(total_pnl, 4))
-        logger.info(f"📊 Stats loaded from CSV: {wins}W / {losses}L | Total PnL={total_pnl:+.2f}")
+        pnl_pct = round((total_pnl / config.INITIAL_BALANCE) * 100, 2) if config.INITIAL_BALANCE > 0 else 0.0
+        st.set_stats(wins, losses, round(total_pnl, 4), pnl_pct)
+        logger.info(f"📊 Stats loaded from CSV: {wins}W / {losses}L | Total PnL={total_pnl:+.2f} ({pnl_pct:+.1f}%)")
 
 
 # ── Bot ───────────────────────────────────────────────────────────── #
@@ -345,6 +346,7 @@ class MTFBot:
                     csv_data = unclosed.get(sym, {})
                     if csv_data.get("partial_logged"):
                         ap["partial_logged"] = True
+                        ap["partial_pnl"] = csv_data.get("partial_pnl", 0.0)
                         st.update_position_memory(sym, partial_logged=True)
                         continue
                     pos         = existing.get(sym, {})
@@ -457,8 +459,268 @@ class MTFBot:
             # manual CSV corrections or PnL accounting fixes across restarts)
             _rebuild_stats_from_csv(config.TRADE_LOG)
 
+            # ── Startup recovery: positions that filled while bot was stopped ── #
+            if not PAPER_MODE:
+                try:
+                    self._startup_recovery(existing)
+                except Exception as _e:
+                    logger.warning(f"Startup recovery failed: {_e}")
+
         except Exception as e:
             logger.error(f"Startup sync error: {e}")
+
+    def _startup_recovery(self, existing: dict) -> None:
+        """
+        Detect and recover positions that filled while the bot was stopped.
+
+        Pass 1: positions on exchange with no CSV open row.
+        Pass 2: pending signals whose limit orders filled AND closed while down.
+
+        Called once from __init__ after Pass B. PAPER_MODE: skip (no limit orders).
+        """
+        from startup_recovery import fetch_candles_at, estimate_sl_tp, attempt_s5_recovery
+
+        try:
+            balance = tr.get_usdt_balance()
+        except Exception as _e:
+            logger.warning(f"Startup recovery: could not fetch balance: {_e}")
+            balance = 0.0
+
+        recovered = 0
+
+        # ── Pass 1: open positions with no CSV record ──────────────── #
+        for sym, pos in existing.items():
+            try:
+                if _get_open_csv_row(config.TRADE_LOG, sym) is not None:
+                    continue  # CSV exists — handled by Pass A/B
+
+                sig = self.pending_signals.get(sym)
+
+                if sig and sig.get("order_id") and sig["order_id"] != "PAPER":
+                    # Happy path — original signal data available
+                    try:
+                        fill_info = tr.get_order_fill(sym, sig["order_id"])
+                    except Exception as _e:
+                        logger.warning(
+                            f"[S5][{sym}] ⚠️ Startup recovery: get_order_fill failed: {_e}"
+                        )
+                        continue
+
+                    if fill_info["status"] == "live":
+                        continue  # still pending — not a crash case
+
+                    if fill_info["status"] == "filled":
+                        fill_price = fill_info["fill_price"]
+                        logger.warning(
+                            f"[S5][{sym}] ⚠️ Startup recovery [happy]: limit filled while "
+                            f"bot was down @ {fill_price:.5f} — running _handle_limit_filled"
+                        )
+                        st.add_scan_log(
+                            f"[S5][{sym}] ⚠️ Recovery [happy]: filled @ {fill_price:.5f}", "WARN"
+                        )
+                        self._handle_limit_filled(sym, sig, fill_price, balance)
+                        self.pending_signals.pop(sym, None)
+                        st.save_pending_signals(self.pending_signals)
+                        recovered += 1
+
+                else:
+                    # Sad path — no pending signal; estimate SL/TP from entry
+                    _ot       = st.get_open_trade(sym)
+                    entry     = float(pos.get("entry_price") or pos.get("entry", 0))
+                    side      = pos.get("side", "SHORT")
+                    margin    = float(pos.get("margin", 0))
+                    leverage  = int(float(pos.get("leverage") or 10))
+                    qty       = float(pos.get("qty", 0))
+                    opened_at = (
+                        (_ot or {}).get("opened_at")
+                        or datetime.now(timezone.utc).isoformat()
+                    )
+                    trade_id  = uuid.uuid4().hex[:8]
+
+                    # Parse opened_at → end_ms for Bitget historical candle fetch
+                    try:
+                        end_ms = int(
+                            datetime.fromisoformat(opened_at).timestamp() * 1000
+                        ) + 60_000
+                    except Exception:
+                        end_ms = int(time.time() * 1000)
+
+                    # Fetch historical candles at fill time
+                    m15_df   = fetch_candles_at(sym, "15m", limit=100, end_ms=end_ms)
+                    htf_df   = fetch_candles_at(sym, "1H",  limit=50,  end_ms=end_ms)
+                    daily_df = tr.get_candles(sym, "1D", limit=60)
+
+                    # Try to recover OB/SL/TP from historical candles
+                    result = None
+                    if not m15_df.empty and not htf_df.empty and not daily_df.empty:
+                        result = attempt_s5_recovery(sym, m15_df, htf_df, daily_df, side)
+
+                    if result:
+                        sl, tp, ob_low, ob_high = result
+                    else:
+                        sl, tp, ob_low, ob_high = estimate_sl_tp(entry, side)
+
+                    # Patch active_positions
+                    if sym in self.active_positions:
+                        self.active_positions[sym].update({
+                            "strategy": "UNKNOWN",
+                            "sl":       sl,
+                            "box_high": ob_high,
+                            "box_low":  ob_low,
+                            "trade_id": trade_id,
+                        })
+
+                    # Patch state.json open_trades entry
+                    _s = st._read()
+                    for _t in _s["open_trades"]:
+                        if _t["symbol"] == sym:
+                            _t.update({
+                                "trade_id": trade_id,
+                                "sl":       round(sl, 8),
+                                "tp":       round(tp, 8),
+                                "box_high": round(ob_high, 8),
+                                "box_low":  round(ob_low,  8),
+                                "tpsl_set": False,
+                            })
+                            break
+                    st._write(_s)
+
+                    # Append open row to trades.csv
+                    _log_trade(f"UNKNOWN_{side}", {
+                        "trade_id":        trade_id,
+                        "symbol":          sym,
+                        "side":            side,
+                        "qty":             qty,
+                        "entry":           entry,
+                        "sl":              round(sl,      8),
+                        "tp":              round(tp,      8),
+                        "box_low":         round(ob_low,  8),
+                        "box_high":        round(ob_high, 8),
+                        "leverage":        leverage,
+                        "margin":          round(margin,  8),
+                        "tpsl_set":        False,
+                        "strategy":        "UNKNOWN",
+                        "snap_s5_ob_low":  round(ob_low,  8),
+                        "snap_s5_ob_high": round(ob_high, 8),
+                        "snap_s5_tp":      round(tp,      8),
+                    })
+
+                    # Save open snapshot (only if candles available)
+                    if not m15_df.empty:
+                        snapshot.save_snapshot(
+                            trade_id=trade_id,
+                            event="open",
+                            symbol=sym,
+                            interval="15m",
+                            candles=_df_to_candles(m15_df),
+                            event_price=entry,
+                            captured_at=opened_at,
+                        )
+
+                    logger.warning(
+                        f"[UNKNOWN][{sym}] ⚠️ Startup recovery [sad]: no signal data | "
+                        f"SL≈{sl:.5f} | tpsl_set=False — manual TPSL needed"
+                    )
+                    st.add_scan_log(
+                        f"[UNKNOWN][{sym}] ⚠️ Recovery [sad]: tpsl_set=False — manual TPSL needed",
+                        "WARN",
+                    )
+                    recovered += 1
+
+            except Exception as _e:
+                logger.warning(f"[{sym}] Startup recovery error: {_e}")
+
+        # ── Pass 2: pending signals whose limit filled AND position closed while down ── #
+        for sym, sig in list(self.pending_signals.items()):
+            try:
+                if sym in self.active_positions:
+                    continue  # already handled in Pass 1 or normal startup
+
+                order_id = sig.get("order_id")
+                if not order_id or order_id == "PAPER":
+                    continue  # non-S5 or paper-mode signal — skip
+
+                try:
+                    fill_info = tr.get_order_fill(sym, order_id)
+                except Exception as _e:
+                    logger.warning(f"[S5][{sym}] ⚠️ Pass 2 get_order_fill failed: {_e}")
+                    continue
+
+                if fill_info["status"] != "filled":
+                    continue
+
+                fill_price = fill_info["fill_price"]
+                fill_time  = datetime.now(timezone.utc).isoformat()
+                trade_id   = uuid.uuid4().hex[:8]
+                side       = sig.get("side", "SHORT")
+
+                # Log open row
+                _log_trade(f"S5_{side}", {
+                    "trade_id":           trade_id,
+                    "symbol":             sym,
+                    "side":               side,
+                    "entry":              fill_price,
+                    "sl":                 round(sig.get("sl", 0), 8),
+                    "tp":                 round(sig.get("tp", 0), 8),
+                    "box_low":            round(sig.get("ob_low",  0), 8),
+                    "box_high":           round(sig.get("ob_high", 0), 8),
+                    "leverage":           config_s5.S5_LEVERAGE,
+                    "tpsl_set":           False,
+                    "strategy":           "S5",
+                    "snap_entry_trigger": round(sig.get("trigger", fill_price), 8),
+                    "snap_sl":            round(sig.get("sl", 0), 8),
+                    "snap_rr":            sig.get("rr"),
+                    "snap_sentiment":     sig.get("sentiment", "?"),
+                    "snap_s5_ob_low":     round(sig.get("ob_low",  0), 8),
+                    "snap_s5_ob_high":    round(sig.get("ob_high", 0), 8),
+                    "snap_s5_tp":         round(sig.get("tp", 0), 8),
+                })
+
+                # Fetch and log close info
+                hist = None
+                try:
+                    hist = tr.get_history_position(
+                        sym,
+                        open_time_iso=fill_time,
+                        entry_price=fill_price,
+                    )
+                except Exception as _e:
+                    logger.warning(f"[S5][{sym}] Pass 2: get_history_position failed: {_e}")
+
+                if hist:
+                    close_pnl  = round(hist["pnl"], 4)
+                    exit_price = hist.get("exit_price")
+                    _log_trade("S5_CLOSE", {
+                        "trade_id":    trade_id,
+                        "symbol":      sym,
+                        "side":        side,
+                        "pnl":         close_pnl,
+                        "result":      "WIN" if close_pnl >= 0 else "LOSS",
+                        "exit_reason": "RECONCILED",
+                        "exit_price":  round(exit_price, 8) if exit_price else None,
+                    })
+                    logger.warning(
+                        f"[S5][{sym}] ⚠️ Pass 2: opened+closed while down | "
+                        f"fill={fill_price:.5f} | PnL={close_pnl:+.4f}"
+                    )
+                else:
+                    logger.warning(
+                        f"[S5][{sym}] ⚠️ Pass 2: opened while down, close history unavailable"
+                    )
+
+                self.pending_signals.pop(sym, None)
+                st.save_pending_signals(self.pending_signals)
+                recovered += 1
+
+            except Exception as _e:
+                logger.warning(f"[S5][{sym}] Pass 2 recovery error: {_e}")
+
+        if recovered:
+            _rebuild_stats_from_csv(config.TRADE_LOG)
+            st.add_scan_log(
+                f"⚠️ Startup recovery: {recovered} position(s) recovered", "WARN"
+            )
+            logger.warning(f"Startup recovery: {recovered} position(s) recovered")
 
     def stop(self, *_):
         logger.info("🛑 Stopping bot...")
@@ -558,9 +820,9 @@ class MTFBot:
                     st.update_open_trade_pnl(sym, pos["unrealised_pnl"])
                     if pos.get("mark_price"):
                         st.update_open_trade_mark_price(sym, pos["mark_price"])
-                    # Backfill margin/leverage for positions resumed at startup
+                    # Sync margin from live exchange so dashboard total value stays accurate
                     _ot_live = st.get_open_trade(sym)
-                    if _ot_live and not _ot_live.get("margin") and pos.get("margin"):
+                    if _ot_live and pos.get("margin"):
                         st.update_open_trade_margin(sym, pos["margin"])
                     if _ot_live and not _ot_live.get("leverage") and pos.get("leverage"):
                         st.update_open_trade_leverage(sym, pos["leverage"])
@@ -878,6 +1140,84 @@ class MTFBot:
                     st.clear_position_memory(sym)
                     del self.active_positions[sym]
 
+        # ── 3b. Orphan reconciliation ─────────────────────────────── #
+        # Catches positions in state.json open_trades that are NOT in
+        # self.active_positions (e.g. injected by a recovery script while
+        # the bot was running).  Runs every tick — cheap because it only
+        # calls get_all_open_positions() when orphans are found.
+        _orphans = [
+            ot for ot in st.get_open_trades()
+            if ot["symbol"] not in self.active_positions
+        ]
+        if _orphans:
+            try:
+                _orph_xpos = tr.get_all_open_positions()
+            except Exception as _e:
+                logger.warning(f"Orphan reconcile: positions fetch failed: {_e}")
+                _orph_xpos = {}
+            for _ot in _orphans:
+                _sym      = _ot["symbol"]
+                _strategy = _ot.get("strategy", "UNKNOWN")
+                if _sym in _orph_xpos:
+                    # Still open on exchange — re-register so future ticks monitor it
+                    self.active_positions[_sym] = {
+                        "side":     _ot.get("side", "LONG"),
+                        "strategy": _strategy,
+                        "box_high": float(_ot.get("tp") or _ot.get("sl") or 0),
+                        "box_low":  float(_ot.get("sl") or 0),
+                        "trade_id": _ot.get("trade_id", ""),
+                    }
+                    logger.warning(f"[{_strategy}][{_sym}] ⚠️ Orphan re-registered into active_positions")
+                    st.add_scan_log(f"[{_strategy}][{_sym}] ⚠️ Orphan re-registered", "WARN")
+                else:
+                    # Gone from exchange — closed without bot knowing; reconcile now
+                    _hist = None
+                    try:
+                        _hist = tr.get_history_position(
+                            _sym,
+                            open_time_iso=_ot.get("opened_at"),
+                            entry_price=float(_ot.get("entry") or 0),
+                        )
+                    except Exception as _e:
+                        logger.warning(f"[{_strategy}][{_sym}] orphan history error: {_e}")
+                    _pnl        = _hist["pnl"] if _hist else 0.0
+                    _exit_price = _hist.get("exit_price") if _hist else None
+                    _result     = "WIN" if _pnl >= 0 else "LOSS"
+                    _entry      = float(_ot.get("entry") or 0)
+                    _lev        = float(_ot.get("leverage") or 1)
+                    _pnl_pct    = None
+                    if _exit_price and _entry and _lev:
+                        _chg     = (_exit_price - _entry) / _entry if _ot.get("side") == "LONG" else (_entry - _exit_price) / _entry
+                        _pnl_pct = round(_chg * _lev * 100, 2)
+                    st.close_trade(_sym, _result, _pnl)
+                    if _result == "LOSS":
+                        st.record_loss(_sym)
+                    _log_trade(f"{_strategy}_CLOSE", {
+                        "trade_id":    _ot.get("trade_id", ""),
+                        "symbol":      _sym,
+                        "side":        _ot.get("side", ""),
+                        "pnl":         round(_pnl, 4),
+                        "result":      _result,
+                        "pnl_pct":     _pnl_pct,
+                        "exit_reason": "ORPHAN_RECONCILE",
+                        "exit_price":  _exit_price,
+                    })
+                    try:
+                        _interval = _STRATEGY_CANDLE_INTERVAL.get(_strategy, "15m")
+                        _snap_df  = tr.get_candles(_sym, _interval, limit=100)
+                        if not _snap_df.empty:
+                            snapshot.save_snapshot(
+                                trade_id=_ot.get("trade_id", ""), event="close",
+                                symbol=_sym, interval=_interval,
+                                candles=_df_to_candles(_snap_df),
+                                event_price=round(_exit_price, 8) if _exit_price else 0.0,
+                            )
+                    except Exception as _e:
+                        logger.warning(f"[{_strategy}][{_sym}] orphan close snapshot failed: {_e}")
+                    st.clear_position_memory(_sym)
+                    logger.warning(f"[{_strategy}][{_sym}] ⚠️ Orphan reconciled: {_result} PnL={_pnl:+.4f}")
+                    st.add_scan_log(f"[{_strategy}][{_sym}] ⚠️ Orphan reconciled: {_result} PnL={_pnl:+.4f}", "WARN")
+
         # ── 4. Check if we can open more trades ───────────────────── #
         open_count = len(self.active_positions)
         if open_count >= config.MAX_CONCURRENT_TRADES:
@@ -1033,8 +1373,16 @@ class MTFBot:
         # ── Strategy 4 ───────────────────────────────────────────── #
         s4_sig, s4_rsi, s4_trigger, s4_sl, s4_body_pct, s4_rsi_peak, s4_div, s4_div_str, s4_reason = "HOLD", 50.0, 0.0, 0.0, 0.0, 0.0, False, "", ""
         if config_s4.S4_ENABLED and self.sentiment.direction != "BULLISH":
-            s4_sig, s4_rsi, s4_trigger, s4_sl, s4_body_pct, s4_rsi_peak, s4_div, s4_div_str, s4_reason = evaluate_s4(symbol, daily_df)
+            s4_sig, s4_rsi, s4_trigger, s4_sl, s4_body_pct, s4_rsi_peak, s4_div, s4_div_str, s4_reason = evaluate_s4(symbol, daily_df, htf_df)
             logger.info(f"[S4][{symbol}] {s4_reason}")
+        # 1H low filter display values
+        s4_1h_low = None
+        s4_1h_low_ok = None
+        _lb = config_s4.S4_LOW_LOOKBACK
+        if htf_df is not None and len(htf_df) >= _lb + 1:
+            s4_1h_low = round(float(htf_df["low"].iloc[-(_lb + 1):-1].min()), 8)
+            if s4_trigger > 0:
+                s4_1h_low_ok = s4_trigger <= s4_1h_low
 
         # ── Strategy 6 ───────────────────────────────────────────── #
         s6_sig, s6_peak_level, s6_sl, s6_drop_pct, s6_rsi_at_peak, s6_reason = "HOLD", 0.0, 0.0, 0.0, 0.0, ""
@@ -1079,6 +1427,8 @@ class MTFBot:
             "s3_daily_gain_pct": s3_daily_gain_pct,
             "s4_reason": s4_reason,
             "s4_signal": s4_sig,
+            "s4_1h_low": s4_1h_low,
+            "s4_1h_low_ok": s4_1h_low_ok,
             "s6_signal":      s6_sig,
             "s6_reason":      s6_reason,
             "s6_peak_level":  round(s6_peak_level, 8) if s6_peak_level else None,
@@ -1267,9 +1617,6 @@ class MTFBot:
                     if balance >= min_bal:
                         self._queue_s4_pending(candidate)
             elif strategy == "S5":
-                min_bal = 5.0 / (config_s5.S5_TRADE_SIZE_PCT * config_s5.S5_LEVERAGE)
-                if balance < min_bal:
-                    continue
                 self._execute_s5(
                     sym, sig, candidate["trigger"], candidate["sl"], candidate["tp"],
                     candidate["ob_low"], candidate["ob_high"], candidate["reason"],
@@ -1639,6 +1986,7 @@ class MTFBot:
                 return
         else:
             self.pending_signals[symbol]["order_id"] = "PAPER"
+        st.save_pending_signals(self.pending_signals)
         logger.info(
             f"[S5][{symbol}] 🕐 PENDING {side} queued | "
             f"trigger={trigger:.5f} | SL={sl:.5f} | TP={tp:.5f} | R:R={rr}"
@@ -2043,6 +2391,32 @@ class MTFBot:
 
                     if strategy == "S5":
                         # ── S5: order-fill polling path ──────────────── #
+                        # Cancel if scanner no longer sees a PENDING signal (e.g. BOS failed)
+                        ps = st.get_pair_state(symbol)
+                        if ps.get("s5_signal", "HOLD") != "PENDING":
+                            order_id = sig.get("order_id")
+                            # Check fill status BEFORE cancelling — if already filled, register the trade
+                            fill_info = None
+                            try:
+                                fill_info = tr.get_order_fill(symbol, order_id)
+                            except Exception as e:
+                                logger.warning(f"[S5][{symbol}] fill-check error: {e}")
+                            if fill_info and fill_info["status"] == "filled":
+                                logger.info(f"[S5][{symbol}] Order already filled despite signal gone — registering trade")
+                                with self._trade_lock:
+                                    if symbol not in self.active_positions and not st.is_pair_paused(symbol):
+                                        self._handle_limit_filled(symbol, sig, fill_info["fill_price"], balance)
+                                self.pending_signals.pop(symbol, None)
+                                st.save_pending_signals(self.pending_signals)
+                                continue
+                            try:
+                                tr.cancel_order(symbol, order_id)
+                            except Exception as e:
+                                logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
+                            logger.info(f"[S5][{symbol}] 🚫 Signal gone — limit cancelled")
+                            st.add_scan_log(f"[S5][{symbol}] 🚫 Signal gone — limit cancelled", "INFO")
+                            self.pending_signals.pop(symbol, None)
+                            continue
                         order_id = sig.get("order_id")
                         try:
                             mark = tr.get_mark_price(symbol)
@@ -2076,12 +2450,11 @@ class MTFBot:
                                 if symbol in self.active_positions:
                                     self.pending_signals.pop(symbol, None)
                                     continue
-                                if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
-                                    break
                                 if st.is_pair_paused(symbol):
                                     continue
                                 self._handle_limit_filled(symbol, sig, fill_info["fill_price"], balance)
                             self.pending_signals.pop(symbol, None)
+                            st.save_pending_signals(self.pending_signals)
 
                         elif (side == "LONG"  and
                               mark < sig["ob_low"] * (1 - config_s5.S5_OB_INVALIDATION_BUFFER_PCT)):
@@ -2446,6 +2819,17 @@ class MTFBot:
         }
         _log_trade(f"S5_{side}", trade)
         st.add_open_trade(trade)
+        try:
+            _snap_df = tr.get_candles(symbol, config_s5.S5_LTF_INTERVAL, limit=100)
+            if not _snap_df.empty:
+                snapshot.save_snapshot(
+                    trade_id=trade_id, event="open",
+                    symbol=symbol, interval=config_s5.S5_LTF_INTERVAL,
+                    candles=_df_to_candles(_snap_df),
+                    event_price=fill_price,
+                )
+        except Exception as e:
+            logger.warning(f"[S5][{symbol}] snapshot save failed: {e}")
         self.active_positions[symbol] = {
             "side": side, "strategy": "S5",
             "box_high": sig["trigger"] if side == "LONG" else sig["sl"],

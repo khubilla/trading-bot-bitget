@@ -59,6 +59,7 @@ def _filter_by_liquidity(pairs: list[str], depth_map: dict[str, float]) -> list[
         )
     return liquid
 
+
 def get_qualified_pairs_and_sentiment() -> tuple[list[str], SentimentResult]:
     """
     Single API call → qualified pairs + volume-weighted sentiment.

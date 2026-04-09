@@ -778,7 +778,28 @@ if missing:
    ```
 3. No other files need updating — `ig_bot.py` loops over `INSTRUMENTS` dynamically
 
-### 5.5 File Inventory
+### 5.5 Bitget Bot — `config.py` Scanner/Liquidity Params
+
+These params live in `config.py` and are imported by `scanner.py`. Changing them affects all strategies, since `scanner.py` produces the `qualified_pairs` list consumed by `bot.py` each scan cycle.
+
+| Param | Default | Purpose |
+|---|---|---|
+| `MIN_VOLUME_USDT` | `5_000_000` | 24h quote volume floor — pairs below this are excluded before any strategy sees them |
+| `MAX_PRICE_USDT` | `150` | Exclude pairs priced above this |
+| `SCAN_INTERVAL_SEC` | `60` | Re-scan interval |
+| `LIQUIDITY_CHECK_ENABLED` | `True` | Master on/off for the OB depth filter |
+| `MIN_OB_DEPTH_USDT` | `50_000` | Minimum combined top-of-book depth (`bidSz×bidPr + askSz×askPr`). Pairs below this are excluded as the last funnel step in `scanner.py`. |
+
+**Who reads these:**
+- `scanner.py` — imports all five; `LIQUIDITY_CHECK_ENABLED` and `MIN_OB_DEPTH_USDT` gate `_filter_by_liquidity()`
+- `bot.py` — reads `SCAN_INTERVAL_SEC`, `MIN_VOLUME_USDT` indirectly via scanner
+- `ig_bot.py` — **does not** read any of these; IG uses its own scan logic
+
+**Breaking scenarios:**
+- Removing or renaming `LIQUIDITY_CHECK_ENABLED` / `MIN_OB_DEPTH_USDT` → `scanner.py` import fails at startup
+- Setting `MIN_OB_DEPTH_USDT` too high → all pairs filtered, bot sees empty qualified list every cycle
+
+### 5.6 File Inventory
 
 | File | Role |
 |------|------|
@@ -1253,3 +1274,4 @@ head -1 ig_trades.csv
 - 2026-04-02: Updated Section 6.1 — open_long/open_short now fetch actual fill price (openPriceAvg) after market order and use it for all exit-level calculations; `entry` in return dict is now fill price not pre-order mark. refresh_plan_exits gained optional new_trail_trigger param. _do_scale_in now recomputes trail trigger and SL (S2 only) from new avg entry after scale-in.
 - 2026-04-02: Multi-instrument IG bot — updated Section 1 (architecture diagram shows US30+GOLD loop); Section 2.1 (evaluate_s5 cfg param, dual config resolution paths); Section 4.3 (ig_trades.csv 19→20 columns, symbol at index 3, backward-compat note); Section 4.4 (ig_state.json positions/pending_orders dicts, startup migration); Section 5 (new — per-instrument config architecture, CONFIG shape, _validate_instruments()); Section 10.2 (updated config sync guidance); Section 10.3 (patching mechanism removed, cfg=instrument is the new approach, config_ig_s5.py deleted); Section 10.4 (IG CSV column count 19→20).
 - 2026-04-03: S6 V-Formation Liquidity Sweep Short — added evaluate_s6() to Section 2.1 (Bitget-only, 6-tuple return); added S6 fields to Section 4.1 pair_states (s6_signal, s6_reason, s6_peak_level, s6_sl, s6_fakeout_seen); updated trades.csv to 41 columns (+snap_s6_peak, snap_s6_drop_pct, snap_s6_rsi_at_peak); updated Section 1 architecture diagram and signal/strategy fields to include S6.
+- 2026-04-10: Liquidity filter — added Section 5.5 (Bitget scanner/liquidity config params). New params LIQUIDITY_CHECK_ENABLED and MIN_OB_DEPTH_USDT in config.py; new private function _filter_by_liquidity() in scanner.py called as last funnel step in get_qualified_pairs_and_sentiment(). Bitget-only; IG unaffected. No state.json, CSV, or return-value changes.

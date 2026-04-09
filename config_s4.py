@@ -31,3 +31,6 @@ S4_TRADE_SIZE_PCT       = 0.04   # 4% of total portfolio as margin
 
 # ── S/R Clearance ─────────────────────────────────────── #
 S4_MIN_SR_CLEARANCE = 0.15       # Skip SHORT if support < 15% below entry
+
+# ── 1H Low Filter ─────────────────────────────────────── #
+S4_LOW_LOOKBACK = 5              # Entry trigger must be ≤ lowest low of last N 1H candles

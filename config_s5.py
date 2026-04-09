@@ -39,7 +39,7 @@ S5_CHOCH_LOOKBACK  = 20     # candles to scan for OB touch (was ChoCH lookback �
 # ── Entry / SL ────────────────────────────────────────────── #
 # S5_ENTRY_BUFFER_PCT removed — entry is at ob_high exactly (limit order)
 S5_MAX_ENTRY_BUFFER = 0.04   # HOLD if price already >4% above ob_high at signal time
-S5_SL_BUFFER_PCT    = 0.003  # 0.3% beyond OB outer edge for SL
+S5_SL_BUFFER_PCT    = 0.01  # 1% beyond OB outer edge for SL
 S5_OB_INVALIDATION_BUFFER_PCT = 0.001  # cancel limit if mark crosses ob_low by >0.1%
 
 # ── Take Profit (structural) ───────────────────────────────── #
@@ -51,7 +51,7 @@ S5_SMC_FVG_LOOKBACK = 20     # 15m candles to search for the FVG
 
 # ── Risk Management ───────────────────────────────────────── #
 S5_LEVERAGE         = 10
-S5_TRADE_SIZE_PCT   = 0.04   # 2% of total portfolio as margin
+S5_TRADE_SIZE_PCT   = 0.02   # 2% of total portfolio as margin
 S5_MIN_RR           = 2.0    # minimum reward:risk ratio (structural target vs SL)
 S5_TRAIL_RANGE_PCT  = 5      # fallback trailing callback % after partial close
 S5_USE_SWING_TRAIL  = True   # after partial close, trail SL to 15m swing low/high (SMC style)

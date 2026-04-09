@@ -755,10 +755,10 @@ def get_history_position(symbol: str,
                 records = sorted(records, key=lambda r: abs(_entry_of(r) - entry_price))
 
             r   = records[0]
-            pnl = float(r.get("achievedProfits", 0) or 0)
+            pnl = float(r.get("achievedProfits") or r.get("pnl") or 0)
             if pnl == 0:
                 if attempt < retries - 1:
-                    logger.debug(f"[{symbol}] get_history_position: achievedProfits=0, retrying ({attempt+1}/{retries-1})")
+                    logger.debug(f"[{symbol}] get_history_position: pnl=0, retrying ({attempt+1}/{retries-1})")
                     _time.sleep(retry_delay)
                     continue
                 logger.warning(f"[{symbol}] get_history_position: still 0 after {retries} attempts")
@@ -831,10 +831,10 @@ def _place_limit_order(side: str, symbol: str, limit_price: float,
         "tradeSide":             "open",
         "orderType":             "limit",
         "timeInForceValue":      "gtc",
-        "price":                 str(round(limit_price, 8)),
+        "price":                 _round_price(limit_price, symbol),
         "size":                  qty_str,
-        "presetStopLossPrice":   str(round(sl_price, 8)),
-        "presetTakeProfitPrice": str(round(tp_price, 8)),
+        "presetStopLossPrice":   _round_price(sl_price, symbol),
+        "presetTakeProfitPrice": _round_price(tp_price, symbol),
     })
     if resp.get("code") != "00000":
         raise RuntimeError(f"place_limit order failed: {resp}")

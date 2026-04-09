@@ -8,7 +8,7 @@
 
 ## 1. Overview
 
-Walk-forward backtest of the S5 (SMC Order Block Pullback) strategy as it runs in `ig_bot.py`, using historical candle data sourced from TradingView via `tvdatafeed` and cached to parquet. Outputs a self-contained HTML report with per-instrument stats and inline candlestick charts for each completed trade.
+Walk-forward backtest of the S5 (SMC Order Block Pullback) strategy as it runs in `ig_bot.py`, using historical candle data sourced from Yahoo Finance via `yfinance` and cached to parquet. Outputs a self-contained HTML report with per-instrument stats and inline candlestick charts for each completed trade.
 
 ---
 
@@ -18,7 +18,7 @@ Single new file: `backtest_ig.py`. No modifications to existing files.
 
 ```
 backtest_ig.py
-  ├── fetch layer     — tvdatafeed → parquet cache in data/ig_cache/
+  ├── fetch layer     — yfinance → parquet cache in data/ig_cache/
   ├── simulation core — 15m bar-by-bar walk-forward per instrument
   └── report builder  — static HTML with inline candle data
 ```
@@ -26,13 +26,12 @@ backtest_ig.py
 **Imports (read-only):**
 - `strategy.evaluate_s5`, `strategy.calculate_ema`
 - `config_ig.INSTRUMENTS` (reads US30 + GOLD CONFIG dicts)
-- `.env` for TV credentials
 
-**TV symbol mapping (hardcoded in file):**
+**Yahoo Finance symbol mapping (hardcoded in file):**
 ```python
-_TV_SYMBOLS = {
-    "US30": ("US30",  "FXCM"),
-    "GOLD": ("XAUUSD", "OANDA"),
+_YF_SYMBOLS = {
+    "US30": "^DJI",
+    "GOLD": "GC=F",
 }
 ```
 
@@ -48,15 +47,14 @@ python backtest_ig.py --output my.html
 
 ## 3. Data Layer
 
-### 3.1 TradingView Credentials
+### 3.1 Yahoo Finance Symbols
 
-Added to `.env`:
-```
-TV_USERNAME=your@email.com
-TV_PASSWORD=yourpassword
-```
+No credentials required. Uses `yfinance` (already available on PyPI).
 
-Read via `python-dotenv` at startup (same pattern as `IG_USERNAME` / `IG_PASSWORD`).
+| Instrument | Yahoo ticker | Notes |
+|---|---|---|
+| US30 | `^DJI` | NYSE market hours only (09:30–16:00 ET) |
+| GOLD | `GC=F` | Gold futures front-month, ~23h/day |
 
 ### 3.2 Cache Files
 
@@ -73,13 +71,13 @@ Schema: `ts (int64 ms), open, high, low, close, vol` — identical to `ig_client
 
 ### 3.3 Fetch Behaviour
 
-- Requests `n_bars=5000` for all timeframes
-- Free TV account expected yields:
-  - 1D → ~13 years
-  - 1H → ~7 months
-  - 15m → ~52 days (the binding constraint)
+- yfinance periods used: `10y` (1D), `2y` (1H), `60d` (15m)
+- Expected data (verified):
+  - 1D → ~10 years (~2,514 bars)
+  - 1H → ~2 years (~3,462 bars for ^DJI)
+  - 15m → ~3 months (~1,502 bars for ^DJI, ~4,373 for GC=F)
 - Backtest window is automatically capped to the available 15m range (no manual date range needed)
-- `--no-fetch` skips tvdatafeed entirely and reads parquet only
+- `--no-fetch` skips yfinance entirely and reads parquet only
 
 ---
 
@@ -228,9 +226,9 @@ Canvas rendering adapted from `_drawEntryChart` / `_drawTradeChart` in `dashboar
 | Candle schema | `ts, open, high, low, close, vol` — matches ig_client output |
 | Session windows | ET timezone, from instrument CONFIG session_start/session_end |
 | OB invalidation buffer | Read from `instrument["s5_ob_invalidation_buffer_pct"]` |
-| 15m data limit | ~52 days with free TV account — backtest window is data-constrained |
-| New .env keys | `TV_USERNAME`, `TV_PASSWORD` |
-| New pip dependency | `tvdatafeed` |
+| 15m data limit | ~3 months via yfinance — backtest window is data-constrained |
+| New .env keys | None required |
+| New pip dependency | `yfinance` |
 
 ---
 

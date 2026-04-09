@@ -40,7 +40,7 @@ IG_LIVE_URL = "https://api.ig.com/gateway/deal"
 # ── Shared settings ─────────────────────────────────────────── #
 SESSION_START     = (0, 0)
 SESSION_END       = (23, 59)
-POLL_INTERVAL_SEC = 45
+POLL_INTERVAL_SEC = 15
 PAPER_MODE        = False
 
 # ── File paths ──────────────────────────────────────────────── #

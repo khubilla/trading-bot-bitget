@@ -16,7 +16,7 @@ S6_MIN_RECOVERY_RATIO = 0.25   # Current close must have recovered >= 25% of the
 
 # ── Exit levels ───────────────────────────────────────────── #
 S6_SL_PCT               = 0.50  # SL = fill * (1 + 0.50), i.e. 50% above entry
-S6_TRAILING_TRIGGER_PCT = 1.00  # Partial-TP trigger = fill * (1 - 1.00), i.e. 100% below entry
+S6_TRAILING_TRIGGER_PCT = 0.10  # Partial-TP trigger = fill * (1 - 0.10), i.e. 10% below entry
 S6_TRAIL_RANGE_PCT      = 10    # 10% trailing range on remainder (Bitget rangeRate integer, same units as S5_TRAIL_RANGE_PCT=5)
 
 # ── Position sizing ───────────────────────────────────────── #

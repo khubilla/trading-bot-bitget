@@ -23,7 +23,7 @@ ig_state.json
 ig_trades.csv
 ig_paper_trades.csv
 .worktrees/
-
+.tmp
 oracle_provision.py
 *.tmpdata/ig_cache
 backtest_ig_report.html

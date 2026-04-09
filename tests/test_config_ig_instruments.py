@@ -44,10 +44,10 @@ def test_config_ig_us30_values():
     from config_ig_us30 import CONFIG
     assert CONFIG["epic"] == "IX.D.DOW.IFD.IP"
     assert CONFIG["display_name"] == "US30"
-    assert CONFIG["s5_min_rr"] == 2.0
+    assert CONFIG["s5_min_rr"] == 1
     assert CONFIG["s5_use_candle_stops"] is True
 
 def test_config_ig_gold_values():
     from config_ig_gold import CONFIG
-    assert CONFIG["epic"] == "CS.D.CFDGOLD.CFDGC.IP"
+    assert CONFIG["epic"] == "CS.D.CFDGOLD.BMU.IP"
     assert CONFIG["display_name"] == "GOLD"

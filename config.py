@@ -33,13 +33,16 @@ PRODUCT_TYPE = "usdt-futures"    # USDT-margined perpetual futures
 MARGIN_COIN  = "USDT"
 
 # --- Pair Scanner ---
-MIN_VOLUME_USDT   = 1_000_000   # 24h quote volume filter (5 million USDT)
+MIN_VOLUME_USDT   = 5_000_000   # 24h quote volume filter (5 million USDT)
 MAX_PRICE_USDT    = 150         # Exclude pairs priced above this (set high to include BTC/ETH if desired)
 SCAN_INTERVAL_SEC = 60           # Re-scan all pairs every 60 seconds
 
 # --- Bot Behaviour ---
 MAX_CONCURRENT_TRADES = 10   # Max simultaneous open positions across all strategies
 POLL_INTERVAL_SEC     = 15  # Seconds between each evaluation cycle
+
+# --- Initial Balance (for PnL% calculation) ---
+INITIAL_BALANCE = 160.0  # Starting balance in USDT (update this to your actual starting amount)
 
 # --- Market Sentiment Filter ---
 # Volume-weighted: only LONG when majority green, only SHORT when majority red

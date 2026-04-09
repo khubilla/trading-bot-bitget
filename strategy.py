@@ -829,6 +829,7 @@ def evaluate_s3(
 def evaluate_s4(
     symbol: str,
     daily_df: pd.DataFrame,
+    htf_df: pd.DataFrame | None = None,
 ) -> tuple[Signal, float, float, float, float, float, bool, str, str]:
     """
     Strategy 4 — Post-pump RSI divergence short.
@@ -846,7 +847,7 @@ def evaluate_s4(
     from config_s4 import (
         S4_ENABLED, S4_BIG_CANDLE_BODY_PCT, S4_BIG_CANDLE_LOOKBACK,
         S4_RSI_PEAK_THRESH, S4_RSI_PEAK_LOOKBACK, S4_RSI_DIV_MIN_DROP,
-        S4_RSI_STILL_HOT_THRESH,
+        S4_RSI_STILL_HOT_THRESH, S4_LOW_LOOKBACK,
     )
 
     if not S4_ENABLED:
@@ -916,6 +917,16 @@ def evaluate_s4(
     from config_s4 import S4_LEVERAGE, S4_ENTRY_BUFFER
     entry_trigger = float(daily_df.iloc[-2]["low"]) * (1 - S4_ENTRY_BUFFER)
     sl_price      = entry_trigger * (1 + 0.50 / S4_LEVERAGE)   # -50% P/L
+
+    # ── Step 5: 1H low filter ─────────────────────────────────── #
+    # Entry trigger must be ≤ the lowest low of the last S4_LOW_LOOKBACK 1H candles.
+    if htf_df is not None and len(htf_df) >= S4_LOW_LOOKBACK + 1:
+        min_htf_low = float(htf_df["low"].iloc[-(S4_LOW_LOOKBACK + 1):-1].min())
+        if entry_trigger > min_htf_low:
+            return "HOLD", daily_rsi, entry_trigger, sl_price, best_body_pct, rsi_peak, rsi_div, rsi_div_str, (
+                f"S4 setup ✅ spike={best_body_pct*100:.0f}% | RSI peak={rsi_peak:.1f}{div_note} | "
+                f"1H low filter ❌ entry {entry_trigger:.5f} > {S4_LOW_LOOKBACK}-candle 1H low {min_htf_low:.5f}"
+            )
 
     logger.info(
         f"[S4][{symbol}] ✅ SHORT setup | "
@@ -1228,7 +1239,7 @@ def evaluate_s5(
     if not S5_ENABLED:
         return "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, "S5 disabled"
 
-    go_long  = allowed_direction != "BEARISH"   # BULLISH or NEUTRAL → look for LONG
+    go_long  = allowed_direction == "BULLISH" 
     go_short = allowed_direction == "BEARISH"
 
     if len(daily_df) < RSI_PERIOD + 50 or len(htf_df) < S5_HTF_BOS_LOOKBACK + 2:
@@ -1255,42 +1266,45 @@ def evaluate_s5(
         )
 
     # ── 2. 1H Break of Structure ───────────────────────────── #
-    htf_closes = htf_df["close"].astype(float)
-    htf_highs  = htf_df["high"].astype(float)
-    htf_lows   = htf_df["low"].astype(float)
-    current_htf = float(htf_closes.iloc[-1])
-
-    # Find most recent 1H swing high/low pivot (high > both neighbours).
-    # Exclude the last candle (may be forming); fall back to simple max/min if no pivot found.
+    # BOS = a past swing high/low was broken by a subsequent bar in the window.
+    # We scan most-recent → oldest for a pivot, then check if ANY bar after
+    # that pivot (within htf_win) broke above/below it.  current_htf is NOT
+    # used in the condition — entries happen during pullbacks, when price is
+    # below the broken swing high (LONG) or above the broken swing low (SHORT).
     htf_win = htf_df.iloc[-(S5_HTF_BOS_LOOKBACK + 2):-1].reset_index(drop=True)
     n_htf   = len(htf_win)
-    prior_swing_high = None
-    prior_swing_low  = None
-    for k in range(n_htf - 2, 0, -1):
-        if prior_swing_high is None:
-            h = float(htf_win.iloc[k]["high"])
-            if h > float(htf_win.iloc[k - 1]["high"]) and h > float(htf_win.iloc[k + 1]["high"]):
-                prior_swing_high = h
-        if prior_swing_low is None:
-            lo = float(htf_win.iloc[k]["low"])
-            if lo < float(htf_win.iloc[k - 1]["low"]) and lo < float(htf_win.iloc[k + 1]["low"]):
-                prior_swing_low = lo
-        if prior_swing_high is not None and prior_swing_low is not None:
-            break
-    if prior_swing_high is None:
-        prior_swing_high = float(htf_highs.iloc[-(S5_HTF_BOS_LOOKBACK + 1):-1].max())
-    if prior_swing_low is None:
-        prior_swing_low  = float(htf_lows.iloc[-(S5_HTF_BOS_LOOKBACK + 1):-1].min())
+    bos_high = None   # most recent 1H swing high that was subsequently broken (BOS confirmed for LONG)
+    bos_low  = None   # most recent 1H swing low that was subsequently broken (BOS confirmed for SHORT)
 
-    if go_long and current_htf <= prior_swing_high:
+    for k in range(n_htf - 2, 0, -1):
+        if bos_high is None:
+            h = float(htf_win.iloc[k]["high"])
+            if (h > float(htf_win.iloc[k - 1]["high"]) and
+                    h > float(htf_win.iloc[k + 1]["high"])):
+                # Check if any bar after this pivot closed above it (confirmed break)
+                post_closes = htf_win.iloc[k + 1:]["close"].astype(float)
+                if any(c > h for c in post_closes):
+                    bos_high = h
+        if bos_low is None:
+            lo = float(htf_win.iloc[k]["low"])
+            if (lo < float(htf_win.iloc[k - 1]["low"]) and
+                    lo < float(htf_win.iloc[k + 1]["low"])):
+                # Check if any bar after this pivot closed below it (confirmed break)
+                post_closes = htf_win.iloc[k + 1:]["close"].astype(float)
+                if any(c < lo for c in post_closes):
+                    bos_low = lo
+        if bos_high is not None and bos_low is not None:
+            break
+
+    if go_long and bos_high is None:
         return "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, (
             f"Daily EMA bullish ✅ | 1H BOS not confirmed "
-            f"(need close {current_htf:.5f} > swing high {prior_swing_high:.5f})"
+            f"(no swing high with subsequent close-above in last {S5_HTF_BOS_LOOKBACK} bars)"
         )
-    if go_short and current_htf >= prior_swing_low:
+    if go_short and bos_low is None:
         return "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, (
             f"Daily EMA bearish ✅ | 1H BOS not confirmed "
-            f"(need close {current_htf:.5f} < swing low {prior_swing_low:.5f})"
+            f"(no swing low with subsequent close-below in last {S5_HTF_BOS_LOOKBACK} bars)"
         )
 
     # ── 3 + 4 + 5. OB → Pullback touch → ChoCH ───────────── #

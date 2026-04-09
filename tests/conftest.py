@@ -64,12 +64,42 @@ def restore_config_s5():
         setattr(config_s5, k, v)
 
 
+@pytest.fixture(autouse=True)
+def cleanup_ig_trades_csv():
+    """Clean up ig_trades.csv before and after each test.
+
+    IG bot tests that instantiate IGBot objects may call _log_trade(), which
+    appends rows to ig_trades.csv. Without cleanup, test data pollutes the
+    production CSV file.
+
+    Strategy: Back up the file before test, restore after test. If no backup
+    exists (clean repo), remove the file after test.
+    """
+    csv_path = "ig_trades.csv"
+    backup_path = "ig_trades.csv.test_backup"
+    had_original = os.path.exists(csv_path)
+
+    # Back up existing file if present
+    if had_original:
+        shutil.copy2(csv_path, backup_path)
+
+    yield
+
+    # Restore original or remove test-generated file
+    if had_original:
+        shutil.move(backup_path, csv_path)
+    elif os.path.exists(csv_path):
+        os.remove(csv_path)
+
+
 import json
 import threading
 import time
 import numpy as np
 import pandas as pd
 from unittest.mock import patch
+import shutil
+import os
 
 
 def _make_mock_candles(n: int = 280) -> pd.DataFrame:

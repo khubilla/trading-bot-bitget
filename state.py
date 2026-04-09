@@ -190,13 +190,15 @@ def update_open_trade_sl(symbol: str, new_sl: float):
             break
     _write(s)
 
-def set_stats(wins: int, losses: int, total_pnl: float):
+def set_stats(wins: int, losses: int, total_pnl: float, pnl_pct: float | None = None):
     """Overwrite stats (used on startup to restore from CSV)."""
     s = _read()
     s["stats"]["wins"]        = wins
     s["stats"]["losses"]      = losses
     s["stats"]["total_trades"] = wins + losses
     s["stats"]["total_pnl"]   = total_pnl
+    if pnl_pct is not None:
+        s["stats"]["pnl_pct"] = pnl_pct
     _write(s)
 
 def close_trade(symbol: str, result: str, pnl: float):
@@ -239,6 +241,10 @@ def get_open_trade(symbol: str) -> dict | None:
         if t["symbol"] == symbol:
             return t
     return None
+
+def get_open_trades() -> list[dict]:
+    """Return all open trade dicts."""
+    return list(_read().get("open_trades", []))
 
 def add_scan_log(msg: str, level: str = "INFO"):
     s = _read()

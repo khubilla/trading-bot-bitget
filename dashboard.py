@@ -1083,11 +1083,13 @@ def get_ig_state():
             closed = [t for t in trade_history if t["pnl"] is not None]
             wins   = [t for t in closed if (t["pnl"] or 0) > 0]
             total_pnl = sum(t["pnl"] for t in closed)
+            # TODO: add INITIAL_BALANCE to config_ig.py for PnL% calculation
             stats = {
                 "total":     len(closed),
                 "wins":      len(wins),
                 "total_pnl": round(total_pnl, 2),
                 "win_rate":  f"{round(len(wins)/len(closed)*100)}%" if closed else "—",
+                "pnl_pct":   "—",  # TODO: calculate when IG INITIAL_BALANCE is added
             }
             trade_history = list(reversed(trade_history))[:30]
         except Exception:

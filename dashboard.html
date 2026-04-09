@@ -385,7 +385,7 @@
     padding-top: 6px;
     border-top: 1px solid var(--border);
     font-size: 9px; color: var(--muted);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    white-space: normal; word-break: break-word;
     letter-spacing: 0.03em;
   }
   .pair-reason.active { color: var(--amber); }
@@ -1000,6 +1000,7 @@
             <div class="stat-value emerald" id="s-wr">0%</div>
             <div class="winrate-bar"><div class="winrate-fill" id="s-wr-bar" style="width:0%"></div></div>
             <div class="stat-sub" id="s-wr-sub">0W / 0L of 0 trades</div>
+            <div class="stat-sub" id="s-pnl-pct" style="margin-top: 4px; opacity: 0.9;">PnL%: —</div>
           </div>
           <div class="stat-card blue">
             <div class="stat-label">Open Positions</div>
@@ -1112,6 +1113,10 @@
       <div class="header-stat">
         <span class="val" id="ig-h-wr">—</span>
         <span class="lbl">Win Rate</span>
+      </div>
+      <div class="header-stat">
+        <span class="val" id="ig-h-pnl-pct">—</span>
+        <span class="lbl">PnL%</span>
       </div>
       <div class="header-stat">
         <span class="val" id="ig-h-et">—</span>
@@ -1455,6 +1460,9 @@ function render(s) {
   $('s-wr').textContent     = wr.toFixed(1) + '%';
   $('s-wr-bar').style.width = wr + '%';
   $('s-wr-sub').textContent = `${wins}W / ${losses}L of ${total} trades`;
+  const pnlPct = st.pnl_pct ?? 0;
+  $('s-pnl-pct').textContent = `PnL%: ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%`;
+  $('s-pnl-pct').style.color = pnlPct >= 0 ? 'var(--emerald)' : 'var(--rose)';
   $('s-open').textContent   = (s.open_trades || []).length;
   if (s.max_concurrent != null) $('s-max-sub').textContent = `max ${s.max_concurrent} concurrent`;
 
@@ -2319,7 +2327,8 @@ function signalScore(sym, ps, tab) {
     const rsiHot  = reason.includes('RSI peaked') || sig === 'SHORT';
     const div     = reason.includes('RSI div') || sig === 'SHORT';
     const srClear = ps.s4_sr_support_pct != null && ps.s4_sr_support_pct >= 15;
-    return (spike ? 1 : 0) + (spike && rsiHot ? 1 : 0) + (spike && rsiHot && div ? 1 : 0) + (srClear ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
+    const htfLow  = ps.s4_1h_low_ok === true;
+    return (spike ? 1 : 0) + (spike && rsiHot ? 1 : 0) + (spike && rsiHot && div ? 1 : 0) + (srClear ? 1 : 0) + (htfLow ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
   }
   if (tab === 's5') {
     const reason  = ps.s5_reason || '';
@@ -2499,6 +2508,10 @@ function s4CardHTML(sym, ps) {
   const symShort = sym.replace('USDT', '');
   const cardClass = sig === 'SHORT' ? 'signal-short' : '';
   const spikeOk  = reason.includes('spike') && !reason.includes('No spike');
+  const htfLowOk = ps.s4_1h_low_ok;
+  const htfLow   = ps.s4_1h_low;
+  const htfLowClass = htfLowOk == null ? 'muted' : htfLowOk ? 'pass' : 'fail';
+  const htfLowLabel = htfLowOk == null ? '—' : htfLowOk ? `≤ ${htfLow != null ? htfLow.toFixed(4) : '?'} ✓` : `> ${htfLow != null ? htfLow.toFixed(4) : '?'} ✗`;
   const rsiHot   = reason.includes('RSI peaked') || sig === 'SHORT';
   const div_ok   = reason.includes('RSI div ✅') || sig === 'SHORT';
   const spikeClass= spikeOk ? 'pass' : 'fail';
@@ -2536,6 +2549,10 @@ function s4CardHTML(sym, ps) {
         <div class="pair-check">
           <span class="check-label">Support</span>
           <span class="check-val ${srClass}">${srLabel}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">1H Low (${ps.s4_1h_low != null ? '5c' : '—'})</span>
+          <span class="check-val ${htfLowClass}">${htfLowLabel}</span>
         </div>
       </div>
       <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0,60)} · ${age}</div>
@@ -2604,7 +2621,7 @@ function s5CardHTML(sym, ps) {
           <span class="check-val ${chochClass}">${!obOk ? '—' : chochOk ? 'Confirmed ✓' : 'Waiting…'}</span>
         </div>
       </div>
-      <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0,60)} · ${age}${scoreLabel}</div>
+      <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').replace(/</g,'&lt;').replace(/>/g,'&gt;')} · ${age}${scoreLabel}</div>
     </div>`;
 }
 
@@ -3533,6 +3550,10 @@ function renderIG(d) {
   pnlEl.style.color = pnl >= 0 ? 'var(--emerald)' : 'var(--rose)';
   $('ig-h-trades').textContent = d.stats?.total ?? 0;
   $('ig-h-wr').textContent = d.stats?.win_rate ?? '—';
+  const igPnlPct = d.stats?.pnl_pct ?? '—';
+  const pnlPctEl = $('ig-h-pnl-pct');
+  pnlPctEl.textContent = igPnlPct !== '—' ? (igPnlPct >= 0 ? '+' : '') + igPnlPct.toFixed(2) + '%' : '—';
+  pnlPctEl.style.color = igPnlPct !== '—' && igPnlPct >= 0 ? 'var(--emerald)' : 'var(--rose)';
   $('ig-h-et').textContent = d.et_time ?? '—';
 
   const sb = $('ig-sess-badge'), st = $('ig-sess-text');

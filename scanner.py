@@ -82,6 +82,7 @@ def get_qualified_pairs_and_sentiment() -> tuple[list[str], SentimentResult]:
     green_count  = 0
     red_count    = 0
     btc_change   = 0.0          # ← NEW: for BTC veto
+    depth_map   : dict[str, float] = {}
 
     for t in tickers:
         symbol = t.get("symbol", "")
@@ -106,6 +107,14 @@ def get_qualified_pairs_and_sentiment() -> tuple[list[str], SentimentResult]:
             continue
 
         qualified.append(symbol)
+
+        # Liquidity probe: top-of-book USDT depth from ticker fields
+        try:
+            bid_d = float(t.get("bidSz") or 0) * float(t.get("bidPr") or 0)
+            ask_d = float(t.get("askSz") or 0) * float(t.get("askPr") or 0)
+            depth_map[symbol] = bid_d + ask_d
+        except (ValueError, TypeError):
+            depth_map[symbol] = 0.0
 
         # ── NEW: capture BTC change for veto ─────────────────────
         if symbol == "BTCUSDT":
@@ -154,8 +163,10 @@ def get_qualified_pairs_and_sentiment() -> tuple[list[str], SentimentResult]:
         f"Scanner: {len(qualified)} pairs | "
         f"Sentiment: {direction} ({bullish_w*100:.1f}% green by vol×magnitude) | "
         f"🟢 {green_count}  🔴 {red_count} | "
-        f"BTC={btc_change:+.1f}%"      # ← NEW: show BTC change in log
+        f"BTC={btc_change:+.1f}%"
     )
+    if LIQUIDITY_CHECK_ENABLED:
+        qualified = _filter_by_liquidity(qualified, depth_map)
     return qualified, sentiment
 
 

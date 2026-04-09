@@ -209,6 +209,7 @@ _STRATEGY_CANDLE_INTERVAL = {
     "S3": config_s3.S3_LTF_INTERVAL, # "15m"
     "S4": "1D",
     "S5": config_s5.S5_LTF_INTERVAL, # "15m"
+    "S6": "1D",
 }
 
 
@@ -338,7 +339,7 @@ class MTFBot:
             #      (covers manually-added rows that never went through bot code)
             if not PAPER_MODE:
                 for sym, ap in list(self.active_positions.items()):
-                    if ap.get("strategy") not in ("S1", "S2", "S3", "S4", "S5"):
+                    if ap.get("strategy") not in ("S1", "S2", "S3", "S4", "S5", "S6"):
                         continue
                     if ap.get("partial_logged"):
                         continue
@@ -836,8 +837,8 @@ class MTFBot:
                         f"Box={ap['box_low']:.5f}–{ap['box_high']:.5f}"
                     )
 
-                    # Track initial qty and detect live partial close (S2/S4)
-                    if not PAPER_MODE and ap.get("strategy") in ("S1", "S2", "S3", "S4", "S5"):
+                    # Track initial qty and detect live partial close (S1-S6)
+                    if not PAPER_MODE and ap.get("strategy") in ("S1", "S2", "S3", "S4", "S5", "S6"):
                         if "initial_qty" not in ap:
                             ap["initial_qty"] = float(pos["qty"])
                             st.update_position_memory(sym, initial_qty=float(pos["qty"]))
@@ -1631,7 +1632,7 @@ class MTFBot:
     # ── Scale-in executor ────────────────────────────────────────── #
 
     def _do_scale_in(self, sym: str, ap: dict) -> None:
-        """Execute scale-in for S2/S4 and save candle snapshot."""
+        """Execute scale-in for S2/S4/S6 and save candle snapshot."""
         try:
             mark_now  = tr.get_mark_price(sym)
             in_window = False
@@ -1640,12 +1641,15 @@ class MTFBot:
             elif ap["strategy"] == "S4":
                 pl = ap["s4_prev_low"]
                 in_window = pl * (1 - config_s4.S4_MAX_ENTRY_BUFFER) <= mark_now <= pl * (1 - config_s4.S4_ENTRY_BUFFER)
+            elif ap["strategy"] == "S6":
+                # Scale in while price is still below peak_level (fakeout reversal still valid)
+                in_window = mark_now < ap["box_low"]
             remaining = ap["scale_in_trade_size_pct"] * 0.5
             if in_window:
                 if ap["strategy"] == "S2":
                     tr.scale_in_long(sym, remaining, config_s2.S2_LEVERAGE)
                 else:
-                    tr.scale_in_short(sym, remaining, config_s4.S4_LEVERAGE)
+                    tr.scale_in_short(sym, remaining, config_s4.S4_LEVERAGE if ap["strategy"] == "S4" else config_s6.S6_LEVERAGE)
                 logger.info(f"[{ap['strategy']}][{sym}] ✅ Scale-in +{remaining*100:.0f}% @ {mark_now:.5f}")
                 st.add_scan_log(f"[{ap['strategy']}][{sym}] Scale-in executed @ {mark_now:.5f}", "INFO")
                 _log_trade(f"{ap['strategy']}_SCALE_IN", {
@@ -1711,6 +1715,15 @@ class MTFBot:
                                 new_trig = new_avg * (1 - config_s4.S4_TRAILING_TRIGGER_PCT)
                                 # S4 SL is structural (box_high * 1.001) — no percentage cap,
                                 # no SL update needed after scale-in
+                            elif ap["strategy"] == "S6":
+                                new_trig = new_avg * (1 - config_s6.S6_TRAILING_TRIGGER_PCT)
+                                # Recompute SL from new avg entry; update only if it moves in
+                                # the favorable direction (lower = further from price for short)
+                                new_sl = new_avg * (1 + config_s6.S6_SL_PCT / config_s6.S6_LEVERAGE)
+                                if new_sl < ap.get("sl", ap["box_high"]):
+                                    if tr.update_position_sl(sym, new_sl, hold_side="short"):
+                                        ap["sl"] = new_sl
+                                        st.update_open_trade_sl(sym, new_sl)
                         if not tr.refresh_plan_exits(sym, hold_side, new_trig):
                             logger.warning(f"[{ap['strategy']}][{sym}] ⚠️ Scale-in exits refresh failed — verify plan orders manually")
                             st.add_scan_log(f"[{ap['strategy']}][{sym}] ⚠️ Scale-in exits refresh failed", "WARN")
@@ -2308,7 +2321,7 @@ class MTFBot:
         }
 
     def _fire_s6(self, symbol: str, sig: dict, mark: float, balance: float) -> None:
-        """Open S6 SHORT after two-phase fakeout confirmed."""
+        """Open S6 SHORT after two-phase fakeout confirmed. Initial entry at 50% size; scale-in queued 1h later."""
         sl_price = mark * (1 + config_s6.S6_SL_PCT / config_s6.S6_LEVERAGE)
         st.add_scan_log(
             f"[S6][{symbol}] 🔴 SHORT | peak={sig['peak_level']:.5f} | "
@@ -2316,7 +2329,7 @@ class MTFBot:
         )
         trade = tr.open_short(
             symbol, sl_floor=sl_price, leverage=config_s6.S6_LEVERAGE,
-            trade_size_pct=config_s6.S6_TRADE_SIZE_PCT, use_s6_exits=True,
+            trade_size_pct=config_s6.S6_TRADE_SIZE_PCT * 0.5, use_s6_exits=True,
         )
         trade["strategy"]              = "S6"
         trade["snap_s6_peak"]          = sig.get("snap_s6_peak")
@@ -2339,6 +2352,8 @@ class MTFBot:
         self.active_positions[symbol] = {
             "side": "SHORT", "strategy": "S6",
             "box_high": sl_price, "box_low": sig["peak_level"],
+            "scale_in_pending": True, "scale_in_after": time.time() + 3600,
+            "scale_in_trade_size_pct": config_s6.S6_TRADE_SIZE_PCT,
             "trade_id": trade["trade_id"],
         }
 

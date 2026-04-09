@@ -156,7 +156,9 @@ Short-only daily strategy targeting liquidity sweeps that fail to hold above a p
 - **Phase 2:** Waits for price to drop back below `peak_level` — SHORT entered on confirmation
 - Watcher runs in the 4-second entry thread and checks signal validity each cycle. Cancelled automatically if the S6 signal disappears or market turns BULLISH.
 
-**Risk:** 10x leverage · SL above spike high · 50% partial close at +10% · 10% trailing stop on remainder
+**Scale-in:** opens at 2% margin initially; adds remaining 2% after 1 hour if price is still below `peak_level` (fakeout reversal intact). SL, partial TP, and trailing trigger are all recomputed from the new average entry after scale-in.
+
+**Risk:** 10x leverage · 4% of total portfolio · SL above spike high · 50% partial close at −10% · 10% trailing stop on remainder
 
 **Sentiment gate:** only fires when market is BEARISH.
 

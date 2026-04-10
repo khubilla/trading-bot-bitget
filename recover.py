@@ -73,6 +73,59 @@ def _is_valid_sltp(sl, tp) -> bool:
         return False
 
 
+def _patch_sltp(sym: str, state_entry: dict, exchange_pos: dict,
+                state_file: str, csv_path: str,
+                dry_run: bool = False) -> dict:
+    """
+    PATCH_SLTP case: CSV open row exists but SL/TP are bad.
+    Derives new SL/TP via S5 OB recovery (S5) or estimate_sl_tp (all others).
+    Patches state.json only — no CSV write.
+    Returns summary dict: {symbol, action, strategy, sl, tp}.
+    """
+    strategy  = state_entry.get("strategy", "UNKNOWN")
+    side      = exchange_pos.get("side", "SHORT")
+    entry     = float(exchange_pos.get("entry_price", 0))
+    opened_at = state_entry.get("opened_at") or datetime.now(timezone.utc).isoformat()
+
+    sl = tp = ob_low = ob_high = None
+
+    if strategy == "S5":
+        try:
+            end_ms = int(datetime.fromisoformat(opened_at).timestamp() * 1000) + 60_000
+        except Exception:
+            import time
+            end_ms = int(time.time() * 1000)
+
+        m15_df   = fetch_candles_at(sym, "15m", limit=100, end_ms=end_ms)
+        htf_df   = fetch_candles_at(sym, "1H",  limit=50,  end_ms=end_ms)
+        daily_df = tr.get_candles(sym, "1D", limit=60)
+
+        if not m15_df.empty and not htf_df.empty and not daily_df.empty:
+            result = attempt_s5_recovery(sym, m15_df, htf_df, daily_df, side)
+            if result:
+                sl, tp, ob_low, ob_high = result
+
+    if sl is None:
+        sl, tp, ob_low, ob_high = estimate_sl_tp(entry, side)
+
+    if not dry_run:
+        s = st._read()
+        for t in s.get("open_trades", []):
+            if t["symbol"] == sym:
+                t.update({
+                    "sl":       round(sl,      8),
+                    "tp":       round(tp,      8),
+                    "box_high": round(ob_high, 8),
+                    "box_low":  round(ob_low,  8),
+                    "tpsl_set": False,
+                })
+                break
+        st._write(s)
+
+    return {"symbol": sym, "action": "PATCH_SLTP", "strategy": strategy,
+            "sl": round(sl, 8), "tp": round(tp, 8)}
+
+
 def _log_trade_to_csv(csv_path: str, action: str, details: dict,
                       dry_run: bool = False) -> None:
     """Append a trade row to trades.csv. No-op in dry-run mode."""

@@ -224,7 +224,7 @@ class TestPatchSltp:
         assert state_file.read_text() == before
 
     def test_uses_s5_ob_recovery_for_s5_strategy(self, tmp_path, monkeypatch):
-        """For S5 strategy, attempt_s5_recovery is called."""
+        """For S5 strategy, attempt_s5_recovery is called when candles are available."""
         if "recover" in sys.modules:
             del sys.modules["recover"]
         import recover
@@ -241,13 +241,21 @@ class TestPatchSltp:
         }])
         monkeypatch.setattr(st, "STATE_FILE", str(state_file))
 
+        # Return non-empty DataFrames so the guard passes and attempt_s5_recovery is called
+        n = 5
+        fake_df = pd.DataFrame({
+            "ts": list(range(n)), "open": [9.0]*n, "high": [9.1]*n,
+            "low": [8.9]*n, "close": [9.05]*n, "vol": [100.0]*n,
+        })
         s5_called = []
         monkeypatch.setattr(startup_recovery, "fetch_candles_at",
-                            lambda *a, **kw: pd.DataFrame())
+                            lambda *a, **kw: fake_df)
+        monkeypatch.setattr(recover, "fetch_candles_at",
+                            lambda *a, **kw: fake_df)
         monkeypatch.setattr(tr, "get_candles",
-                            lambda sym, i, limit=100: pd.DataFrame())
+                            lambda sym, i, limit=100: fake_df)
         monkeypatch.setattr(
-            startup_recovery, "attempt_s5_recovery",
+            recover, "attempt_s5_recovery",
             lambda *a, **kw: s5_called.append(True) or None,
         )
 

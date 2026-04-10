@@ -14,7 +14,6 @@ The bot will pick up the patched state.json and trades.csv on its next tick.
 """
 import argparse
 import csv
-import json
 import sys
 import uuid
 import logging
@@ -266,58 +265,104 @@ def _full_recovery(sym: str, exchange_pos: dict,
 
 def main(args=None):
     parser = argparse.ArgumentParser(
-        description="Manual recovery for positions that filled while the bot was stopped."
+        description="Reconcile all Bitget positions against state.json and trades.csv."
     )
     parser.add_argument("--dry-run", action="store_true",
                         help="Print what would change without writing to disk.")
     parser.add_argument("--symbols", nargs="+", metavar="SYM",
-                        help="Limit recovery to specific symbols.")
+                        help="Limit Pass 1 to specific symbols.")
     parsed = parser.parse_args(args)
 
-    data   = json.loads(Path(STATE_FILE).read_text())
-    trades = data.get("open_trades", [])
+    mode = "[DRY RUN] " if parsed.dry_run else ""
 
-    # Find UNKNOWN positions (no CSV open row, trade_id blank or sl="?")
-    targets = [
-        t for t in trades
-        if (t.get("strategy") == "UNKNOWN" or t.get("sl") in ("?", "", None))
-        and (not parsed.symbols or t["symbol"] in parsed.symbols)
-    ]
+    # ── Fetch live positions from Bitget ─────────────────────────── #
+    exchange_positions = tr.get_all_open_positions()
+    n = len(exchange_positions)
+    print(f"Fetched {n} position(s) from Bitget.")
 
-    if not targets:
-        print("No UNKNOWN positions found — nothing to recover.")
+    # Apply --symbols filter to Pass 1
+    pass1_symbols = {
+        sym: pos for sym, pos in exchange_positions.items()
+        if not parsed.symbols or sym in parsed.symbols
+    }
+
+    if not pass1_symbols and not st.get_open_trades():
+        print("Nothing to recover.")
         return
 
-    mode = "[DRY RUN] " if parsed.dry_run else ""
-    print(f"{mode}Recovering {len(targets)} position(s)...\n")
-
+    skipped = patched = recovered = warnings = 0
     results = []
-    for t in targets:
-        sym = t["symbol"]
-        print(f"  {sym}...", end=" ", flush=True)
+
+    # ── Pass 1: Exchange → State ──────────────────────────────────── #
+    print(f"\nPass 1 — Exchange → State:")
+
+    for sym, pos in pass1_symbols.items():
         try:
-            r = recover_position(sym, t, STATE_FILE, TRADE_LOG, dry_run=parsed.dry_run)
-            results.append(r)
-            print("done")
+            csv_row   = _get_open_csv_row(TRADE_LOG, sym)
+            state_ent = st.get_open_trade(sym)
+
+            if csv_row is not None and _is_valid_sltp(csv_row.get("sl"), csv_row.get("tp")):
+                # SKIP
+                skipped += 1
+                print(f"  {sym:<16s}  SKIP        (CSV + SL/TP intact)")
+                results.append({"symbol": sym, "action": "SKIP"})
+
+            elif csv_row is not None:
+                # PATCH_SLTP — open row exists but SL/TP missing/bad
+                r = _patch_sltp(
+                    sym,
+                    state_ent or {"strategy": csv_row.get("strategy", "UNKNOWN"),
+                                  "opened_at": csv_row.get("timestamp")},
+                    pos,
+                    STATE_FILE, TRADE_LOG,
+                    dry_run=parsed.dry_run,
+                )
+                patched += 1
+                label = f"{mode}PATCH_SLTP  sl={r['sl']:.5f}  tp={r['tp']:.5f}"
+                print(f"  {sym:<16s}  {label}")
+                results.append(r)
+
+            else:
+                # FULL_RECOVERY — no CSV open row
+                r = _full_recovery(
+                    sym, pos,
+                    STATE_FILE, TRADE_LOG,
+                    dry_run=parsed.dry_run,
+                )
+                recovered += 1
+                label = (
+                    f"{mode}FULL        "
+                    f"trade_id={r['trade_id']}  entry={r['entry']:.5f}  "
+                    f"sl={r['sl']:.5f}  tp={r['tp']:.5f}"
+                )
+                print(f"  {sym:<16s}  {label}")
+                results.append(r)
+
         except Exception as e:
-            print(f"ERROR: {e}")
-            logger.warning(f"[{sym}] recover_position failed: {e}")
+            print(f"  {sym:<16s}  ERROR: {e}")
+            logger.warning(f"[{sym}] recover main pass1 failed: {e}")
 
-    # Summary table
-    print(f"\n{'Symbol':14s}  {'trade_id':>9s}  {'Entry':>10s}  {'SL':>10s}  {'TP':>10s}  {'Snap':>4s}")
-    print("-" * 65)
-    for r in results:
-        snap = "yes" if r["snapshot"] else ("skip" if not parsed.dry_run else "n/a")
-        print(
-            f"{r['symbol']:14s}  {r['trade_id']:>9s}  "
-            f"{r['entry']:>10.5f}  {r['sl']:>10.5f}  {r['tp']:>10.5f}  {snap:>4s}"
-        )
+    # ── Pass 2: State → Exchange ──────────────────────────────────── #
+    state_trades = st.get_open_trades()
+    orphans = [t for t in state_trades if t["symbol"] not in exchange_positions]
 
-    if parsed.dry_run:
-        print("\n[DRY RUN] No files were written.")
-    else:
-        print(f"\n⚠️  tpsl_set=False for all recovered positions.")
-        print("   Manually set SL/TP on Bitget, or restart the bot to activate S5 swing-trail.")
+    if orphans:
+        print(f"\nPass 2 — State → Exchange:")
+        for t in orphans:
+            sym = t["symbol"]
+            warnings += 1
+            print(f"  {sym:<16s}  ⚠ WARNING: in state.json but NOT on Bitget — restart bot to close")
+
+    # ── Summary ───────────────────────────────────────────────────── #
+    print(f"\nSummary: {skipped} skipped, {patched} patched, {recovered} fully recovered"
+          + (f", {warnings} warning(s)" if warnings else "") + ".")
+
+    if patched + recovered > 0:
+        if parsed.dry_run:
+            print(f"\n[DRY RUN] No files were written.")
+        else:
+            print(f"\n⚠  tpsl_set=False for recovered/patched positions. "
+                  f"Manually set SL/TP on Bitget, or restart the bot.")
 
 
 if __name__ == "__main__":

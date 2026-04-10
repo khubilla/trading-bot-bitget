@@ -23,6 +23,7 @@ from pathlib import Path
 
 import config
 import snapshot
+import state as st
 import trader as tr
 from startup_recovery import fetch_candles_at, estimate_sl_tp, attempt_s5_recovery
 
@@ -44,6 +45,32 @@ _TRADE_FIELDS = [
     "snap_sr_clearance_pct",
     "result", "pnl", "pnl_pct", "exit_reason", "exit_price",
 ]
+
+
+def _get_open_csv_row(csv_path: str, symbol: str) -> dict | None:
+    """Return the most recent open (_LONG/_SHORT) CSV row for a symbol, or None."""
+    if not Path(csv_path).exists():
+        return None
+    try:
+        with open(csv_path, newline="") as f:
+            rows = list(csv.DictReader(f))
+        for r in reversed(rows):
+            action = r.get("action", "")
+            if (r.get("symbol") == symbol
+                    and any(action.endswith(sfx) for sfx in ("_LONG", "_SHORT"))
+                    and r.get("qty")):
+                return r
+    except Exception:
+        pass
+    return None
+
+
+def _is_valid_sltp(sl, tp) -> bool:
+    """Return True iff both sl and tp parse as float > 0."""
+    try:
+        return float(sl) > 0 and float(tp) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _log_trade_to_csv(csv_path: str, action: str, details: dict,

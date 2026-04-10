@@ -925,7 +925,53 @@ After scale-in, resizes `profit_plan` and `moving_plan` orders to the current to
 
 ## 8. External Tool Dependencies
 
-[To be populated in Task 10]
+### 8.1 recover.py
+
+**Purpose:** Manual CLI tool to reconcile all live Bitget positions against `state.json`
+and `trades.csv`. Treats `tr.get_all_open_positions()` as source of truth for what positions
+exist. Run when the bot is stopped or a position was opened while the bot was down.
+
+**Usage:**
+```bash
+python recover.py [--dry-run] [--symbols SYM1 SYM2 ...]
+```
+
+**Calls:**
+- `trader.get_all_open_positions()` — live exchange positions (Pass 1 source of truth)
+- `state.get_open_trade(sym)` — read single state entry
+- `state.get_open_trades()` — full list for Pass 2 orphan scan
+- `state._read()` / `state._write()` — direct state patch (same pattern as `bot.py._startup_recovery`)
+- `startup_recovery.fetch_candles_at()` — historical candles for S5 OB recovery
+- `startup_recovery.estimate_sl_tp()` — fallback SL/TP for non-S5 strategies
+- `startup_recovery.attempt_s5_recovery()` — S5 OB recovery path
+- `snapshot.save_snapshot()` — open snapshot for FULL_RECOVERY case
+- `config.TRADE_LOG` — trades.csv path
+
+**Two-pass reconciliation logic:**
+
+| Pass | Source | Action |
+|---|---|---|
+| Pass 1 | Bitget positions → state.json / trades.csv | SKIP / PATCH_SLTP / FULL_RECOVERY per position |
+| Pass 2 | state.json open_trades → Bitget | Warn only for orphan state entries |
+
+**Classification (Pass 1):**
+- `SKIP` — CSV open row exists AND SL/TP are valid floats > 0
+- `PATCH_SLTP` — CSV open row exists BUT SL or TP is bad; patches state.json only, no new CSV row
+- `FULL_RECOVERY` — no CSV open row; writes CSV row, patches/adds state.json, saves snapshot
+
+**SL/TP recovery strategy:**
+- S5: `attempt_s5_recovery()` first, fall back to `estimate_sl_tp()`
+- All others (S1–S4, S6, UNKNOWN): `estimate_sl_tp()` always
+
+**Does NOT affect:**
+- `ig_bot.py`, `ig_state.json` — Bitget-only tool
+- `bot.py._startup_recovery()` — independent; recover.py is the manual equivalent
+
+**Breaking scenarios:**
+- Changing `tr.get_all_open_positions()` return dict structure → Pass 1 loop breaks
+- Changing `state._read()` / `state._write()` → state patch fails
+- Changing `startup_recovery.estimate_sl_tp()` return tuple → `_patch_sltp` and `_full_recovery` break
+- Changing `startup_recovery.attempt_s5_recovery()` return type → S5 path in `_patch_sltp` breaks
 
 ---
 

@@ -332,6 +332,8 @@ class TestFullRecovery:
 
         monkeypatch.setattr(startup_recovery, "fetch_candles_at",
                             lambda *a, **kw: pd.DataFrame())
+        monkeypatch.setattr(recover, "fetch_candles_at",
+                            lambda *a, **kw: pd.DataFrame())
         monkeypatch.setattr(tr, "get_candles",
                             lambda sym, i, limit=100: pd.DataFrame())
         monkeypatch.setattr(snapshot, "save_snapshot", lambda **kw: None)
@@ -377,6 +379,8 @@ class TestFullRecovery:
 
         monkeypatch.setattr(startup_recovery, "fetch_candles_at",
                             lambda *a, **kw: pd.DataFrame())
+        monkeypatch.setattr(recover, "fetch_candles_at",
+                            lambda *a, **kw: pd.DataFrame())
         monkeypatch.setattr(tr, "get_candles",
                             lambda sym, i, limit=100: pd.DataFrame())
 
@@ -412,7 +416,11 @@ class TestFullRecovery:
 
         monkeypatch.setattr(
             startup_recovery, "fetch_candles_at",
-            lambda sym, interval, **kw: fake_df if interval == "15m" else fake_df,
+            lambda sym, interval, **kw: fake_df,
+        )
+        monkeypatch.setattr(
+            recover, "fetch_candles_at",
+            lambda sym, interval, **kw: fake_df,
         )
         monkeypatch.setattr(tr, "get_candles",
                             lambda sym, i, limit=100: fake_df)
@@ -447,6 +455,8 @@ class TestFullRecovery:
         monkeypatch.setattr(st, "STATE_FILE", str(state_file))
 
         monkeypatch.setattr(startup_recovery, "fetch_candles_at",
+                            lambda *a, **kw: pd.DataFrame())
+        monkeypatch.setattr(recover, "fetch_candles_at",
                             lambda *a, **kw: pd.DataFrame())
         monkeypatch.setattr(tr, "get_candles",
                             lambda sym, i, limit=100: pd.DataFrame())

@@ -140,27 +140,6 @@ def _log_trade_to_csv(csv_path: str, action: str, details: dict,
         w.writerow(row)
 
 
-def _patch_state(state_file: str, sym: str, trade_id: str,
-                 sl: float, tp: float, ob_low: float, ob_high: float,
-                 dry_run: bool = False) -> None:
-    """Update the open_trades entry for sym in state.json."""
-    if dry_run:
-        return
-    data = json.loads(Path(state_file).read_text())
-    for t in data.get("open_trades", []):
-        if t["symbol"] == sym:
-            t.update({
-                "trade_id": trade_id,
-                "sl":       round(sl,      8),
-                "tp":       round(tp,      8),
-                "box_high": round(ob_high, 8),
-                "box_low":  round(ob_low,  8),
-                "tpsl_set": False,
-            })
-            break
-    Path(state_file).write_text(json.dumps(data, indent=2))
-
-
 def _df_to_candles(df) -> list[dict]:
     return [
         {"t": int(r.ts), "o": float(r.open), "h": float(r.high),
@@ -169,19 +148,24 @@ def _df_to_candles(df) -> list[dict]:
     ]
 
 
-def recover_position(sym: str, trade_entry: dict,
-                     state_file: str, csv_path: str,
-                     dry_run: bool = False) -> dict:
+def _full_recovery(sym: str, exchange_pos: dict,
+                   state_file: str, csv_path: str,
+                   dry_run: bool = False) -> dict:
     """
-    Run sad-path recovery for a single UNKNOWN position.
-    Returns summary dict: {symbol, trade_id, entry, sl, tp, snapshot}.
+    FULL_RECOVERY case: no CSV open row exists for this symbol.
+    Assigns new trade_id, writes CSV open row, patches/adds state.json entry,
+    saves snapshot.
+    Returns summary dict: {symbol, action, trade_id, entry, sl, tp, snapshot}.
     """
-    entry     = float(trade_entry.get("entry", 0))
-    side      = trade_entry.get("side", "SHORT")
-    margin    = float(trade_entry.get("margin", 0))
-    leverage  = int(float(trade_entry.get("leverage") or 10))
-    qty       = float(trade_entry.get("qty", 0))
-    opened_at = trade_entry.get("opened_at") or datetime.now(timezone.utc).isoformat()
+    entry     = float(exchange_pos.get("entry_price", 0))
+    side      = exchange_pos.get("side", "SHORT")
+    margin    = float(exchange_pos.get("margin", 0))
+    leverage  = int(float(exchange_pos.get("leverage") or 10))
+    qty       = float(exchange_pos.get("qty", 0))
+
+    # Use opened_at from state if available, otherwise now
+    _ot       = st.get_open_trade(sym)
+    opened_at = (_ot or {}).get("opened_at") or datetime.now(timezone.utc).isoformat()
     trade_id  = uuid.uuid4().hex[:8]
 
     try:
@@ -200,8 +184,40 @@ def recover_position(sym: str, trade_entry: dict,
 
     sl, tp, ob_low, ob_high = result if result else estimate_sl_tp(entry, side)
 
-    # Patch state.json
-    _patch_state(state_file, sym, trade_id, sl, tp, ob_low, ob_high, dry_run=dry_run)
+    # Patch or add state.json entry
+    if not dry_run:
+        s = st._read()
+        found = False
+        for t in s.get("open_trades", []):
+            if t["symbol"] == sym:
+                t.update({
+                    "trade_id": trade_id,
+                    "sl":       round(sl,      8),
+                    "tp":       round(tp,      8),
+                    "box_high": round(ob_high, 8),
+                    "box_low":  round(ob_low,  8),
+                    "tpsl_set": False,
+                })
+                found = True
+                break
+        if not found:
+            s.setdefault("open_trades", []).append({
+                "symbol":    sym,
+                "side":      side,
+                "qty":       qty,
+                "entry":     entry,
+                "sl":        round(sl,      8),
+                "tp":        round(tp,      8),
+                "box_high":  round(ob_high, 8),
+                "box_low":   round(ob_low,  8),
+                "leverage":  leverage,
+                "margin":    round(margin,  8),
+                "strategy":  "UNKNOWN",
+                "opened_at": opened_at,
+                "trade_id":  trade_id,
+                "tpsl_set":  False,
+            })
+        st._write(s)
 
     # Append CSV open row
     _log_trade_to_csv(csv_path, f"UNKNOWN_{side}", {
@@ -239,6 +255,7 @@ def recover_position(sym: str, trade_entry: dict,
 
     return {
         "symbol":   sym,
+        "action":   "FULL",
         "trade_id": trade_id,
         "entry":    entry,
         "sl":       sl,

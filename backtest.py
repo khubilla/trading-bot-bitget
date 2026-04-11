@@ -284,6 +284,113 @@ def load_daily(sym: str, days: int = 1095) -> pd.DataFrame:
     return df
 
 
+# ── Shared incremental fetch helper ──────────────────────────────── #
+
+def _fetch_candles(sym: str, granularity: str, interval_ms: int,
+                   cursor_ms: int, now_ms: int) -> pd.DataFrame:
+    """
+    Paginate Bitget candle API from cursor_ms to now_ms.
+    Returns a DataFrame with columns [ts, open, high, low, close, vol].
+    granularity: Bitget string e.g. "3m", "15m", "1H", "1Dutc"
+    interval_ms: milliseconds per bar (used to advance cursor after each batch)
+    """
+    BASE     = "https://api.bitget.com"
+    ENDPOINT = "/api/v2/mix/market/candles"
+    all_rows = []
+    batch    = 0
+    while cursor_ms < now_ms:
+        params = {
+            "symbol":      sym,
+            "productType": "usdt-futures",
+            "granularity": granularity,
+            "startTime":   str(cursor_ms),
+            "limit":       "200",
+        }
+        try:
+            resp = requests.get(BASE + ENDPOINT, params=params, timeout=15)
+            data = resp.json()
+        except Exception as e:
+            print(f"  ❌ [{sym}] {granularity} batch {batch} error: {e}")
+            break
+        rows_raw = data.get("data") or []
+        if data.get("code") != "00000" or not rows_raw:
+            break
+        parsed = []
+        for r in rows_raw:
+            try:
+                parsed.append([int(r[0]), float(r[1]), float(r[2]),
+                               float(r[3]), float(r[4]), float(r[5])])
+            except (IndexError, ValueError):
+                continue
+        if not parsed:
+            break
+        all_rows.extend(parsed)
+        batch += 1
+        newest_ts = max(r[0] for r in parsed)
+        cursor_ms = newest_ts + interval_ms
+        if cursor_ms >= now_ms:
+            break
+        time.sleep(0.1)
+    if not all_rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(all_rows, columns=["ts", "open", "high", "low", "close", "vol"])
+    return df.drop_duplicates("ts").sort_values("ts").reset_index(drop=True)
+
+
+def _load_or_fetch(cache_dir: Path, sym: str, granularity: str,
+                   interval_ms: int, days: int,
+                   _now_ms: int | None = None) -> pd.DataFrame:
+    """
+    Generic incremental parquet cache loader.
+    Reads cache_dir/<sym>.parquet, fetches missing bars, saves back.
+    Returns DataFrame trimmed to `days` lookback from _now_ms.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path   = cache_dir / f"{sym}.parquet"
+    now_ms = _now_ms or int(datetime.now(timezone.utc).timestamp() * 1000)
+    cutoff = now_ms - (days + 2) * 86_400_000
+
+    if path.exists():
+        cached = pd.read_parquet(path)
+        if set(["ts", "open", "high", "low", "close", "vol"]).issubset(cached.columns) and len(cached):
+            last_ts   = int(cached["ts"].max())
+            cursor_ms = last_ts + interval_ms
+            if cursor_ms < now_ms:
+                new_df = _fetch_candles(sym, granularity, interval_ms, cursor_ms, now_ms)
+                if not new_df.empty:
+                    cached = pd.concat([cached, new_df], ignore_index=True)
+                    cached = cached.drop_duplicates("ts").sort_values("ts").reset_index(drop=True)
+                    cached.to_parquet(path, index=False)
+            return cached[cached["ts"] >= cutoff].reset_index(drop=True)
+
+    # No cache — full fetch
+    start_ms = now_ms - (days + 2) * 86_400_000
+    df = _fetch_candles(sym, granularity, interval_ms, start_ms, now_ms)
+    if not df.empty:
+        df.to_parquet(path, index=False)
+    return df[df["ts"] >= cutoff].reset_index(drop=True) if not df.empty else df
+
+
+_CACHE_3M  = Path("data/3m")
+_CACHE_15M = Path("data/15m")
+_CACHE_1H  = Path("data/1h")
+
+
+def load_3m(sym: str, days: int = 365, _now_ms: int | None = None) -> pd.DataFrame:
+    """Load/update 3m candle parquet cache for sym."""
+    return _load_or_fetch(_CACHE_3M,  sym, "3m",    3 * 60_000, days, _now_ms)
+
+
+def load_15m(sym: str, days: int = 365, _now_ms: int | None = None) -> pd.DataFrame:
+    """Load/update 15m candle parquet cache for sym."""
+    return _load_or_fetch(_CACHE_15M, sym, "15m",  15 * 60_000, days, _now_ms)
+
+
+def load_1h(sym: str, days: int = 365, _now_ms: int | None = None) -> pd.DataFrame:
+    """Load/update 1H candle parquet cache for sym."""
+    return _load_or_fetch(_CACHE_1H,  sym, "1H",  60 * 60_000, days, _now_ms)
+
+
 def fetch_m15(sym: str, days: int = 90) -> pd.DataFrame:
     """
     Fetch 15m candles via Bitget REST API with forward pagination.

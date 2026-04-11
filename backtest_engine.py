@@ -1043,6 +1043,8 @@ def main():
                         help="Override symbol universe (default: all data/daily/*.parquet)")
     parser.add_argument("--no-fetch", action="store_true",
                         help="Skip parquet cache updates, use existing data only")
+    parser.add_argument("--fetch-only", action="store_true",
+                        help="Download/update all parquet caches then exit (no backtest run)")
     parser.add_argument("--output",   default="backtest_engine_report.html",
                         help="Output HTML report filename")
     for s in range(1, 7):
@@ -1104,6 +1106,10 @@ def main():
 
     valid_universe = [s for s in universe if s in parquet]
     print(f"✅ Loaded {len(valid_universe)}/{len(universe)} symbols with 3m data\n")
+
+    if args.fetch_only:
+        print("📦 --fetch-only: cache update complete, skipping backtest.")
+        return
 
     # Run engine
     engine = BacktestEngine(

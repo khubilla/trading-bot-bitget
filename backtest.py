@@ -193,6 +193,97 @@ def fetch_daily(sym: str, days: int = 1095) -> pd.DataFrame:
     return df
 
 
+_DAILY_CACHE = Path("data/daily")
+
+
+def load_daily(sym: str, days: int = 1095) -> pd.DataFrame:
+    """
+    Load daily candles for sym, updating the parquet cache incrementally.
+
+    - If data/daily/<sym>.parquet exists: load it, fetch only candles newer
+      than the last cached ts, append, save back.
+    - If not: full fetch via fetch_daily() and save.
+    - Returns the cached+updated DataFrame trimmed to `days` days of history.
+    """
+    _DAILY_CACHE.mkdir(parents=True, exist_ok=True)
+    path = _DAILY_CACHE / f"{sym}.parquet"
+    DAY_MS = 86_400_000
+
+    if path.exists():
+        cached = pd.read_parquet(path)
+        # validate structure
+        if set(["ts", "open", "high", "low", "close", "vol"]).issubset(cached.columns) and len(cached):
+            last_ts = int(cached["ts"].max())
+            cursor_ms = last_ts + DAY_MS
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+            if cursor_ms >= now_ms:
+                print(f"  📂 cache up-to-date ({sym})")
+            else:
+                from_dt = datetime.fromtimestamp(cursor_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+                print(f"  📂 cache hit — fetching from {from_dt} ({sym})")
+                # reuse fetch_daily's pagination but starting from cursor
+                new_rows = []
+                batch_num = 0
+                BASE     = "https://api.bitget.com"
+                ENDPOINT = "/api/v2/mix/market/candles"
+                while cursor_ms < now_ms:
+                    params = {
+                        "symbol":      sym,
+                        "productType": "usdt-futures",
+                        "granularity": "1Dutc",
+                        "startTime":   str(cursor_ms),
+                        "limit":       "200",
+                    }
+                    try:
+                        resp = requests.get(BASE + ENDPOINT, params=params, timeout=15)
+                        data = resp.json()
+                    except Exception as e:
+                        print(f"  ❌ [{sym}] incremental batch {batch_num} error: {e}")
+                        break
+                    rows_raw = data.get("data") or []
+                    if data.get("code") != "00000" or not rows_raw:
+                        break
+                    parsed = []
+                    for r in rows_raw:
+                        try:
+                            parsed.append([int(r[0]), float(r[1]), float(r[2]),
+                                           float(r[3]), float(r[4]), float(r[5])])
+                        except (IndexError, ValueError):
+                            continue
+                    if not parsed:
+                        break
+                    new_rows.extend(parsed)
+                    batch_num += 1
+                    newest_ts = max(r[0] for r in parsed)
+                    cursor_ms = newest_ts + DAY_MS
+                    if cursor_ms >= now_ms:
+                        break
+                    time.sleep(0.2)
+
+                if new_rows:
+                    new_df = pd.DataFrame(new_rows, columns=["ts", "open", "high", "low", "close", "vol"])
+                    cached = pd.concat([cached, new_df], ignore_index=True)
+                    cached = cached.drop_duplicates("ts").sort_values("ts").reset_index(drop=True)
+                    cached.to_parquet(path, index=False)
+                    print(f"  💾 saved {len(new_rows)} new candles → {path.name}")
+
+            # trim to requested days window
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            cutoff = now_ms - (days + 5) * DAY_MS
+            return cached[cached["ts"] >= cutoff].reset_index(drop=True)
+        else:
+            print(f"  ⚠️  corrupt cache for {sym}, re-fetching")
+
+    # no cache or corrupt — full fetch + save
+    print(f"  🌐 no cache — full fetch ({sym})")
+    df = fetch_daily(sym, days=days)
+    if not df.empty:
+        df.to_parquet(path, index=False)
+        print(f"  💾 saved {len(df)} candles → {path.name}")
+    return df
+
+
 def fetch_m15(sym: str, days: int = 90) -> pd.DataFrame:
     """
     Fetch 15m candles via Bitget REST API with forward pagination.
@@ -472,7 +563,7 @@ def backtest_s1_symbol(sym: str) -> list[dict]:
     )
     df_1h = fetch_ohlcv_bitget(sym, "1H", 500)
     df_3m = fetch_ohlcv_bitget(sym, "3m", 1000)
-    df_1d = fetch_daily(sym, 150)
+    df_1d = load_daily(sym, days=150)
     if df_1h.empty or df_3m.empty or df_1d.empty:
         return []
 
@@ -914,7 +1005,7 @@ def main():
 
         if run_s2:
             try:
-                df = fetch_daily(sym, days=args.days)
+                df = load_daily(sym, days=args.days)
                 if len(df) >= 50:
                     trades = backtest_s2_symbol(
                         sym, df,

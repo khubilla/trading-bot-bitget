@@ -1096,7 +1096,8 @@ def main():
             print(f"  ⚠️  {sym}: data load error: {e}")
             continue
 
-        if not p.get("3m") or p["3m"].empty:
+        df_3m = p.get("3m")
+        if df_3m is None or df_3m.empty:
             print(f"  ⚠️  {sym}: no 3m data — skipping")
             continue
         parquet[sym] = p

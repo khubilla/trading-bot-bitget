@@ -230,3 +230,41 @@ def test_filter_range_skips_unparseable_timestamps_for_time_ranges():
     bad = _mk_trade("not-a-date", tid="bad")
     result = analytics.filter_range([good, bad], "30d", now=now)
     assert [t["trade_id"] for t in result] == ["good"]
+
+
+def test_build_series_trade_mode_indices_start_at_one():
+    trades = [{"pnl": 1.0, "timestamp": "2026-04-01T00:00:00+00:00"},
+              {"pnl": 2.0, "timestamp": "2026-04-02T00:00:00+00:00"}]
+    result = analytics.build_series(trades, "trade")
+    assert [p["x"] for p in result["cum_pnl"]] == [1, 2]
+    assert [p["x"] for p in result["bars"]] == [1, 2]
+
+
+def test_build_series_cum_pnl_is_running_sum():
+    trades = [{"pnl": 1.0, "timestamp": "2026-04-01T00:00:00+00:00"},
+              {"pnl": 2.5, "timestamp": "2026-04-02T00:00:00+00:00"},
+              {"pnl": -1.0, "timestamp": "2026-04-03T00:00:00+00:00"}]
+    result = analytics.build_series(trades, "trade")
+    assert [p["y"] for p in result["cum_pnl"]] == [1.0, 3.5, 2.5]
+    assert [p["y"] for p in result["bars"]] == [1.0, 2.5, -1.0]
+
+
+def test_build_series_bar_colors_match_sign():
+    trades = [{"pnl": 1.0, "timestamp": "2026-04-01T00:00:00+00:00"},
+              {"pnl": -0.5, "timestamp": "2026-04-02T00:00:00+00:00"},
+              {"pnl": 0.0, "timestamp": "2026-04-03T00:00:00+00:00"}]
+    result = analytics.build_series(trades, "trade")
+    colors = [p["color"] for p in result["bars"]]
+    assert colors == ["green", "red", "green"]
+
+
+def test_build_series_time_mode_uses_iso_timestamp():
+    trades = [{"pnl": 1.0, "timestamp": "2026-04-01T10:00:00+00:00"}]
+    result = analytics.build_series(trades, "time")
+    assert result["cum_pnl"][0]["x"] == "2026-04-01T10:00:00+00:00"
+    assert result["bars"][0]["x"] == "2026-04-01T10:00:00+00:00"
+
+
+def test_build_series_empty_input():
+    result = analytics.build_series([], "trade")
+    assert result == {"cum_pnl": [], "bars": []}

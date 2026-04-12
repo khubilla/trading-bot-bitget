@@ -200,3 +200,24 @@ def group_by_strategy(trades: list[dict]) -> dict[str, list[dict]]:
         if s in out:
             out[s].append(t)
     return out
+
+
+def build_series(trades: list[dict], x_mode: Literal["trade", "time"]) -> dict:
+    """Build chart series from a per-strategy trade list.
+
+    Returns {"cum_pnl": [{x, y}, ...], "bars": [{x, y, color}, ...]}.
+      - x_mode="trade" → x is integer index starting at 1.
+      - x_mode="time"  → x is the ISO close timestamp string.
+      - bars.color is "green" if pnl >= 0 else "red".
+    """
+    cum_pnl: list[dict] = []
+    bars: list[dict] = []
+    running = 0.0
+    for i, t in enumerate(trades, start=1):
+        pnl = float(t.get("pnl") or 0.0)
+        running += pnl
+        x = i if x_mode == "trade" else t.get("timestamp", "")
+        cum_pnl.append({"x": x, "y": running})
+        bars.append({"x": x, "y": pnl,
+                     "color": "green" if pnl >= 0 else "red"})
+    return {"cum_pnl": cum_pnl, "bars": bars}

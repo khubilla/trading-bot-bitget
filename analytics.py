@@ -149,6 +149,49 @@ def load_closed_trades(csv_path: str) -> list[dict]:
     return out
 
 
+def _parse_iso(ts: str) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+
+
+def filter_range(trades: list[dict],
+                 range_spec: RangeSpec,
+                 now: datetime | None = None) -> list[dict]:
+    """Filter trades by range spec.
+
+    range_spec:
+      - "all" → return unchanged
+      - "30d" / "90d" → keep trades whose close timestamp is within N days of `now`
+      - int N → keep the most recent N trades (by list order, which is CSV order)
+    """
+    if range_spec == "all":
+        return list(trades)
+
+    if isinstance(range_spec, int):
+        if range_spec <= 0:
+            return []
+        return list(trades[-range_spec:])
+
+    days_map = {"30d": 30, "90d": 90}
+    if range_spec not in days_map:
+        return list(trades)
+
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=days_map[range_spec])
+    out = []
+    for t in trades:
+        dt = _parse_iso(t.get("timestamp", ""))
+        if dt is None:
+            continue
+        if dt >= cutoff:
+            out.append(t)
+    return out
+
+
 def group_by_strategy(trades: list[dict]) -> dict[str, list[dict]]:
     """Bucket trades into all 6 strategy keys. Unknown strategies are dropped."""
     out: dict[str, list[dict]] = {s: [] for s in STRATEGIES}

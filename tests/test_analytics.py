@@ -175,3 +175,58 @@ def test_group_by_strategy_ignores_unknown_strategy():
     trades = [{"strategy": "S99", "trade_id": "x"}]
     result = analytics.group_by_strategy(trades)
     assert all(result[k] == [] for k in analytics.STRATEGIES)
+
+
+def _mk_trade(ts: str, tid: str = "t", pnl: float = 1.0) -> dict:
+    return {"timestamp": ts, "trade_id": tid, "pnl": pnl, "strategy": "S1"}
+
+
+def test_filter_range_all_returns_everything():
+    trades = [_mk_trade("2025-01-01T00:00:00+00:00"),
+              _mk_trade("2026-04-01T00:00:00+00:00")]
+    assert analytics.filter_range(trades, "all") == trades
+
+
+def test_filter_range_30d_keeps_recent():
+    now = datetime(2026, 4, 12, tzinfo=timezone.utc)
+    old = _mk_trade("2026-03-01T00:00:00+00:00")
+    mid = _mk_trade("2026-03-20T00:00:00+00:00")
+    new = _mk_trade("2026-04-10T00:00:00+00:00")
+    result = analytics.filter_range([old, mid, new], "30d", now=now)
+    assert result == [mid, new]
+
+
+def test_filter_range_90d_keeps_recent():
+    now = datetime(2026, 4, 12, tzinfo=timezone.utc)
+    very_old = _mk_trade("2025-11-01T00:00:00+00:00")
+    old = _mk_trade("2026-02-15T00:00:00+00:00")
+    result = analytics.filter_range([very_old, old], "90d", now=now)
+    assert result == [old]
+
+
+def test_filter_range_int_keeps_last_n():
+    trades = [_mk_trade(f"2026-04-0{i}T00:00:00+00:00", tid=f"t{i}")
+              for i in range(1, 6)]
+    result = analytics.filter_range(trades, 3)
+    assert [t["trade_id"] for t in result] == ["t3", "t4", "t5"]
+
+
+def test_filter_range_int_larger_than_len_keeps_all():
+    trades = [_mk_trade("2026-04-01T00:00:00+00:00", tid="a"),
+              _mk_trade("2026-04-02T00:00:00+00:00", tid="b")]
+    result = analytics.filter_range(trades, 100)
+    assert result == trades
+
+
+def test_filter_range_empty_input_returns_empty():
+    assert analytics.filter_range([], "all") == []
+    assert analytics.filter_range([], "30d") == []
+    assert analytics.filter_range([], 10) == []
+
+
+def test_filter_range_skips_unparseable_timestamps_for_time_ranges():
+    now = datetime(2026, 4, 12, tzinfo=timezone.utc)
+    good = _mk_trade("2026-04-10T00:00:00+00:00", tid="good")
+    bad = _mk_trade("not-a-date", tid="bad")
+    result = analytics.filter_range([good, bad], "30d", now=now)
+    assert [t["trade_id"] for t in result] == ["good"]

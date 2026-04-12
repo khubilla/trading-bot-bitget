@@ -25,7 +25,8 @@ S3_EMA_FAST   = 10
 S3_EMA_MED    = 20
 S3_EMA_SLOW   = 50
 S3_EMA_TREND  = 200
-S3_ADX_MIN    = 30              # Minimum ADX for strong trend
+S3_ADX_MIN    = 38              # Minimum ADX for strong trend
+S3_ADX_MAX    = 44              # Maximum ADX — above this momentum is overextended
 
 # ── 15m Slow Stochastics ─────────────────────────────────── #
 S3_STOCH_K_PERIOD   = 5         # Fast %K period
@@ -47,7 +48,7 @@ S3_MAX_ENTRY_BUFFER = 0.01      # Skip entry if price already >1% above entry tr
 S3_LEVERAGE         = 10
 S3_TRADE_SIZE_PCT   = 0.04      # 4% of total portfolio as margin
 S3_SL_BUFFER_PCT    = 0.002     # 0.2% below pivot low for SL
-S3_MIN_RR               = 2.0   # Minimum reward:risk ratio (vs partial TP level)
+S3_MIN_RR               = 2.5   # Minimum reward:risk ratio (vs partial TP level)
 S3_TRAILING_TRIGGER_PCT = 0.10  # activation trigger: close 50% when price is 10% above entry
 S3_TRAILING_RANGE_PCT   = 10    # 10% trailing callback on remaining 50%
 S3_USE_SWING_TRAIL      = True  # trail SL to nearest 15m swing low from entry (SMC style)
@@ -57,4 +58,4 @@ S3_SWING_LOOKBACK       = 50    # 15m candles to scan for structural swing low
 S3_DAILY_GAIN_MIN   = 0.10      # Skip unless price is ≥10% above today's daily open
 
 # ── S/R Clearance ─────────────────────────────────────── #
-S3_MIN_SR_CLEARANCE = 0.15      # Skip LONG if resistance < 15% above entry
+S3_MIN_SR_CLEARANCE = 0.23      # Skip LONG if resistance < 23% above entry

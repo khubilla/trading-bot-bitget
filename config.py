@@ -38,7 +38,7 @@ MAX_PRICE_USDT    = 150         # Exclude pairs priced above this (set high to i
 SCAN_INTERVAL_SEC = 60           # Re-scan all pairs every 60 seconds
 
 # --- Liquidity Filter ---
-LIQUIDITY_CHECK_ENABLED = True
+LIQUIDITY_CHECK_ENABLED = False
 MIN_OB_DEPTH_USDT       = 50_000   # bidSz×bidPr + askSz×askPr must meet this
 
 # --- Bot Behaviour ---
@@ -50,7 +50,7 @@ INITIAL_BALANCE = 160.0  # Starting balance in USDT (update this to your actual 
 
 # --- Market Sentiment Filter ---
 # Volume-weighted: only LONG when majority green, only SHORT when majority red
-SENTIMENT_THRESHOLD = 0.55   # >55% green volume → BULLISH; <45% → BEARISH
+SENTIMENT_THRESHOLD = 0.75   # >75% green volume → BULLISH; <25% → BEARISH
 SENTIMENT_SCAN_SEC  = 60     # Re-calculate alongside pair scan
 
 # --- Claude Trade Filter ---

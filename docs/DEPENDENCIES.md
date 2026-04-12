@@ -406,6 +406,17 @@ Each key is a symbol (e.g., "BTCUSDT"). Value is a dict with 44 fields:
    - Example: Removing `s2_signal` breaks strategy tabs
    - Fix: Add null checks in dashboard.html OR maintain field in state.py
 
+**loss_cooldowns** (bot-internal, not consumed by dashboard):
+```python
+"loss_cooldowns": {
+    "{strategy}:{symbol}": str,   # ISO timestamp of last full LOSS close for this pair
+    # e.g. "S4:MUSDT": "2026-04-07T16:20:12+00:00"
+}
+```
+Written by `state.record_strategy_loss(strategy, symbol)` at every full LOSS close.
+Read by `state.is_strategy_on_cooldown(strategy, symbol, hours=4.0)` before any entry.
+Survives `reset()`. NOT read by dashboard.py or any tool.
+
 **Verification commands:**
 
 ```bash
@@ -892,7 +903,7 @@ Places a market order to add to an existing position. Does **not** update exit o
 
 **Called from:** `bot.py` — `_do_scale_in` (S2 uses `scale_in_long`, S4 uses `scale_in_short`)
 
-**Note:** After scale-in, `_do_scale_in` fetches the new average entry price, recomputes the trail trigger and (for S2 LONG) the SL cap, then calls `refresh_plan_exits()` with the updated trigger. The position-level SL (`place-pos-tpsl`) auto-scales on Bitget for qty; for S2, `update_position_sl()` is additionally called if the new SL cap is higher than the current SL.
+**Note:** After scale-in, `_do_scale_in` fetches the new average entry price, recomputes the trail trigger and (for S2 LONG) the SL, then calls `refresh_plan_exits()` with the updated trigger. For S2, `update_position_sl()` is always called with `max(box_low * 0.999, new_avg * (1 - S2_STOP_LOSS_PCT))` — unconditionally, so the SL trigger always reflects the scaled-in avg entry price.
 
 ---
 
@@ -1321,3 +1332,4 @@ head -1 ig_trades.csv
 - 2026-04-02: Multi-instrument IG bot — updated Section 1 (architecture diagram shows US30+GOLD loop); Section 2.1 (evaluate_s5 cfg param, dual config resolution paths); Section 4.3 (ig_trades.csv 19→20 columns, symbol at index 3, backward-compat note); Section 4.4 (ig_state.json positions/pending_orders dicts, startup migration); Section 5 (new — per-instrument config architecture, CONFIG shape, _validate_instruments()); Section 10.2 (updated config sync guidance); Section 10.3 (patching mechanism removed, cfg=instrument is the new approach, config_ig_s5.py deleted); Section 10.4 (IG CSV column count 19→20).
 - 2026-04-03: S6 V-Formation Liquidity Sweep Short — added evaluate_s6() to Section 2.1 (Bitget-only, 6-tuple return); added S6 fields to Section 4.1 pair_states (s6_signal, s6_reason, s6_peak_level, s6_sl, s6_fakeout_seen); updated trades.csv to 41 columns (+snap_s6_peak, snap_s6_drop_pct, snap_s6_rsi_at_peak); updated Section 1 architecture diagram and signal/strategy fields to include S6.
 - 2026-04-10: Liquidity filter — added Section 5.5 (Bitget scanner/liquidity config params). New params LIQUIDITY_CHECK_ENABLED and MIN_OB_DEPTH_USDT in config.py; new private function _filter_by_liquidity() in scanner.py called as last funnel step in get_qualified_pairs_and_sentiment(). Bitget-only; IG unaffected. No state.json, CSV, or return-value changes.
+- 2026-04-11: S2/S4/S6 scale-in SL fix — _do_scale_in (bot.py) now always re-places SL unconditionally for all three strategies after scale-in. S2: max(box_low*0.999, new_avg*(1-S2_STOP_LOSS_PCT)). S4: new_avg*(1+0.50/S4_LEVERAGE). S6: new_avg*(1+S6_SL_PCT/S6_LEVERAGE). Removed stale comment claiming S4 SL is structural. partial TP (profit_plan) and trailing (moving_plan) were already correct via refresh_plan_exits().

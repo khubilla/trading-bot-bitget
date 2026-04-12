@@ -44,6 +44,7 @@ _default: dict = {
         "total_pnl":    0.0,
     },
     "pending_signals": {},   # survives reset(): {symbol: {strategy, side, trigger, ...}}
+    "loss_cooldowns":  {},   # survives reset(): {"{strategy}:{symbol}": ISO timestamp of last LOSS close}
 }
 
 
@@ -78,6 +79,7 @@ def reset():
     fresh["stats"]           = s.get("stats", dict(_default["stats"]))
     fresh["position_memory"]  = s.get("position_memory", {})
     fresh["pending_signals"]  = s.get("pending_signals", {})
+    fresh["loss_cooldowns"]   = s.get("loss_cooldowns", {})
     _write(fresh)
 
 def set_status(status: str):
@@ -267,3 +269,23 @@ def clear_position_memory(symbol: str):
     s = _read()
     s.get("position_memory", {}).pop(symbol, None)
     _write(s)
+
+def record_strategy_loss(strategy: str, symbol: str) -> None:
+    """Record the UTC timestamp of a full LOSS close for a (strategy, symbol) pair."""
+    s = _read()
+    s.setdefault("loss_cooldowns", {})[f"{strategy}:{symbol}"] = _now()
+    _write(s)
+
+def is_strategy_on_cooldown(strategy: str, symbol: str, hours: float = 4.0) -> bool:
+    """Return True if the last LOSS for this (strategy, symbol) was within `hours` hours ago."""
+    s = _read()
+    key = f"{strategy}:{symbol}"
+    ts_str = s.get("loss_cooldowns", {}).get(key)
+    if not ts_str:
+        return False
+    try:
+        last_loss = datetime.fromisoformat(ts_str)
+        elapsed = (datetime.now(timezone.utc) - last_loss).total_seconds()
+        return elapsed < hours * 3600
+    except Exception:
+        return False

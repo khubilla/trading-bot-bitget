@@ -1096,6 +1096,7 @@ class MTFBot:
                     st.close_trade(sym, result, total_pnl)
                     if result == "LOSS":
                         st.record_loss(sym)
+                        st.record_strategy_loss(ap["strategy"], sym)
                         if st.is_pair_paused(sym):
                             logger.info(f"⛔ [{sym}] 3 losses today — paused until tomorrow (UTC)")
                             st.add_scan_log(f"[{sym}] ⛔ Paused for today — 3 losses reached", "WARN")
@@ -1193,6 +1194,7 @@ class MTFBot:
                     st.close_trade(_sym, _result, _pnl)
                     if _result == "LOSS":
                         st.record_loss(_sym)
+                        st.record_strategy_loss(_strategy, _sym)
                     _log_trade(f"{_strategy}_CLOSE", {
                         "trade_id":    _ot.get("trade_id", ""),
                         "symbol":      _sym,
@@ -1300,7 +1302,17 @@ class MTFBot:
                    else rsi_val < config_s1.RSI_SHORT_THRESH
 
         if   not htf_pass:   s1_reason = "No HTF break"
-        elif not trend_ok:   s1_reason = f"ADX={adx_val:.1f} < {config_s1.ADX_TREND_THRESHOLD} (sideways)"
+        elif not trend_ok:
+            closes_d  = daily_df["close"].astype(float)
+            from strategy import calculate_ema as _ema
+            ema20_d   = float(_ema(closes_d, config_s1.DAILY_EMA_SLOW).iloc[-1])
+            price_d   = float(closes_d.iloc[-1])
+            if adx_val <= config_s1.ADX_TREND_THRESHOLD:
+                s1_reason = f"ADX={adx_val:.1f} < {config_s1.ADX_TREND_THRESHOLD} (sideways)"
+            else:
+                side_str  = "above" if allowed_direction == "BULLISH" else "below"
+                actual    = "below" if price_d < ema20_d else "above"
+                s1_reason = f"ADX={adx_val:.1f} ✓ but price {actual} EMA20 (need {side_str})"
         elif not rsi_ok:     s1_reason = f"RSI {rsi_val:.1f} not in zone"
         elif not is_coil:    s1_reason = "No RSI-zone consolidation"
         elif s1_sig == "HOLD": s1_reason = "Waiting breakout"
@@ -1321,7 +1333,7 @@ class MTFBot:
         # ── Fetch 15m candles (shared by S3 + S5) ────────────────── #
         m15_df = None
         need_m15 = (
-            (config_s3.S3_ENABLED and self.sentiment.direction != "BEARISH") or
+            (config_s3.S3_ENABLED and self.sentiment.direction == "BULLISH") or
             config_s5.S5_ENABLED
         )
         if need_m15:
@@ -1335,7 +1347,7 @@ class MTFBot:
         s3_sr_resistance_price = None
         _d_open = float(daily_df["open"].iloc[-1]) if daily_df is not None and not daily_df.empty else None
         s3_daily_gain_pct = round((close - _d_open) / _d_open * 100, 1) if _d_open else None
-        if config_s3.S3_ENABLED and self.sentiment.direction != "BEARISH" and m15_df is not None:
+        if config_s3.S3_ENABLED and self.sentiment.direction == "BULLISH" and m15_df is not None:
             s3_sig, s3_adx, s3_trigger, s3_sl, s3_reason = evaluate_s3(symbol, m15_df, daily_df)
             logger.info(f"[S3][{symbol}] {s3_reason}")
             # Skip the pre-pullback peak (highest high in last 50 15m candles) —
@@ -1489,7 +1501,7 @@ class MTFBot:
                 "s1_bh": s1_bh, "s1_bl": s1_bl,
                 "rsi_val": rsi_val, "adx_val": adx_val,
                 "htf_bull": htf_bull, "htf_bear": htf_bear, "is_coil": is_coil,
-                "ltf_df": ltf_df, "allowed_direction": allowed_direction,
+                "ltf_df": ltf_df, "daily_df": daily_df, "allowed_direction": allowed_direction,
             })
 
         # ── Collect S2 candidate ──────────────────────────────────── #
@@ -1583,10 +1595,12 @@ class MTFBot:
 
             if sig in ("PENDING_LONG", "PENDING_SHORT"):
                 if strategy == "S6":
-                    if sym not in self.pending_signals and not st.is_pair_paused(sym):
+                    if sym not in self.pending_signals and not st.is_pair_paused(sym) \
+                            and not st.is_strategy_on_cooldown(strategy, sym):
                         self._queue_s6_pending(candidate)
                 elif strategy == "S5":
-                    if sym not in self.pending_signals and not st.is_pair_paused(sym):
+                    if sym not in self.pending_signals and not st.is_pair_paused(sym) \
+                            and not st.is_strategy_on_cooldown(strategy, sym):
                         # S5 PENDING — queue with rank so entry watcher respects ordering
                         self._queue_s5_pending(
                             sym, sig, candidate["trigger"], candidate["sl"], candidate["tp"],
@@ -1600,6 +1614,9 @@ class MTFBot:
             if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
                 break
             if sym in self.active_positions or st.is_pair_paused(sym):
+                continue
+            if st.is_strategy_on_cooldown(strategy, sym):
+                logger.info(f"[{strategy}][{sym}] 🕐 Cooldown active — skipping entry (4h after LOSS)")
                 continue
 
             if strategy == "S2":
@@ -1618,11 +1635,14 @@ class MTFBot:
                     if balance >= min_bal:
                         self._queue_s4_pending(candidate)
             elif strategy == "S5":
-                self._execute_s5(
-                    sym, sig, candidate["trigger"], candidate["sl"], candidate["tp"],
-                    candidate["ob_low"], candidate["ob_high"], candidate["reason"],
-                    candidate["m15_df"], balance,
-                )
+                with self._trade_lock:
+                    if sym in self.active_positions:
+                        continue
+                    self._execute_s5(
+                        sym, sig, candidate["trigger"], candidate["sl"], candidate["tp"],
+                        candidate["ob_low"], candidate["ob_high"], candidate["reason"],
+                        candidate["m15_df"], balance,
+                    )
             elif strategy in _dispatchers:
                 min_bal = 5.0 / (config_s1.TRADE_SIZE_PCT * config_s1.LEVERAGE)
                 if balance < min_bal:
@@ -1634,6 +1654,19 @@ class MTFBot:
     def _do_scale_in(self, sym: str, ap: dict) -> None:
         """Execute scale-in for S2/S4/S6 and save candle snapshot."""
         try:
+            # Sentiment gate: only scale in when market direction matches the trade.
+            # S2 (LONG): requires BULLISH — no scale-in on NEUTRAL.
+            # S4/S6 (SHORT): requires BEARISH — no scale-in on NEUTRAL.
+            _sentiment = getattr(self, "sentiment", None)
+            if _sentiment is not None:
+                current_direction = _sentiment.direction
+                if ap["strategy"] == "S2" and current_direction != "BULLISH":
+                    logger.info(f"[S2][{sym}] ⏸️ Scale-in skipped — market is {current_direction} (need BULLISH)")
+                    return  # keep scale_in_pending=True; retry next tick
+                if ap["strategy"] in ("S4", "S6") and current_direction != "BEARISH":
+                    logger.info(f"[{ap['strategy']}][{sym}] ⏸️ Scale-in skipped — market is {current_direction} (need BEARISH)")
+                    return  # keep scale_in_pending=True; retry next tick
+
             mark_now  = tr.get_mark_price(sym)
             in_window = False
             if ap["strategy"] == "S2":
@@ -1701,29 +1734,31 @@ class MTFBot:
                         if new_avg > 0:
                             if ap["strategy"] == "S2":
                                 new_trig = new_avg * (1 + config_s2.S2_TRAILING_TRIGGER_PCT)
-                                # Recompute SL cap from new avg (S2 scale-in is above box_high,
-                                # so new_avg > original entry → sl_cap moves up → SL tightens)
+                                # Recompute SL from new avg entry — always re-place so the
+                                # trigger reflects the scaled-in avg, not the original entry.
                                 new_sl = max(
                                     ap.get("box_low", 0) * 0.999,
                                     new_avg * (1 - config_s2.S2_STOP_LOSS_PCT),
                                 )
-                                if new_sl > ap.get("sl", 0):
-                                    if tr.update_position_sl(sym, new_sl, hold_side="long"):
-                                        ap["sl"] = new_sl
-                                        st.update_open_trade_sl(sym, new_sl)
+                                if tr.update_position_sl(sym, new_sl, hold_side="long"):
+                                    ap["sl"] = new_sl
+                                    st.update_open_trade_sl(sym, new_sl)
                             elif ap["strategy"] == "S4":
                                 new_trig = new_avg * (1 - config_s4.S4_TRAILING_TRIGGER_PCT)
-                                # S4 SL is structural (box_high * 1.001) — no percentage cap,
-                                # no SL update needed after scale-in
+                                # Recompute SL from new avg entry — always re-place so the
+                                # trigger reflects the scaled-in avg, not the original fill.
+                                new_sl = new_avg * (1 + 0.50 / config_s4.S4_LEVERAGE)
+                                if tr.update_position_sl(sym, new_sl, hold_side="short"):
+                                    ap["sl"] = new_sl
+                                    st.update_open_trade_sl(sym, new_sl)
                             elif ap["strategy"] == "S6":
                                 new_trig = new_avg * (1 - config_s6.S6_TRAILING_TRIGGER_PCT)
-                                # Recompute SL from new avg entry; update only if it moves in
-                                # the favorable direction (lower = further from price for short)
+                                # Recompute SL from new avg entry — always re-place so the
+                                # trigger reflects the scaled-in avg, not the original fill.
                                 new_sl = new_avg * (1 + config_s6.S6_SL_PCT / config_s6.S6_LEVERAGE)
-                                if new_sl < ap.get("sl", ap["box_high"]):
-                                    if tr.update_position_sl(sym, new_sl, hold_side="short"):
-                                        ap["sl"] = new_sl
-                                        st.update_open_trade_sl(sym, new_sl)
+                                if tr.update_position_sl(sym, new_sl, hold_side="short"):
+                                    ap["sl"] = new_sl
+                                    st.update_open_trade_sl(sym, new_sl)
                         if not tr.refresh_plan_exits(sym, hold_side, new_trig):
                             logger.warning(f"[{ap['strategy']}][{sym}] ⚠️ Scale-in exits refresh failed — verify plan orders manually")
                             st.add_scan_log(f"[{ap['strategy']}][{sym}] ⚠️ Scale-in exits refresh failed", "WARN")
@@ -1760,7 +1795,7 @@ class MTFBot:
         ltf_df = c["ltf_df"]
         lev    = config_s1.LEVERAGE
         mark_now = tr.get_mark_price(symbol)
-        if c["sr_pct"] < config_s1.S1_MIN_SR_CLEARANCE * 100:
+        if c["sr_pct"] is not None and c["sr_pct"] < config_s1.S1_MIN_SR_CLEARANCE * 100:
             st.add_scan_log(
                 f"[S1][{symbol}] ⛔ Skipped — S/R clearance {c['sr_pct']:.1f}% < {config_s1.S1_MIN_SR_CLEARANCE*100:.0f}%",
                 "WARN"
@@ -1790,6 +1825,10 @@ class MTFBot:
         trade["snap_coil"]          = c["is_coil"]
         trade["snap_box_range_pct"] = round((c["s1_bh"] - c["s1_bl"]) / c["s1_bl"] * 100, 3) if c["s1_bh"] and c["s1_bl"] else None
         trade["snap_sentiment"]     = self.sentiment.direction
+        _daily = c.get("daily_df")
+        if _daily is not None and not _daily.empty:
+            _d_rsi = calculate_rsi(_daily["close"].astype(float))
+            trade["snap_daily_rsi"] = round(float(_d_rsi.iloc[-1]), 1)
         trade["trade_id"] = uuid.uuid4().hex[:8]
         _log_trade(f"S1_{s1_sig}", trade)
         st.add_open_trade(trade)

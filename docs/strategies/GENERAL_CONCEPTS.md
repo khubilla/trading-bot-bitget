@@ -180,9 +180,11 @@ The market sentiment is computed each scan cycle from the ratio of green vs. red
 |-----------|--------------------|
 | BULLISH | S1 LONG, S2 LONG, S3 LONG, S5 LONG/SHORT |
 | BEARISH | S1 SHORT, S4 SHORT, S5 SHORT, S6 SHORT |
-| NEUTRAL | S2 LONG only (S1 paused, S4/S6 inactive) |
+| NEUTRAL | S2 LONG only (S1 paused, S3 paused, S4/S6 inactive) |
 
-S4 and S6 only fire when sentiment is **not BULLISH**. S2 fires on BULLISH and NEUTRAL.
+S3 only fires when sentiment is **BULLISH** — it is paused on NEUTRAL and BEARISH.  
+S4 and S6 only fire when sentiment is **BEARISH** — they are inactive on NEUTRAL and BULLISH.  
+S2 fires on BULLISH and NEUTRAL.
 
 ---
 
@@ -213,12 +215,17 @@ The bot allows a maximum of `config.MAX_CONCURRENT_TRADES` open positions simult
 
 ---
 
-## 11. Scale-In Rules (S2 and S4 only)
+## 11. Scale-In Rules (S2, S4, and S6)
 
 - After an initial entry at 50% of the target trade size, the bot queues a **scale-in** 1 hour later.
-- Scale-in executes only if price is within the valid entry window at that time:
-  - S2: price is between `box_high` and `box_high * (1 + S2_MAX_ENTRY_BUFFER)`
-  - S4: price is between `prev_low * (1 - S4_MAX_ENTRY_BUFFER)` and `prev_low * (1 - S4_ENTRY_BUFFER)`
+- Scale-in requires **two conditions** to both be true. If either fails, the scale-in is skipped and retried on the next tick:
+  1. **Sentiment gate** — market direction must still match the trade direction:
+     - S2 (LONG): sentiment must be **BULLISH** — no scale-in when NEUTRAL
+     - S4/S6 (SHORT): sentiment must be **BEARISH** — no scale-in when NEUTRAL
+  2. **Price window** — price must be within the valid entry range:
+     - S2: price is between `box_high` and `box_high * (1 + S2_MAX_ENTRY_BUFFER)`
+     - S4: price is between `prev_low * (1 - S4_MAX_ENTRY_BUFFER)` and `prev_low * (1 - S4_ENTRY_BUFFER)`
+     - S6: `mark_price < peak_level` (fakeout reversal still intact)
 - After scale-in, the exchange plan exits (`profit_plan` + `moving_plan`) are cancelled and re-placed with the new total qty and updated trail trigger based on the new average entry price.
 - S2: SL cap is recomputed from the new average entry and raised if necessary.
 

@@ -17,7 +17,7 @@ S4_BIG_CANDLE_LOOKBACK  = 30     # search last 30 daily candles
 S4_RSI_PEAK_THRESH      = 75     # RSI must have hit this level
 S4_RSI_PEAK_LOOKBACK    = 10     # candles to search for RSI peak
 S4_RSI_DIV_MIN_DROP     = 5      # divergence: 2nd RSI push ≥5 pts lower (optional)
-S4_RSI_STILL_HOT_THRESH = 70    # previous candle RSI must still be above this — else setup invalidated
+S4_RSI_STILL_HOT_THRESH = 72    # previous candle RSI must still be above this — else setup invalidated
 
 # ── Risk / exits ─────────────────────────────────────────────────── #
 S4_ENTRY_BUFFER         = 0.01   # entry = prev_low * (1 - 0.01), i.e. 1% below prev low

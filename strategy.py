@@ -671,7 +671,7 @@ def evaluate_s3(
     from config_s3 import (
         S3_ENABLED,
         S3_EMA_FAST, S3_EMA_MED, S3_EMA_SLOW, S3_EMA_TREND,
-        S3_ADX_MIN,
+        S3_ADX_MIN, S3_ADX_MAX,
         S3_STOCH_K_PERIOD, S3_STOCH_D_SMOOTH, S3_STOCH_OVERSOLD, S3_STOCH_LOOKBACK,
         S3_MACD_FAST, S3_MACD_SLOW, S3_MACD_SIGNAL,
         S3_ENTRY_BUFFER_PCT, S3_SL_BUFFER_PCT, S3_MIN_RR, S3_TRAILING_TRIGGER_PCT,
@@ -700,6 +700,10 @@ def evaluate_s3(
     if adx_val < S3_ADX_MIN:
         return "HOLD", adx_val, 0.0, 0.0, (
             f"15m ADX={adx_val:.1f} < {S3_ADX_MIN} (not trending)"
+        )
+    if adx_val > S3_ADX_MAX:
+        return "HOLD", adx_val, 0.0, 0.0, (
+            f"15m ADX={adx_val:.1f} > {S3_ADX_MAX} (overextended momentum)"
         )
 
     # Daily momentum gate: price must be ≥10% above today's daily open
@@ -1491,7 +1495,8 @@ def evaluate_s6(
 
     # Scan swing highs from most recent to oldest.
     # i must have at least 1 candle before (i-1) and 2 after (spike + pivot).
-    for i in range(n - 3, 0, -1):
+    # Peak must also be at least 4 candles before the current candle (i <= n-5).
+    for i in range(n - 5, 0, -1):
         # ── Swing-high check ─────────────────────────────── #
         if not (window["high"].iloc[i] > window["high"].iloc[i - 1] and
                 window["high"].iloc[i] > window["high"].iloc[i + 1]):

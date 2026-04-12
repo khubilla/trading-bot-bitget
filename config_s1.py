@@ -26,7 +26,7 @@ RSI_SHORT_THRESH = 30   # RSI must be BELOW this to consider SHORT
 
 # ── Consolidation Detection (3m chart) ───────────────────── #
 CONSOLIDATION_CANDLES   = 2      # Look back N completed candles
-CONSOLIDATION_RANGE_PCT = 0.003  # Max range = 0.3% to qualify as tight consolidation
+CONSOLIDATION_RANGE_PCT = 0.4  # Max range = 4% to qualify as tight consolidation
 
 # ── Breakout Confirmation (3m chart) ─────────────────────── #
 BREAKOUT_BUFFER_PCT = 0.005   # 0.5% buffer above/below box edge

@@ -7,6 +7,7 @@ Run in a separate terminal alongside bot.py:
 """
 
 import csv, json, os, re, sys, time, zoneinfo
+import analytics
 from pathlib import Path
 from datetime import datetime
 from fastapi import FastAPI, Request
@@ -323,6 +324,42 @@ def get_state():
         return JSONResponse(state)
     except Exception as e:
         return JSONResponse({"status": "ERROR", "error": str(e)})
+
+
+@app.get("/api/analytics")
+@limiter.limit("30/minute")
+async def get_analytics(request: Request,
+                        range: str = "all",
+                        x: str = "trade",
+                        n: int | None = None):
+    """Return per-strategy trade analytics for the dashboard Analytics tab.
+
+    Query params:
+      range  — "all" | "30d" | "90d" | "lastN"  (default "all")
+      x      — "trade" | "time"                  (default "trade")
+      n      — required when range == "lastN"; 1 ≤ n ≤ 10000
+    """
+    if x not in ("trade", "time"):
+        return JSONResponse({"error": "invalid x"}, status_code=400)
+
+    if range == "all":
+        range_spec = "all"
+    elif range in ("30d", "90d"):
+        range_spec = range
+    elif range == "lastN":
+        if n is None or n < 1 or n > 10000:
+            return JSONResponse({"error": "invalid n"}, status_code=400)
+        range_spec = n
+    else:
+        return JSONResponse({"error": "invalid range"}, status_code=400)
+
+    csv_path = STATE_FILE.replace(
+        "state_paper.json", "trades_paper.csv"
+    ).replace(
+        "state.json", "trades.csv"
+    )
+    payload = analytics.build_analytics(csv_path, range_spec, x)
+    return JSONResponse(payload)
 
 
 def _json_depth(obj, current=0):

@@ -330,3 +330,52 @@ def test_summarize_treats_zero_pnl_as_win_like_result_column_would():
     r = analytics.summarize(trades)
     assert r["wins"] == 1
     assert r["losses"] == 1
+
+
+def test_build_analytics_end_to_end_shape(tmp_path):
+    path = tmp_path / "trades.csv"
+    _write_csv(path, [
+        _row(timestamp="2026-04-01T10:00:00+00:00", trade_id="a",
+             action="S1_LONG", symbol="BTCUSDT", side="LONG",
+             entry="100", snap_rsi="60"),
+        _row(timestamp="2026-04-01T11:00:00+00:00", trade_id="a",
+             action="S1_CLOSE", symbol="BTCUSDT", side="LONG",
+             pnl="5.0", result="WIN", exit_price="105"),
+        _row(timestamp="2026-04-02T10:00:00+00:00", trade_id="b",
+             action="S3_LONG", symbol="ETHUSDT", side="LONG",
+             entry="2000", snap_rr="2.0"),
+        _row(timestamp="2026-04-02T11:00:00+00:00", trade_id="b",
+             action="S3_CLOSE", symbol="ETHUSDT", side="LONG",
+             pnl="-3.0", result="LOSS", exit_price="1997"),
+    ])
+    result = analytics.build_analytics(str(path), "all", "trade")
+
+    assert set(result.keys()) == {"strategies"}
+    assert set(result["strategies"].keys()) == set(analytics.STRATEGIES)
+
+    s1 = result["strategies"]["S1"]
+    assert set(s1.keys()) == {"trades", "series", "summary"}
+    assert len(s1["trades"]) == 1
+    assert s1["trades"][0]["snap_rsi"] == "60"
+    assert s1["summary"]["count"] == 1
+    assert s1["summary"]["total_pnl"] == 5.0
+    assert s1["series"]["cum_pnl"] == [{"x": 1, "y": 5.0}]
+    assert s1["series"]["bars"][0]["color"] == "green"
+
+    s3 = result["strategies"]["S3"]
+    assert s3["summary"]["total_pnl"] == -3.0
+    assert s3["series"]["bars"][0]["color"] == "red"
+
+    for k in ("S2", "S4", "S5", "S6"):
+        s = result["strategies"][k]
+        assert s["trades"] == []
+        assert s["series"] == {"cum_pnl": [], "bars": []}
+        assert s["summary"]["count"] == 0
+
+
+def test_build_analytics_missing_file_returns_empty_strategies():
+    result = analytics.build_analytics("/nonexistent/path.csv", "all", "trade")
+    assert set(result["strategies"].keys()) == set(analytics.STRATEGIES)
+    for k, s in result["strategies"].items():
+        assert s["trades"] == []
+        assert s["summary"]["count"] == 0

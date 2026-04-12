@@ -246,3 +246,29 @@ def summarize(trades: list[dict]) -> dict:
         "best":      max(pnls),
         "worst":     min(pnls),
     }
+
+
+def build_analytics(csv_path: str,
+                    range_spec: RangeSpec,
+                    x_mode: Literal["trade", "time"]) -> dict:
+    """Top-level orchestrator. Returns the full payload the endpoint serves.
+
+    Shape:
+      {"strategies": {
+          "S1": {"trades": [...], "series": {"cum_pnl":[...], "bars":[...]},
+                 "summary": {...}},
+          ...
+      }}
+    """
+    all_trades = load_closed_trades(csv_path)
+    by_strat = group_by_strategy(all_trades)
+
+    strategies = {}
+    for s in STRATEGIES:
+        rows = filter_range(by_strat[s], range_spec)
+        strategies[s] = {
+            "trades":  rows,
+            "series":  build_series(rows, x_mode),
+            "summary": summarize(rows),
+        }
+    return {"strategies": strategies}

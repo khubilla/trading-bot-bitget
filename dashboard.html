@@ -1631,6 +1631,190 @@ const Analytics = (() => {
 
 document.addEventListener('DOMContentLoaded', () => Analytics.init());
 window.onAnalyticsShown = () => Analytics.show();
+
+// ── Analytics chart / table / detail renderers ───────────────────
+function renderAnalyticsChart(s, payload) {
+  const container = document.getElementById('aChart-' + s);
+  if (!container || !payload.series) return;
+
+  const existing = Analytics.state.charts[s];
+  if (existing && existing.chart) existing.chart.remove();
+
+  container.innerHTML = '';  // clear empty-state text if any
+
+  const chart = LightweightCharts.createChart(container, {
+    layout:     { background: { color: '#0d1117' }, textColor: '#c9d8e8' },
+    grid:       { vertLines: { color: '#1e2d3d' }, horzLines: { color: '#1e2d3d' } },
+    rightPriceScale: { borderColor: '#1e2d3d' },
+    leftPriceScale:  { visible: true, borderColor: '#1e2d3d' },
+    timeScale:  { borderColor: '#1e2d3d', rightOffset: 4, barSpacing: 12 },
+    handleScroll: true, handleScale: true,
+  });
+
+  const isTimeMode = Analytics.state.xMode === 'time';
+
+  function toBarTime(x) {
+    if (isTimeMode) return Math.floor(new Date(x).getTime() / 1000);
+    return x;  // integer 1..N in trade mode
+  }
+
+  const cumData = payload.series.cum_pnl.map(p => ({
+    time: toBarTime(p.x), value: p.y,
+  }));
+  const barData = payload.series.bars.map(p => ({
+    time:  toBarTime(p.x),
+    value: p.y,
+    color: p.color === 'green' ? '#3cb371' : '#e04a5f',
+  }));
+
+  const line = chart.addLineSeries({
+    priceScaleId: 'left',
+    color: '#f0a500',
+    lineWidth: 2,
+    lastValueVisible: false,
+    priceLineVisible: false,
+  });
+  line.setData(cumData);
+
+  const hist = chart.addHistogramSeries({
+    priceScaleId: 'right',
+    priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+    lastValueVisible: false,
+    priceLineVisible: false,
+  });
+  hist.setData(barData);
+
+  if (!isTimeMode) {
+    chart.applyOptions({
+      localization: { timeFormatter: t => '#' + t },
+      timeScale:    { tickMarkFormatter: t => '#' + t },
+    });
+  }
+
+  chart.timeScale().fitContent();
+
+  chart.subscribeClick(param => {
+    if (!param || param.time == null) return;
+    const idx = payload.series.bars.findIndex(b => toBarTime(b.x) === param.time);
+    if (idx >= 0) selectTrade(s, idx, payload);
+  });
+
+  Analytics.state.charts[s] = { chart, line, hist };
+}
+
+function selectTrade(s, idx, payload) {
+  Analytics.state.selected[s] = idx;
+  const tableRows = document.querySelectorAll(`#aTable-${s} .atable tbody tr`);
+  tableRows.forEach((r, i) => r.classList.toggle('selected', i === idx));
+  if (typeof renderAnalyticsDetail === 'function') renderAnalyticsDetail(s, payload, idx);
+}
+
+const STRATEGY_SNAP_COLS = {
+  S1: ['snap_rsi','snap_adx','snap_htf','snap_coil','snap_box_range_pct','snap_sentiment'],
+  S2: ['snap_daily_rsi'],
+  S3: ['snap_entry_trigger','snap_sl','snap_rr'],
+  S4: ['snap_rsi_peak','snap_spike_body_pct','snap_rsi_div','snap_rsi_div_str'],
+  S5: ['snap_s5_ob_low','snap_s5_ob_high','snap_s5_tp'],
+  S6: ['snap_s6_peak','snap_s6_drop_pct','snap_s6_rsi_at_peak'],
+};
+const SHARED_SNAP_COLS = ['snap_sr_clearance_pct'];
+
+const COMMON_COLS = [
+  ['timestamp','Close time'], ['symbol','Symbol'], ['side','Side'],
+  ['entry','Entry'], ['exit_price','Exit'],
+  ['pnl','P&L'], ['pnl_pct','P&L %'],
+  ['result','Result'], ['exit_reason','Exit reason'],
+];
+
+function renderAnalyticsTable(s, payload) {
+  const wrap = document.getElementById('aTable-' + s);
+  if (!wrap) return;
+  const trades = payload.trades || [];
+  const snapCols = [...(STRATEGY_SNAP_COLS[s] || []), ...SHARED_SNAP_COLS];
+  const cols = [...COMMON_COLS, ...snapCols.map(c => [c, c])];
+
+  const fmt = (v) => (v == null || v === '') ? '—'
+    : (typeof v === 'number' ? v.toLocaleString(undefined, {maximumFractionDigits: 4}) : String(v));
+
+  const thead = '<thead><tr>' + cols.map((c, i) =>
+    `<th data-col="${c[0]}" data-idx="${i}">${c[1]}</th>`
+  ).join('') + '</tr></thead>';
+
+  const tbody = '<tbody>' + trades.map((t, i) => {
+    const pnl = Number(t.pnl || 0);
+    const cls = pnl >= 0 ? 'positive' : 'negative';
+    return `<tr data-idx="${i}">` + cols.map(c => {
+      const key = c[0];
+      let v = t[key];
+      let tdCls = '';
+      if (key === 'pnl' || key === 'pnl_pct') tdCls = cls;
+      return `<td class="${tdCls}">${fmt(v)}</td>`;
+    }).join('') + '</tr>';
+  }).join('') + '</tbody>';
+
+  wrap.innerHTML = `<table class="atable">${thead}${tbody}</table>`;
+
+  wrap.querySelectorAll('tbody tr').forEach(tr => {
+    tr.addEventListener('click', () => {
+      const idx = parseInt(tr.dataset.idx, 10);
+      selectTrade(s, idx, payload);
+    });
+  });
+
+  wrap.querySelectorAll('thead th').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.col;
+      const asc = th.dataset.sort !== 'asc';
+      const sorted = [...trades].sort((a, b) => {
+        const av = a[col], bv = b[col];
+        const na = Number(av), nb = Number(bv);
+        if (!isNaN(na) && !isNaN(nb)) return asc ? na - nb : nb - na;
+        return asc ? String(av).localeCompare(String(bv))
+                   : String(bv).localeCompare(String(av));
+      });
+      renderAnalyticsTable(s, { ...payload, trades: sorted });
+      const newTh = wrap.querySelector(`th[data-col="${col}"]`);
+      if (newTh) newTh.dataset.sort = asc ? 'asc' : 'desc';
+    });
+  });
+}
+
+function renderAnalyticsDetail(s, payload, idx) {
+  const el = document.getElementById('aDetail-' + s);
+  if (!el) return;
+  const trade = (payload.trades || [])[idx];
+  if (!trade) { el.className = 'analytics-detail empty'; el.innerHTML = ''; return; }
+
+  const snapCols = [...(STRATEGY_SNAP_COLS[s] || []), ...SHARED_SNAP_COLS];
+  const allFields = [
+    ...['trade_id','strategy','symbol','side','timestamp','open_ts',
+        'entry','exit_price','pnl','pnl_pct','result','exit_reason',
+        'leverage','margin','box_low','box_high'],
+    ...snapCols,
+  ];
+
+  const rows = allFields.map(k => {
+    const v = trade[k];
+    const disp = (v == null || v === '') ? '—' : String(v);
+    return `<div class="kv"><span class="k">${k}</span><span class="v">${disp}</span></div>`;
+  }).join('');
+
+  el.className = 'analytics-detail';
+  el.innerHTML = `
+    <div class="hdr">
+      <span class="title">${s} · ${trade.symbol} · ${trade.side} · #${idx + 1}</span>
+      <button id="aDetailClose-${s}">Close</button>
+    </div>
+    <div class="grid">${rows}</div>
+  `;
+  document.getElementById('aDetailClose-' + s).addEventListener('click', () => {
+    el.className = 'analytics-detail empty';
+    el.innerHTML = '';
+    document.querySelectorAll(`#aTable-${s} tbody tr`)
+      .forEach(r => r.classList.remove('selected'));
+    Analytics.state.selected[s] = null;
+  });
+}
 </script>
 
 <script>

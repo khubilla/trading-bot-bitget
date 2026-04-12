@@ -1,6 +1,6 @@
 # Codebase Dependency Map
 
-**Last updated:** 2026-04-02
+**Last updated:** 2026-04-13
 **Update frequency:** After every PR that changes interfaces, data contracts, or cross-file dependencies
 
 ---
@@ -499,6 +499,7 @@ result,pnl,pnl_pct,exit_reason,exit_price
 - `dashboard.py` — displays recent trade history
 - `optimize.py` — parameter optimization and backtest analysis
 - `bot.py` line 85: `_rebuild_stats_from_csv()` — restores win/loss stats after bot restart
+- `analytics.py` — aggregates closed trades per strategy for the dashboard `/api/analytics` endpoint (read-only)
 
 **Verification commands:**
 
@@ -988,7 +989,57 @@ python recover.py [--dry-run] [--symbols SYM1 SYM2 ...]
 
 ## 9. Dashboard Integration
 
-[To be populated in Task 11]
+### 9.1 Analytics tab (`/api/analytics`)
+
+**Purpose:** Per-strategy trade history analytics (Bitget bot, strategies S1–S6).
+
+**Write chain:** none — read-only feature.
+
+**Read chain:**
+- `dashboard.py`: `@app.get("/api/analytics")` → calls `analytics.build_analytics(csv_path, range_spec, x_mode)`
+- `analytics.py`: reads `trades.csv` or `trades_paper.csv` (same path resolution as existing `get_state` endpoint)
+
+**Query parameters:**
+- `range` — `"all"` | `"30d"` | `"90d"` | `"lastN"` (default `"all"`)
+- `x` — `"trade"` | `"time"` (default `"trade"`)
+- `n` — required when `range="lastN"`; `1 ≤ n ≤ 10000`
+
+**Response shape:**
+```json
+{
+  "strategies": {
+    "S1": {"trades": [...], "series": {"cum_pnl": [...], "bars": [...]},
+            "summary": {"count": ..., "wins": ..., "win_rate": ..., ...}},
+    "S2": {...}, ..., "S6": {...}
+  }
+}
+```
+
+**Breaking scenarios:**
+
+1. **Renaming `STRATEGY_SNAP_FIELDS` keys in analytics.py** → dashboard.html
+   `STRATEGY_SNAP_COLS` no longer matches → per-strategy snap columns disappear from the table.
+   Fix: keep the two lists in sync.
+
+2. **Adding a new strategy (e.g. S7)** → analytics silently drops its trades (not in `STRATEGIES`).
+   Fix: add to `analytics.STRATEGIES` and `STRATEGY_SNAP_FIELDS`; add a strategy tab in `dashboard.html`.
+
+3. **Changing `trades.csv` column names** → `analytics.load_closed_trades` reads by name;
+   renaming a `snap_*` field breaks the per-trade detail card values (empty strings render as "—").
+   Fix: § 4.2 already covers the CSV column contract — keep field lists in sync.
+
+**Verification commands:**
+
+```bash
+# Endpoint smoke test
+curl -s 'http://localhost:8081/api/analytics?range=30d&x=trade' | jq '.strategies | keys'
+
+# Analytics module unit tests
+pytest tests/test_analytics.py -v
+
+# Endpoint tests
+pytest tests/test_analytics_endpoint.py -v
+```
 
 ---
 

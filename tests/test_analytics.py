@@ -268,3 +268,65 @@ def test_build_series_time_mode_uses_iso_timestamp():
 def test_build_series_empty_input():
     result = analytics.build_series([], "trade")
     assert result == {"cum_pnl": [], "bars": []}
+
+
+def test_summarize_empty_has_zero_counts_and_none_stats():
+    r = analytics.summarize([])
+    assert r["count"] == 0
+    assert r["wins"] == 0
+    assert r["losses"] == 0
+    assert r["win_rate"] is None
+    assert r["total_pnl"] == 0.0
+    assert r["avg_win"] is None
+    assert r["avg_loss"] is None
+    assert r["best"] is None
+    assert r["worst"] is None
+
+
+def test_summarize_all_wins():
+    trades = [{"pnl": 1.0}, {"pnl": 2.0}, {"pnl": 3.0}]
+    r = analytics.summarize(trades)
+    assert r["count"] == 3
+    assert r["wins"] == 3
+    assert r["losses"] == 0
+    assert r["win_rate"] == 1.0
+    assert r["total_pnl"] == 6.0
+    assert r["avg_win"] == 2.0
+    assert r["avg_loss"] is None
+    assert r["best"] == 3.0
+    assert r["worst"] == 1.0
+
+
+def test_summarize_all_losses():
+    trades = [{"pnl": -1.0}, {"pnl": -2.0}]
+    r = analytics.summarize(trades)
+    assert r["count"] == 2
+    assert r["wins"] == 0
+    assert r["losses"] == 2
+    assert r["win_rate"] == 0.0
+    assert r["total_pnl"] == -3.0
+    assert r["avg_win"] is None
+    assert r["avg_loss"] == -1.5
+    assert r["best"] == -1.0
+    assert r["worst"] == -2.0
+
+
+def test_summarize_mixed():
+    trades = [{"pnl": 10.0}, {"pnl": -5.0}, {"pnl": 20.0}, {"pnl": -2.0}]
+    r = analytics.summarize(trades)
+    assert r["count"] == 4
+    assert r["wins"] == 2
+    assert r["losses"] == 2
+    assert r["win_rate"] == 0.5
+    assert r["total_pnl"] == 23.0
+    assert r["avg_win"] == 15.0
+    assert r["avg_loss"] == -3.5
+    assert r["best"] == 20.0
+    assert r["worst"] == -5.0
+
+
+def test_summarize_treats_zero_pnl_as_win_like_result_column_would():
+    trades = [{"pnl": 0.0}, {"pnl": -1.0}]
+    r = analytics.summarize(trades)
+    assert r["wins"] == 1
+    assert r["losses"] == 1

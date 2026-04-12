@@ -221,3 +221,28 @@ def build_series(trades: list[dict], x_mode: Literal["trade", "time"]) -> dict:
         bars.append({"x": x, "y": pnl,
                      "color": "green" if pnl >= 0 else "red"})
     return {"cum_pnl": cum_pnl, "bars": bars}
+
+
+def summarize(trades: list[dict]) -> dict:
+    """Aggregate stats. pnl >= 0 is counted as a win."""
+    if not trades:
+        return {
+            "count": 0, "wins": 0, "losses": 0,
+            "win_rate": None, "total_pnl": 0.0,
+            "avg_win": None, "avg_loss": None,
+            "best": None, "worst": None,
+        }
+    pnls = [float(t.get("pnl") or 0.0) for t in trades]
+    wins = [p for p in pnls if p >= 0]
+    losses = [p for p in pnls if p < 0]
+    return {
+        "count":     len(pnls),
+        "wins":      len(wins),
+        "losses":    len(losses),
+        "win_rate":  len(wins) / len(pnls),
+        "total_pnl": sum(pnls),
+        "avg_win":   (sum(wins) / len(wins))   if wins   else None,
+        "avg_loss":  (sum(losses) / len(losses)) if losses else None,
+        "best":      max(pnls),
+        "worst":     min(pnls),
+    }

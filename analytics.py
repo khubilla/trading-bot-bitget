@@ -147,3 +147,13 @@ def load_closed_trades(csv_path: str) -> list[dict]:
         out.append(record)
 
     return out
+
+
+def group_by_strategy(trades: list[dict]) -> dict[str, list[dict]]:
+    """Bucket trades into all 6 strategy keys. Unknown strategies are dropped."""
+    out: dict[str, list[dict]] = {s: [] for s in STRATEGIES}
+    for t in trades:
+        s = t.get("strategy")
+        if s in out:
+            out[s].append(t)
+    return out

@@ -151,3 +151,27 @@ def test_load_closed_trades_skips_malformed_pnl(tmp_path):
     trades = analytics.load_closed_trades(str(path))
     assert len(trades) == 1
     assert trades[0]["pnl"] == 0.0
+
+
+def test_group_by_strategy_all_six_keys_always_present():
+    result = analytics.group_by_strategy([])
+    assert set(result.keys()) == set(analytics.STRATEGIES)
+    assert all(result[k] == [] for k in analytics.STRATEGIES)
+
+
+def test_group_by_strategy_buckets_correctly():
+    trades = [
+        {"strategy": "S1", "trade_id": "a"},
+        {"strategy": "S3", "trade_id": "b"},
+        {"strategy": "S1", "trade_id": "c"},
+    ]
+    result = analytics.group_by_strategy(trades)
+    assert [t["trade_id"] for t in result["S1"]] == ["a", "c"]
+    assert [t["trade_id"] for t in result["S3"]] == ["b"]
+    assert result["S2"] == []
+
+
+def test_group_by_strategy_ignores_unknown_strategy():
+    trades = [{"strategy": "S99", "trade_id": "x"}]
+    result = analytics.group_by_strategy(trades)
+    assert all(result[k] == [] for k in analytics.STRATEGIES)

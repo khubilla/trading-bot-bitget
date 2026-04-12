@@ -898,9 +898,44 @@
   .ig-log-inst.Gold { color: var(--amber); }
   .ig-log-msg  { color: var(--text2); line-height: 1.4; }
 
+  /* ── Top-level view tabs (Live / Analytics) ── */
+  .top-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 8px 16px 0 16px;
+    background: var(--bg1);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .top-tabs .tab {
+    padding: 8px 18px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 500;
+    opacity: 0.7;
+    user-select: none;
+  }
+  .top-tabs .tab:hover { opacity: 1; }
+  .top-tabs .tab.active {
+    opacity: 1;
+    background: var(--bg);
+    border-color: var(--border);
+    color: var(--amber);
+  }
+  .view.hidden { display: none !important; }
 </style>
 </head>
 <body>
+
+<nav class="top-tabs">
+  <div class="tab active" data-view="live">Live</div>
+  <div class="tab"        data-view="analytics">Analytics</div>
+</nav>
+<div class="view view-live">
 
 <div class="conn-banner" id="connBanner">
   ⚠ DASHBOARD CONNECTION LOST — Retrying...
@@ -1279,7 +1314,39 @@
   </div>
 </div>
 
+</div><!-- /view-live -->
+<div class="view view-analytics hidden">
+  <!-- Analytics content is populated in later tasks -->
+</div>
+
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+// ── Top-level tab switching (Live / Analytics) ────────────────────
+(function initTopTabs() {
+  const tabs  = document.querySelectorAll('.top-tabs .tab');
+  const views = {
+    live:      document.querySelector('.view-live'),
+    analytics: document.querySelector('.view-analytics'),
+  };
+  const saved = sessionStorage.getItem('topTab') || 'live';
+
+  function activate(name) {
+    if (!views[name]) name = 'live';
+    tabs.forEach(t => t.classList.toggle('active', t.dataset.view === name));
+    Object.entries(views).forEach(([k, el]) => {
+      if (el) el.classList.toggle('hidden', k !== name);
+    });
+    sessionStorage.setItem('topTab', name);
+    if (name === 'analytics' && typeof window.onAnalyticsShown === 'function') {
+      window.onAnalyticsShown();
+    }
+  }
+
+  tabs.forEach(t => t.addEventListener('click', () => activate(t.dataset.view)));
+  activate(saved);
+})();
+</script>
+
 <script>
 // ── Auth ───────────────────────────────────────────────────
 function _authKey() {

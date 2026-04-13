@@ -54,7 +54,7 @@ SENTIMENT_THRESHOLD = 0.75   # >75% green volume → BULLISH; <25% → BEARISH
 SENTIMENT_SCAN_SEC  = 60     # Re-calculate alongside pair scan
 
 # --- Claude Trade Filter ---
-CLAUDE_FILTER_ENABLED   = False                        # set True to enable approval gate
+CLAUDE_FILTER_ENABLED   = True                        # set True to enable approval gate
 CLAUDE_FILTER_MODEL     = "claude-3-haiku-20240307"  # cheapest Claude model
 CLAUDE_FILTER_HISTORY_N = 30                           # last N trades to send as context
 
@@ -65,3 +65,9 @@ import pathlib as _pl
 _DATA_DIR = _pl.Path(os.environ.get("DATA_DIR", "."))
 LOG_FILE  = str(_DATA_DIR / "bot.log")
 TRADE_LOG = str(_DATA_DIR / "trades.csv")
+
+# --- Non-Trading Hours ---
+# Avoid trading during these hours (PH time)
+# Set to None or empty list to disable this filter.
+NON_TRADING_HOURS_FROM = 22 # 22:00 PH time (14:00 UTC)
+NON_TRADING_HOURS_TO = 1 # 01:00 PH time (17:00 UTC)

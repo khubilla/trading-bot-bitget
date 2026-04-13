@@ -18,6 +18,8 @@ DAILY_INTERVAL = "1D"     # Daily chart for trend filter
 ADX_TREND_THRESHOLD = 25   # ADX above this = trending (allow trades)
 DAILY_EMA_FAST      = 10
 DAILY_EMA_SLOW      = 20
+DAILY_RSI_LONG_THRESH = 70
+DAILY_RSI_SHORT_THRESH = 30
 
 # ── RSI ──────────────────────────────────────────────────── #
 RSI_PERIOD       = 14

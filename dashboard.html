@@ -1613,6 +1613,13 @@ const Analytics = (() => {
           .forEach(x => x.classList.toggle('active', x.dataset.s === s));
         document.querySelectorAll('.strategy-panel')
           .forEach(x => x.classList.toggle('active', x.dataset.s === s));
+        // Charts created while the panel was display:none have zero size.
+        // Re-render the chart for the now-visible panel so it sizes correctly.
+        const payload = state.data && state.data.strategies && state.data.strategies[s];
+        if (payload && payload.trades && payload.trades.length
+            && typeof renderAnalyticsChart === 'function') {
+          renderAnalyticsChart(s, payload);
+        }
       });
     });
 
@@ -1658,11 +1665,24 @@ function renderAnalyticsChart(s, payload) {
     return x;  // integer 1..N in trade mode
   }
 
-  const cumData = payload.series.cum_pnl.map(p => ({
-    time: toBarTime(p.x), value: p.y,
+  // Lightweight-charts requires strictly-ascending unique times.
+  // In time mode we floor to whole seconds, which can collide when
+  // multiple trades close in the same second — nudge each duplicate
+  // forward so the series remains monotonic.
+  const rawTimes = payload.series.bars.map(p => toBarTime(p.x));
+  const times = [];
+  let prev = -Infinity;
+  for (const t of rawTimes) {
+    const next = t > prev ? t : prev + 1;
+    times.push(next);
+    prev = next;
+  }
+
+  const cumData = payload.series.cum_pnl.map((p, i) => ({
+    time: times[i], value: p.y,
   }));
-  const barData = payload.series.bars.map(p => ({
-    time:  toBarTime(p.x),
+  const barData = payload.series.bars.map((p, i) => ({
+    time:  times[i],
     value: p.y,
     color: p.color === 'green' ? '#3cb371' : '#e04a5f',
   }));
@@ -1695,7 +1715,7 @@ function renderAnalyticsChart(s, payload) {
 
   chart.subscribeClick(param => {
     if (!param || param.time == null) return;
-    const idx = payload.series.bars.findIndex(b => toBarTime(b.x) === param.time);
+    const idx = times.indexOf(param.time);
     if (idx >= 0) selectTrade(s, idx, payload);
   });
 

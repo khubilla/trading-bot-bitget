@@ -199,36 +199,38 @@ def check_daily_trend(daily_df: pd.DataFrame, direction: str) -> tuple[bool, flo
     Replaces EMA filter. Uses ADX to confirm trending (not sideways).
 
     Rules:
-      LONG:  ADX > ADX_TREND_THRESHOLD AND last daily close > EMA20
+      LONG:  ADX > ADX_TREND_THRESHOLD AND last daily close > EMA20 and RSI > DAILY_RSI_LONG_TRESH
              (trending up, not ranging)
-      SHORT: ADX > ADX_TREND_THRESHOLD AND last daily close < EMA20
+      SHORT: ADX > ADX_TREND_THRESHOLD AND last daily close < EMA20 and RSI < DAILY_RSI_SHORT_TRESH
              (trending down, not ranging)
 
-    Returns (passes, adx_value)
+    Returns (passes, adx_value, daily_rsi)
     """
-    from config_s1 import ADX_TREND_THRESHOLD, DAILY_EMA_SLOW
+    from config_s1 import ADX_TREND_THRESHOLD, DAILY_EMA_SLOW, DAILY_RSI_LONG_THRESH, DAILY_RSI_SHORT_THRESH
 
     if len(daily_df) < 30:
         logger.debug("  Daily trend: not enough candles")
-        return False, 0.0
+        return False, 0.0, 0.0
 
     closes  = daily_df["close"].astype(float)
     adx_res = calculate_adx(daily_df)
     adx_val = float(adx_res["adx"].iloc[-1])
+    rsi_res = calculate_rsi(closes)
+    rsi_val = float(rsi_res.iloc[-1])
     ema20   = float(calculate_ema(closes, DAILY_EMA_SLOW).iloc[-1])
     price   = float(closes.iloc[-1])
 
     if direction == "LONG":
-        passes = adx_val > ADX_TREND_THRESHOLD and price > ema20
+        passes = adx_val > ADX_TREND_THRESHOLD and price > ema20 and rsi_val > DAILY_RSI_LONG_THRESH
     else:
-        passes = adx_val > ADX_TREND_THRESHOLD and price < ema20
+        passes = adx_val > ADX_TREND_THRESHOLD and price < ema20 and rsi_val < DAILY_RSI_SHORT_THRESH
 
     logger.debug(
-        f"  Daily trend [{direction}]: ADX={adx_val:.1f} "
+        f"  Daily trend [{direction}]: ADX={adx_val:.1f}: RSI={rsi_val:.1f} "
         f"(need >{ADX_TREND_THRESHOLD}) price={'above' if price > ema20 else 'below'} EMA20 "
         f"→ {'✅' if passes else '❌'}"
     )
-    return passes, adx_val
+    return passes, adx_val, rsi_val
 
 
 # ── HTF Check (1H) ────────────────────────────────────────── #
@@ -376,26 +378,26 @@ def evaluate_s1(
     bull_htf, bear_htf = check_htf(htf_df)
 
     if bull_htf and allowed_direction == "BULLISH":
-        trend_ok, adx = check_daily_trend(daily_df, "LONG")
+        trend_ok, adx, daily_rsi = check_daily_trend(daily_df, "LONG")
         if not trend_ok:
-            return "HOLD", 50.0, 0.0, 0.0, adx
+            return "HOLD", 50.0, 0.0, 0.0, adx, daily_rsi
         valid, rsi, bh, bl = check_ltf_long(ltf_df)
         if valid:
-            logger.info(f"[S1][{symbol}] ✅ LONG | RSI={rsi:.1f} ADX={adx:.1f}")
-            return "LONG", rsi, bh, bl, adx
-        return "HOLD", rsi, bh, bl, adx
+            logger.info(f"[S1][{symbol}] ✅ LONG | RSI={rsi:.1f} ADX={adx:.1f} Daily RSI={daily_rsi:.1f}")
+            return "LONG", rsi, bh, bl, adx, daily_rsi
+        return "HOLD", rsi, bh, bl, adx, daily_rsi
 
     if bear_htf and allowed_direction == "BEARISH":
-        trend_ok, adx = check_daily_trend(daily_df, "SHORT")
+        trend_ok, adx, daily_rsi = check_daily_trend(daily_df, "SHORT")
         if not trend_ok:
-            return "HOLD", 50.0, 0.0, 0.0, adx
+            return "HOLD", 50.0, 0.0, 0.0, adx, daily_rsi
         valid, rsi, bh, bl = check_ltf_short(ltf_df)
         if valid:
-            logger.info(f"[S1][{symbol}] ✅ SHORT | RSI={rsi:.1f} ADX={adx:.1f}")
-            return "SHORT", rsi, bh, bl, adx
-        return "HOLD", rsi, bh, bl, adx
+            logger.info(f"[S1][{symbol}] ✅ SHORT | RSI={rsi:.1f} ADX={adx:.1f} Daily RSI={daily_rsi:.1f}")
+            return "SHORT", rsi, bh, bl, adx, daily_rsi
+        return "HOLD", rsi, bh, bl, adx, daily_rsi
 
-    return "HOLD", 50.0, 0.0, 0.0, 0.0
+    return "HOLD", 50.0, 0.0, 0.0, 0.0, 0.0
 
 
 
@@ -1381,7 +1383,7 @@ def evaluate_s5(
             f"S5 OB {ob_low:.5f}–{ob_high:.5f} | Limit@{entry_trigger:.5f} | TP={tp_price:.5f} R:R={rr:.1f}"
         )
 
-    else:  # go_short
+    elif go_short:
         ob = find_bearish_ob(m15_df, lookback=S5_OB_LOOKBACK, min_impulse_pct=S5_OB_MIN_IMPULSE)
         if ob is None:
             return "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, (
@@ -1449,6 +1451,8 @@ def evaluate_s5(
         return "PENDING_SHORT", entry_trigger, sl_price, tp_price, ob_low, ob_high, (
             f"S5 OB {ob_low:.5f}–{ob_high:.5f} | Limit@{entry_trigger:.5f} | TP={tp_price:.5f} R:R={rr:.1f}"
         )
+
+    return "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, "Direction not BULLISH or BEARISH — S5 skipped"
 
 
 # ── S6: V-Formation Liquidity Sweep Short ─────────────────── #

@@ -25,6 +25,7 @@ from config import (
     MIN_VOLUME_USDT, MAX_PRICE_USDT, PRODUCT_TYPE, SENTIMENT_THRESHOLD,
     LIQUIDITY_CHECK_ENABLED, MIN_OB_DEPTH_USDT,
 )
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -121,18 +122,35 @@ def get_qualified_pairs_and_sentiment() -> tuple[list[str], SentimentResult]:
         if symbol == "BTCUSDT":
             btc_change = price_change
 
-        # ── NEW: weight = volume × magnitude of change ────────────
+        # weight = volume × magnitude of change ────────────
         # Floor at 0.5% so near-zero movers don't get zeroed out
         # but still contribute less than strong movers
-        magnitude = max(abs(price_change), 0.5)
-        # weight    = vol_usdt * magnitude
-        weight    = vol_usdt * magnitude
+        # magnitude = max(abs(price_change), 0.5)
+        # weight    = math.log(vol_usdt) * magnitude
 
+        # if price_change > 0:
+        #     green_volume += weight      # ← was: vol_usdt
+        #     green_count  += 1
+        # else:
+        #     red_volume   += weight      # ← was: vol_usdt
+        #     red_count    += 1
+
+        # 1. Calculate how 'heavy' this move is
+        # We use abs() so both big drops and big pumps get high weight
+        magnitude = abs(price_change) 
+
+        # 2. Apply a small noise filter (optional)
+        if magnitude < 0.15: 
+            weight = 0
+        else:
+            weight = math.sqrt(vol_usdt) * magnitude
+
+        # 3. Sort into buckets based on the actual SIGN of the change
         if price_change > 0:
-            green_volume += weight      # ← was: vol_usdt
+            green_volume += weight
             green_count  += 1
         else:
-            red_volume   += weight      # ← was: vol_usdt
+            red_volume   += weight
             red_count    += 1
 
     qualified.sort()

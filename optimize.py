@@ -13,101 +13,100 @@ Usage:
 import os, csv, sys, argparse
 import anthropic
 import config
+import config_s1
+import config_s2
+import config_s3
+import config_s4
+import config_s5
+import config_s6
 
 # ── Config ────────────────────────────────────────────────────────── #
 
 MODEL       = "claude-sonnet-4-6"
 MIN_TRADES  = 10   # minimum closed trades per strategy before analyzing
 
-# Current params shown to Claude so it knows the baseline
+# Pull current params live from config modules — never hardcode
+def _cfg(module, *names):
+    return {n: getattr(module, n) for n in names if hasattr(module, n)}
+
 CURRENT_PARAMS = {
-    "S1": {
-        "RSI_LONG_THRESH":      70,
-        "RSI_SHORT_THRESH":     30,
-        "ADX_TREND_THRESHOLD":  25,
-        "CONSOLIDATION_RANGE_PCT": "0.3%",
-        "BREAKOUT_BUFFER_PCT":  "0.5%",
-        "TAKE_PROFIT_PCT":      "3.3%",
-        "STOP_LOSS_PCT":        "1.5%",
-    },
-    "S2": {
-        "S2_RSI_LONG_THRESH":       70,
-        "S2_BIG_CANDLE_BODY_PCT":   "20%",
-        "S2_BIG_CANDLE_LOOKBACK":   30,
-        "S2_CONSOL_RANGE_PCT":      "15%",
-        "S2_MAX_ENTRY_BUFFER":      "4%",
-        "S2_MIN_SR_CLEARANCE":      "15%",
-        "S2_TRAILING_TRIGGER_PCT":  "10%",
-        "S2_TRAILING_RANGE_PCT":    "10%",
-    },
-    "S3": {
-        "S3_ADX_MIN":               30,
-        "S3_STOCH_OVERSOLD":        30,
-        "S3_STOCH_LOOKBACK":        8,
-        "S3_MIN_RR":                2.0,
-        "S3_MAX_ENTRY_BUFFER":      "4%",
-        "S3_MIN_SR_CLEARANCE":      "15%",
-        "S3_TRAILING_TRIGGER_PCT":  "10%",
-        "S3_TRAILING_RANGE_PCT":    "10%",
-        "S3_DAILY_GAIN_MIN":        "10%",
-    },
-    "S4": {
-        "S4_RSI_PEAK_THRESH":       75,
-        "S4_RSI_STILL_HOT_THRESH":  70,
-        "S4_RSI_DIV_MIN_DROP":      5,
-        "S4_BIG_CANDLE_BODY_PCT":   "20%",
-        "S4_BIG_CANDLE_LOOKBACK":   30,
-        "S4_ENTRY_BUFFER":          "1%",
-        "S4_MAX_ENTRY_BUFFER":      "4%",
-        "S4_MIN_SR_CLEARANCE":      "15%",
-        "S4_TRAILING_TRIGGER_PCT":  "10%",
-        "S4_TRAILING_RANGE_PCT":    "10%",
-    },
-    "S5": {
-        "S5_HTF_BOS_LOOKBACK":   10,
-        "S5_OB_LOOKBACK":        50,
-        "S5_OB_MIN_IMPULSE":     "1%",
-        "S5_CHOCH_LOOKBACK":     20,
-        "S5_MAX_ENTRY_BUFFER":   "4%",
-        "S5_SL_BUFFER_PCT":      "0.3%",
-        "S5_MIN_SR_CLEARANCE":   "10%",
-        "S5_MIN_RR":             2.0,
-        "S5_SWING_LOOKBACK":     50,
-        "S5_TRAIL_RANGE_PCT":    "5%",
-    },
+    "S1": _cfg(config_s1,
+        "RSI_LONG_THRESH", "RSI_SHORT_THRESH", "ADX_TREND_THRESHOLD",
+        "CONSOLIDATION_RANGE_PCT", "BREAKOUT_BUFFER_PCT",
+        "TAKE_PROFIT_PCT", "STOP_LOSS_PCT",
+        "S1_SL_BUFFER_PCT", "S1_MIN_SR_CLEARANCE",
+        "S1_USE_SWING_TRAIL", "S1_TRAIL_RANGE_PCT", "S1_SWING_LOOKBACK",
+    ),
+    "S2": _cfg(config_s2,
+        "S2_RSI_LONG_THRESH",
+        "S2_BIG_CANDLE_BODY_PCT", "S2_BIG_CANDLE_LOOKBACK",
+        "S2_CONSOL_RANGE_PCT", "S2_CONSOL_CANDLES",
+        "S2_MAX_ENTRY_BUFFER", "S2_MIN_SR_CLEARANCE",
+        "S2_TRAILING_TRIGGER_PCT", "S2_TRAILING_RANGE_PCT",
+        "S2_USE_SWING_TRAIL", "S2_SWING_LOOKBACK",
+    ),
+    "S3": _cfg(config_s3,
+        "S3_ADX_MIN", "S3_ADX_MAX",
+        "S3_STOCH_OVERSOLD", "S3_STOCH_LOOKBACK",
+        "S3_MIN_RR", "S3_MIN_SR_CLEARANCE",
+        "S3_MAX_ENTRY_BUFFER", "S3_ENTRY_BUFFER_PCT",
+        "S3_TRAILING_TRIGGER_PCT", "S3_TRAILING_RANGE_PCT",
+        "S3_USE_SWING_TRAIL", "S3_SWING_LOOKBACK",
+        "S3_DAILY_GAIN_MIN",
+    ),
+    "S4": _cfg(config_s4,
+        "S4_RSI_PEAK_THRESH", "S4_RSI_STILL_HOT_THRESH",
+        "S4_RSI_DIV_MIN_DROP", "S4_RSI_PEAK_LOOKBACK",
+        "S4_BIG_CANDLE_BODY_PCT", "S4_BIG_CANDLE_LOOKBACK",
+        "S4_ENTRY_BUFFER", "S4_MAX_ENTRY_BUFFER",
+        "S4_MIN_SR_CLEARANCE", "S4_LOW_LOOKBACK",
+        "S4_TRAILING_TRIGGER_PCT", "S4_TRAILING_RANGE_PCT",
+        "S4_USE_SWING_TRAIL", "S4_SWING_LOOKBACK",
+    ),
+    "S5": _cfg(config_s5,
+        "S5_HTF_BOS_LOOKBACK", "S5_OB_LOOKBACK",
+        "S5_OB_MIN_IMPULSE", "S5_OB_MIN_RANGE_PCT",
+        "S5_CHOCH_LOOKBACK",
+        "S5_MAX_ENTRY_BUFFER", "S5_SL_BUFFER_PCT",
+        "S5_MIN_SR_CLEARANCE", "S5_MIN_RR",
+        "S5_SWING_LOOKBACK", "S5_TRAIL_RANGE_PCT",
+        "S5_USE_SWING_TRAIL", "S5_SMC_FVG_FILTER",
+    ),
+    "S6": _cfg(config_s6,
+        "S6_OVERBOUGHT_RSI", "S6_MIN_DROP_PCT",
+        "S6_MIN_RECOVERY_RATIO", "S6_SPIKE_LOOKBACK",
+        "S6_SL_PCT", "S6_TRAILING_TRIGGER_PCT", "S6_TRAIL_RANGE_PCT",
+    ),
 }
 
 # Columns to include in the table sent to Claude, per strategy
 STRATEGY_COLUMNS = {
-    "S1": ["result", "pnl_pct", "exit_reason", "snap_rsi", "snap_adx",
-           "snap_sentiment", "snap_box_range_pct"],
-    "S2": ["result", "pnl_pct", "exit_reason", "snap_daily_rsi",
-           "snap_sentiment", "snap_sr_clearance_pct", "snap_box_range_pct"],
-    "S3": ["result", "pnl_pct", "exit_reason", "snap_adx",
-           "snap_sentiment", "snap_sr_clearance_pct", "snap_rr"],
-    "S4": ["result", "pnl_pct", "exit_reason", "snap_rsi_peak",
-           "snap_spike_body_pct", "snap_rsi_div", "snap_sentiment",
-           "snap_sr_clearance_pct"],
-    "S5": ["result", "pnl_pct", "exit_reason", "snap_rr",
-           "snap_s5_ob_low", "snap_s5_ob_high", "snap_s5_tp",
+    "S1": ["result", "pnl_pct", "exit_reason",
+           "snap_rsi", "snap_adx", "snap_htf", "snap_coil",
+           "snap_box_range_pct", "snap_sentiment"],
+    "S2": ["result", "pnl_pct", "exit_reason",
+           "snap_daily_rsi", "snap_sentiment", "snap_sr_clearance_pct"],
+    "S3": ["result", "pnl_pct", "exit_reason",
+           "snap_adx", "snap_rr", "snap_sentiment", "snap_sr_clearance_pct"],
+    "S4": ["result", "pnl_pct", "exit_reason",
+           "snap_rsi_peak", "snap_spike_body_pct",
+           "snap_rsi_div", "snap_rsi_div_str",
            "snap_sentiment", "snap_sr_clearance_pct"],
+    "S5": ["result", "pnl_pct", "exit_reason",
+           "snap_rr", "snap_s5_ob_low", "snap_s5_ob_high", "snap_s5_tp",
+           "snap_sentiment", "snap_sr_clearance_pct"],
+    "S6": ["result", "pnl_pct", "exit_reason",
+           "snap_s6_peak", "snap_s6_drop_pct", "snap_s6_rsi_at_peak",
+           "snap_sentiment"],
 }
 
 # ── Trade loader ──────────────────────────────────────────────────── #
 
-def _pct(entry_open, entry_close, side):
-    try:
-        e, c = float(entry_open), float(entry_close)
-        if not e:
-            return None
-        return round(((e - c) / e * 100) if side == "SHORT" else ((c - e) / e * 100), 1)
-    except Exception:
-        return None
-
-
 def load_trades(csv_path: str) -> list[dict]:
     """
     Load and pair OPEN + CLOSE rows from trades CSV.
+    Keys open trades by trade_id (not symbol) to correctly handle
+    multiple simultaneous open positions on the same symbol.
     Returns list of completed trades with all snapshot fields + result/pnl_pct/exit_reason.
     """
     if not os.path.exists(csv_path):
@@ -116,30 +115,25 @@ def load_trades(csv_path: str) -> list[dict]:
     with open(csv_path, newline="") as f:
         rows = list(csv.DictReader(f))
 
-    opens  = {}   # symbol → open row
+    opens  = {}   # trade_id → open row
     trades = []
 
     for r in rows:
-        action = r.get("action", "")
-        sym    = r.get("symbol", "")
-        if not action or not sym:
+        action   = r.get("action", "")
+        trade_id = r.get("trade_id", "")
+        if not action or not trade_id:
             continue
 
-        if "_CLOSE" in action:
-            if sym not in opens:
+        if "_LONG" in action or "_SHORT" in action:
+            opens[trade_id] = r
+        elif "_CLOSE" in action:
+            if trade_id not in opens:
                 continue
-            o = opens.pop(sym)
+            o = opens.pop(trade_id)
 
-            # Use stored result/pnl_pct if available (new format)
-            result     = r.get("result") or o.get("result", "")
-            pnl_pct    = r.get("pnl_pct") or None
+            result      = r.get("result") or o.get("result", "")
+            pnl_pct     = r.get("pnl_pct") or None
             exit_reason = r.get("exit_reason", "")
-
-            # Fall back to computing from entry prices
-            if not result:
-                computed = _pct(o.get("entry"), r.get("entry"), o.get("side", "LONG"))
-                result   = "WIN" if computed and computed > 0 else "LOSS"
-                pnl_pct  = computed
 
             trade = {**o}
             trade["result"]      = result
@@ -147,8 +141,9 @@ def load_trades(csv_path: str) -> list[dict]:
             trade["exit_reason"] = exit_reason
             trade["close_ts"]    = r.get("timestamp", "")[:10]
             trades.append(trade)
-        else:
-            opens[sym] = r
+        elif "_PARTIAL" in action:
+            # Partial TPs don't close the trade — ignore for full-trade analysis
+            pass
 
     return trades
 
@@ -172,24 +167,36 @@ def _fmt(val):
 
 def format_trade_table(trades: list[dict], strategy: str) -> str:
     cols = STRATEGY_COLUMNS.get(strategy, ["result", "pnl_pct", "snap_sentiment"])
-    header = " | ".join(f"{c:<22}" for c in ["date", "symbol"] + cols)
-    sep    = "-" * len(header)
+    all_cols = ["date", "symbol"] + cols
+    widths = {c: max(len(c), 10) for c in all_cols}
+    widths["date"]   = max(widths["date"],   10)
+    widths["symbol"] = max(widths["symbol"], 12)
+    for c in cols:
+        widths[c] = max(widths[c], 14)
+
+    def pad(val, col):
+        return str(val).ljust(widths[col])
+
+    header = " | ".join(pad(c, c) for c in all_cols)
+    sep    = "-+-".join("-" * widths[c] for c in all_cols)
     lines  = [header, sep]
     for t in trades:
-        row = [t.get("close_ts", t.get("timestamp", ""))[:10], f"{t.get('symbol',''):<10}"]
-        row += [f"{_fmt(t.get(c)):<22}" for c in cols]
+        date   = t.get("close_ts", t.get("timestamp", ""))[:10]
+        symbol = t.get("symbol", "")
+        row    = [pad(date, "date"), pad(symbol, "symbol")]
+        row   += [pad(_fmt(t.get(c)), c) for c in cols]
         lines.append(" | ".join(row))
     return "\n".join(lines)
 
 
 def build_prompt(strategy: str, trades: list[dict]) -> str:
-    params = CURRENT_PARAMS.get(strategy, {})
+    params     = CURRENT_PARAMS.get(strategy, {})
     params_str = "\n".join(f"  {k} = {v}" for k, v in params.items())
-    table  = format_trade_table(trades, strategy)
-    wins   = sum(1 for t in trades if t.get("result") == "WIN")
-    losses = len(trades) - wins
-    avg_pnl = ""
-    pnl_vals = [float(t["pnl_pct"]) for t in trades if t.get("pnl_pct") not in (None, "", "—")]
+    table      = format_trade_table(trades, strategy)
+    wins       = sum(1 for t in trades if t.get("result") == "WIN")
+    losses     = len(trades) - wins
+    avg_pnl    = ""
+    pnl_vals   = [float(t["pnl_pct"]) for t in trades if t.get("pnl_pct") not in (None, "", "—")]
     if pnl_vals:
         avg_pnl = f"  Avg P/L: {sum(pnl_vals)/len(pnl_vals):+.1f}%"
 

@@ -12,7 +12,10 @@ by an infrastructure failure.
 
 import os
 import csv
+import logging
 import config
+
+logger = logging.getLogger(__name__)
 
 _client = None
 
@@ -107,11 +110,16 @@ def claude_approve(strategy: str, symbol: str, signal_data: dict) -> dict:
     so trades are never blocked by infrastructure issues.
     """
     if not config.CLAUDE_FILTER_ENABLED:
+        logger.debug("claude_filter disabled — auto-approving %s %s", strategy, symbol)
         return {"approved": True, "reason": "filter disabled"}
 
     try:
         rows = _load_history(config.CLAUDE_FILTER_HISTORY_N)
         history_str = _format_history(rows)
+        logger.debug(
+            "claude_filter calling API for %s %s (history rows=%d)",
+            strategy, symbol, len(rows),
+        )
         prompt = _build_prompt(strategy, symbol, signal_data, history_str)
 
         resp = _get_client().messages.create(
@@ -121,9 +129,18 @@ def claude_approve(strategy: str, symbol: str, signal_data: dict) -> dict:
         )
 
         text = resp.content[0].text.strip()
+        logger.debug("claude_filter raw response: %s", text)
         approved = text.upper().startswith("APPROVE")
         reason = text.split("-", 1)[-1].strip() if "-" in text else text
+        logger.info(
+            "claude_filter %s %s → %s | %s",
+            strategy, symbol, "APPROVE" if approved else "REJECT", reason,
+        )
         return {"approved": approved, "reason": reason}
 
     except Exception as e:
+        logger.warning(
+            "claude_filter error for %s %s — defaulting to approve: %s",
+            strategy, symbol, e,
+        )
         return {"approved": True, "reason": f"filter error (defaulting approve): {e}"}

@@ -748,6 +748,21 @@ class MTFBot:
     def _tick(self):
         now = time.time()
 
+        if config.NON_TRADING_HOURS_FROM is not None and config.NON_TRADING_HOURS_TO is not None:
+            now_time = datetime.now()
+        
+            # Monday=0, Sunday=6. Weekends are 5 and 6.
+            is_weekend = now_time.weekday() >= 5
+            is_monday_early = now_time.weekday() == 0 and now_time.hour < config.NON_TRADING_HOURS_TO
+            
+            # Range crosses midnight: 
+            # True if hour is 22 (10PM), 23 (11PM), or 0 (12AM)
+            is_restricted_time = now_time.hour >= config.NON_TRADING_HOURS_FROM or now_time.hour < config.NON_TRADING_HOURS_TO
+
+            if is_restricted_time and not is_weekend and not is_monday_early:
+                st.add_scan_log("Non-trading hours — skipping scan", "INFO")
+                return
+
         # ── 1. Rescan ────────────────────────────────────────────── #
         if now - self.last_scan_time >= config.SCAN_INTERVAL_SEC:
             self.qualified_pairs, self.sentiment = get_qualified_pairs_and_sentiment()
@@ -1280,15 +1295,15 @@ class MTFBot:
             return False
 
         # ── Strategy 1 ───────────────────────────────────────────── #
-        s1_sig, s1_rsi, s1_bh, s1_bl, s1_adx = "HOLD", 50.0, 0.0, 0.0, 0.0
+        s1_sig, s1_rsi, s1_bh, s1_bl, s1_adx, s1_daily_rsi = "HOLD", 50.0, 0.0, 0.0, 0.0, 50.0
         if config_s1.S1_ENABLED:
-            s1_sig, s1_rsi, s1_bh, s1_bl, s1_adx = evaluate_s1(
+            s1_sig, s1_rsi, s1_bh, s1_bl, s1_adx, s1_daily_rsi = evaluate_s1(
                 symbol, htf_df, ltf_df, daily_df, allowed_direction
             )
         htf_bull, htf_bear = check_htf(htf_df)
 
         from strategy import check_daily_trend as _trend
-        trend_ok, adx_val = _trend(daily_df, "LONG" if allowed_direction == "BULLISH" else "SHORT")
+        trend_ok, adx_val, daily_rsi = _trend(daily_df, "LONG" if allowed_direction == "BULLISH" else "SHORT")
         rsi_ser = calculate_rsi(ltf_df["close"].astype(float))
         rsi_val = float(rsi_ser.iloc[-1])
         thresh  = config_s1.RSI_LONG_THRESH if allowed_direction == "BULLISH" else config_s1.RSI_SHORT_THRESH
@@ -1313,6 +1328,10 @@ class MTFBot:
                 side_str  = "above" if allowed_direction == "BULLISH" else "below"
                 actual    = "below" if price_d < ema20_d else "above"
                 s1_reason = f"ADX={adx_val:.1f} ✓ but price {actual} EMA20 (need {side_str})"
+            if allowed_direction == "BULLISH" and daily_rsi <= config_s1.DAILY_RSI_LONG_THRESH:
+                s1_reason += f" | daily RSI {daily_rsi:.1f} ≤ {config_s1.DAILY_RSI_LONG_THRESH}"
+            elif allowed_direction == "BEARISH" and daily_rsi >= config_s1.DAILY_RSI_SHORT_THRESH:
+                s1_reason += f" | daily RSI {daily_rsi:.1f} ≥ {config_s1.DAILY_RSI_SHORT_THRESH}"
         elif not rsi_ok:     s1_reason = f"RSI {rsi_val:.1f} not in zone"
         elif not is_coil:    s1_reason = "No RSI-zone consolidation"
         elif s1_sig == "HOLD": s1_reason = "Waiting breakout"
@@ -1385,7 +1404,7 @@ class MTFBot:
 
         # ── Strategy 4 ───────────────────────────────────────────── #
         s4_sig, s4_rsi, s4_trigger, s4_sl, s4_body_pct, s4_rsi_peak, s4_div, s4_div_str, s4_reason = "HOLD", 50.0, 0.0, 0.0, 0.0, 0.0, False, "", ""
-        if config_s4.S4_ENABLED and self.sentiment.direction != "BULLISH":
+        if config_s4.S4_ENABLED and self.sentiment.direction == "BEARISH":
             s4_sig, s4_rsi, s4_trigger, s4_sl, s4_body_pct, s4_rsi_peak, s4_div, s4_div_str, s4_reason = evaluate_s4(symbol, daily_df, htf_df)
             logger.info(f"[S4][{symbol}] {s4_reason}")
         # 1H low filter display values
@@ -2020,6 +2039,22 @@ class MTFBot:
                 equity   = tr._get_total_equity() or balance
                 notional = equity * config_s5.S5_TRADE_SIZE_PCT * config_s5.S5_LEVERAGE
                 mark     = tr.get_mark_price(symbol)
+                # Validate against live mark — evaluate_s5 uses 15m close which may lag the live tick.
+                # Bitget rejects limit orders placed too far below (LONG) or above (SHORT) the current mark.
+                if side == "LONG" and trigger < mark * (1 - config_s5.S5_MAX_ENTRY_BUFFER):
+                    logger.warning(
+                        f"[S5][{symbol}] ⚠️ PENDING LONG skipped: trigger {trigger:.5f} is "
+                        f">{config_s5.S5_MAX_ENTRY_BUFFER * 100:.0f}% below live mark {mark:.5f}"
+                    )
+                    self.pending_signals.pop(symbol, None)
+                    return
+                elif side == "SHORT" and trigger > mark * (1 + config_s5.S5_MAX_ENTRY_BUFFER):
+                    logger.warning(
+                        f"[S5][{symbol}] ⚠️ PENDING SHORT skipped: trigger {trigger:.5f} is "
+                        f">{config_s5.S5_MAX_ENTRY_BUFFER * 100:.0f}% above live mark {mark:.5f}"
+                    )
+                    self.pending_signals.pop(symbol, None)
+                    return
                 # NOTE: qty snapped at queue time, not fill time — acceptable for S5 (positions sized conservatively)
                 qty_str  = tr._round_qty(notional / mark, symbol)
                 if side == "LONG":
@@ -2523,7 +2558,7 @@ class MTFBot:
                             self.pending_signals.pop(symbol, None)
 
                         elif (side == "SHORT" and
-                              mark > sig["ob_high"] * (1 + config_s5.S5_OB_INVALIDATION_BUFFER_PCT)):
+                              mark > sig["ob_high"] * (1 + config_s5.S5_MAX_ENTRY_BUFFER)):
                             try:
                                 tr.cancel_order(symbol, order_id)
                             except Exception as e:

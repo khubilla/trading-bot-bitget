@@ -1929,6 +1929,9 @@ class MTFBot:
             trade["snap_s5_ob_high"]     = round(s5_ob_high, 8) if s5_ob_high else None
             trade["snap_s5_tp"]          = round(s5_tp, 8) if s5_tp else None
             trade["trade_id"] = uuid.uuid4().hex[:8]
+            trade.update(dna_snapshot("S5", symbol, {
+                "m15": m15_df,
+            }))
             _log_trade("S5_LONG", trade)
             st.add_open_trade(trade)
             try:
@@ -1992,6 +1995,9 @@ class MTFBot:
             trade["snap_s5_ob_high"]     = round(s5_ob_high, 8) if s5_ob_high else None
             trade["snap_s5_tp"]          = round(s5_tp, 8) if s5_tp else None
             trade["trade_id"] = uuid.uuid4().hex[:8]
+            trade.update(dna_snapshot("S5", symbol, {
+                "m15": m15_df,
+            }))
             _log_trade("S5_SHORT", trade)
             st.add_open_trade(trade)
             try:
@@ -2260,6 +2266,9 @@ class MTFBot:
         trade["snap_sr_clearance_pct"] = round((sr_resistance - mark) / mark * 100, 1) \
                                          if sr_resistance else None
         trade["trade_id"] = uuid.uuid4().hex[:8]
+        trade.update(dna_snapshot("S2", symbol, {
+            "daily": sig.get("daily_df"),
+        }))
         _log_trade("S2_LONG", trade)
         st.add_open_trade(trade)
         try:
@@ -2323,6 +2332,9 @@ class MTFBot:
         trade["snap_sentiment"]        = sig.get("snap_sentiment")
         trade["snap_sr_clearance_pct"] = sig.get("snap_sr_clearance_pct")
         trade["trade_id"] = uuid.uuid4().hex[:8]
+        trade.update(dna_snapshot("S3", symbol, {
+            "m15": sig.get("m15_df"),
+        }))
         _log_trade("S3_LONG", trade)
         st.add_open_trade(trade)
         try:
@@ -2387,6 +2399,10 @@ class MTFBot:
         trade["snap_sentiment"]        = sig.get("snap_sentiment")
         trade["snap_sr_clearance_pct"] = sr_support_pct
         trade["trade_id"] = uuid.uuid4().hex[:8]
+        trade.update(dna_snapshot("S4", symbol, {
+            "daily": sig.get("daily_df"),
+            # h1 not carried in sig dict — snap_trend_h1_* will record as ""
+        }))
         _log_trade("S4_SHORT", trade)
         st.add_open_trade(trade)
         try:
@@ -2425,6 +2441,9 @@ class MTFBot:
         trade["snap_sentiment"]        = sig.get("snap_sentiment")
         trade["snap_sr_clearance_pct"] = None
         trade["trade_id"] = uuid.uuid4().hex[:8]
+        trade.update(dna_snapshot("S6", symbol, {
+            "daily": sig.get("daily_df"),
+        }))
         _log_trade("S6_SHORT", trade)
         st.add_open_trade(trade)
         try:
@@ -2787,6 +2806,7 @@ class MTFBot:
         trade["snap_s5_ob_high"]       = round(sig["ob_high"], 8) if sig.get("ob_high") else None
         trade["snap_s5_tp"]            = round(sig["tp"], 8) if sig.get("tp") else None
         trade["trade_id"] = uuid.uuid4().hex[:8]
+        trade.update(dna_snapshot("S5", symbol, {}))  # no DFs available in watcher
         _log_trade(f"S5_{side}", trade)
         st.add_open_trade(trade)
         if PAPER_MODE:
@@ -2854,6 +2874,7 @@ class MTFBot:
                 "snap_s5_tp":            round(sig["tp"], 8)      if sig.get("tp")      else None,
                 "trade_id": trade_id,
             })
+            trade.update(dna_snapshot("S5", symbol, {}))  # no DFs available in watcher
             _log_trade(f"S5_{side}", trade)
             st.add_open_trade(trade)
             tr.tag_strategy(symbol, "S5")
@@ -2919,6 +2940,7 @@ class MTFBot:
             "snap_s5_tp":            round(sig["tp"], 8)      if sig.get("tp")      else None,
             "trade_id": trade_id,
         }
+        trade.update(dna_snapshot("S5", symbol, {}))  # no DFs available in watcher
         _log_trade(f"S5_{side}", trade)
         st.add_open_trade(trade)
         try:

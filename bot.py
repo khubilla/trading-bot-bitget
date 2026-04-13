@@ -32,6 +32,7 @@ from strategy import (
     find_swing_low_after_ref, find_swing_high_after_ref,
 )
 from claude_filter import claude_approve
+from trade_dna import snapshot as dna_snapshot
 import snapshot
 
 def _check_disclaimer():
@@ -1856,6 +1857,11 @@ class MTFBot:
             _d_rsi = calculate_rsi(_daily["close"].astype(float))
             trade["snap_daily_rsi"] = round(float(_d_rsi.iloc[-1]), 1)
         trade["trade_id"] = uuid.uuid4().hex[:8]
+        trade.update(dna_snapshot("S1", symbol, {
+            "daily": c.get("daily_df"),
+            # h1 not in S1 candidate dict — snap_trend_h1_* will record as ""
+            "m3":    c.get("ltf_df"),
+        }))
         _log_trade(f"S1_{s1_sig}", trade)
         st.add_open_trade(trade)
         try:

@@ -117,6 +117,13 @@ _TRADE_FIELDS = [
     "snap_s6_peak", "snap_s6_drop_pct", "snap_s6_rsi_at_peak",
     # S/R clearance at entry (S2/S3/S4/S5/S6)
     "snap_sr_clearance_pct",
+    # Trade DNA trend fingerprint (recorded at entry for future pattern-match filter)
+    "snap_trend_daily_ema_slope", "snap_trend_daily_price_vs_ema",
+    "snap_trend_daily_rsi_bucket", "snap_trend_daily_adx_state",
+    "snap_trend_h1_ema_slope", "snap_trend_h1_price_vs_ema",
+    "snap_trend_m15_ema_slope", "snap_trend_m15_price_vs_ema",
+    "snap_trend_m15_adx_state",
+    "snap_trend_m3_price_vs_ema",
     # Close fields
     "result", "pnl", "pnl_pct", "exit_reason", "exit_price",
 ]

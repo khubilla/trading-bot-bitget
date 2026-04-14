@@ -820,42 +820,63 @@ def cancel_all_orders(symbol: str):
         logger.warning(f"[{symbol}] cancel orders warn: {e}")
 
 
-def _place_limit_order(side: str, symbol: str, limit_price: float,
-                       sl_price: float, tp_price: float, qty_str: str) -> str:
-    resp = bc.post("/api/v2/mix/order/place-order", {
+def _place_plan_order(side: str, symbol: str, trigger_price: float,
+                      sl_price: float, tp_price: float, qty_str: str) -> str:
+    """
+    Place a trigger (plan) entry order via Bitget's place-plan-order endpoint.
+
+    For a LONG (buy), the order activates when mark price RISES to trigger_price —
+    i.e. price must be below trigger at placement time. This is a stop-buy trigger,
+    not a limit order, so it will NOT fill immediately if mark is already at or above
+    the trigger.
+
+    For a SHORT (sell), the order activates when mark price FALLS to trigger_price.
+
+    sl_price, tp_price: passed to Bitget as presetStopLossPrice/presetTakeProfitPrice.
+    If supported, the SL will be active immediately on fill (zero unprotected window).
+    _place_s5_exits() still runs after fill to set partial TP and trailing stop.
+
+    triggerType "mark_price" means Bitget uses the mark price for activation.
+    orderType "market" executes at market once triggered (avoids a second limit slip).
+    """
+    resp = bc.post("/api/v2/mix/order/place-plan-order", {
         "symbol":                symbol,
         "productType":           PRODUCT_TYPE,
         "marginMode":            "isolated",
         "marginCoin":            MARGIN_COIN,
         "side":                  side,
         "tradeSide":             "open",
-        "orderType":             "limit",
-        "timeInForceValue":      "gtc",
-        "price":                 _round_price(limit_price, symbol),
+        "orderType":             "market",
         "size":                  qty_str,
+        "triggerPrice":          _round_price(trigger_price, symbol),
+        "triggerType":           "mark_price",
+        "planType":              "normal_plan",
         "presetStopLossPrice":   _round_price(sl_price, symbol),
         "presetTakeProfitPrice": _round_price(tp_price, symbol),
     })
+    # Note: If Bitget accepts presetStopLossPrice/presetTakeProfitPrice on plan orders,
+    # the SL will be active immediately on fill (no unprotected window).
+    # _place_s5_exits() in bot.py will still run to set partial TP and trailing stop.
     if resp.get("code") != "00000":
-        raise RuntimeError(f"place_limit order failed: {resp}")
+        raise RuntimeError(f"place_plan_order failed: {resp}")
     return str(resp["data"]["orderId"])
 
 
 def place_limit_long(symbol: str, limit_price: float, sl_price: float,
                      tp_price: float, qty_str: str) -> str:
-    """Place a GTC limit buy order. Returns order_id string."""
-    return _place_limit_order("buy", symbol, limit_price, sl_price, tp_price, qty_str)
+    """Place a trigger (plan) buy order that activates when mark rises to limit_price. Returns order_id."""
+    return _place_plan_order("buy", symbol, limit_price, sl_price, tp_price, qty_str)
 
 
 def place_limit_short(symbol: str, limit_price: float, sl_price: float,
                       tp_price: float, qty_str: str) -> str:
-    """Place a GTC limit sell order. Returns order_id string."""
-    return _place_limit_order("sell", symbol, limit_price, sl_price, tp_price, qty_str)
+    """Place a trigger (plan) sell order that activates when mark falls to limit_price. Returns order_id."""
+    return _place_plan_order("sell", symbol, limit_price, sl_price, tp_price, qty_str)
 
 
 def cancel_order(symbol: str, order_id: str) -> None:
-    """Cancel an open limit order by order_id."""
-    resp = bc.post("/api/v2/mix/order/cancel-order", {
+    """Cancel an open plan (trigger) order by order_id."""
+    resp = bc.post("/api/v2/mix/order/cancel-plan-order", {
         "symbol":      symbol,
         "productType": PRODUCT_TYPE,
         "orderId":     order_id,
@@ -866,19 +887,62 @@ def cancel_order(symbol: str, order_id: str) -> None:
 
 def get_order_fill(symbol: str, order_id: str) -> dict:
     """
+    Poll the status of an S5 plan (trigger) order.
     Returns {"status": "live"|"filled"|"cancelled", "fill_price": float}
-    fill_price is 0.0 when status is "live" or "cancelled".
+
+    Plan order statuses (Bitget):
+      "not_trigger"  → waiting for trigger price — still live
+      "triggered"    → trigger hit, child market order placed — treat as filled
+                       (fill_price approximated from the position's avg entry)
+      "cancel"       → cancelled externally
     """
-    resp = bc.get("/api/v2/mix/order/detail",
-                  params={"symbol": symbol, "productType": PRODUCT_TYPE, "orderId": order_id})
+    resp = bc.get("/api/v2/mix/order/plan-orders",
+                  params={"symbol": symbol, "productType": PRODUCT_TYPE,
+                          "planType": "normal_plan", "isPlan": "plan"})
     if resp.get("code") != "00000":
-        raise RuntimeError(f"get_order_fill failed: {resp}")
-    data = resp["data"]
-    status = data.get("status", "")
-    if status in ("live", "new"):
-        return {"status": "live", "fill_price": 0.0}
-    if status == "filled":
-        return {"status": "filled", "fill_price": float(data["priceAvg"])}
+        raise RuntimeError(f"get_order_fill (plan) failed: {resp}")
+    orders = (resp.get("data") or {}).get("entrustedList", [])
+    for o in orders:
+        if str(o.get("orderId")) == str(order_id):
+            plan_status = o.get("planStatus", o.get("status", ""))
+            if plan_status in ("not_trigger",):
+                return {"status": "live", "fill_price": 0.0}
+            if plan_status in ("triggered", "executed"):
+                # Plan fired — get fill price from current position avg entry
+                fill_price = 0.0
+                try:
+                    pos_data = bc.get("/api/v2/mix/position/single-position", {
+                        "symbol": symbol, "productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN,
+                    })
+                    positions = (pos_data.get("data") or [])
+                    if positions:
+                        fill_price = float(positions[0].get("openPriceAvg", 0) or 0)
+                except Exception:
+                    pass
+                return {"status": "filled", "fill_price": fill_price}
+            return {"status": "cancelled", "fill_price": 0.0}
+    # Order not found in active plan list — check history (triggered orders move to history)
+    hist = bc.get("/api/v2/mix/order/plan-orders",
+                  params={"symbol": symbol, "productType": PRODUCT_TYPE,
+                          "planType": "normal_plan", "isPlan": "history"})
+    if hist.get("code") == "00000":
+        for o in (hist.get("data") or {}).get("entrustedList", []):
+            if str(o.get("orderId")) == str(order_id):
+                plan_status = o.get("planStatus", o.get("status", ""))
+                if plan_status in ("triggered", "executed"):
+                    fill_price = 0.0
+                    try:
+                        pos_data = bc.get("/api/v2/mix/position/single-position", {
+                            "symbol": symbol, "productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN,
+                        })
+                        positions = (pos_data.get("data") or [])
+                        if positions:
+                            fill_price = float(positions[0].get("openPriceAvg", 0) or 0)
+                    except Exception:
+                        pass
+                    return {"status": "filled", "fill_price": fill_price}
+                return {"status": "cancelled", "fill_price": 0.0}
+    # Not found anywhere — treat as cancelled
     return {"status": "cancelled", "fill_price": 0.0}
 
 

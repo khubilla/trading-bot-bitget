@@ -269,6 +269,8 @@ class MTFBot:
         # Entry watcher — pending signals waiting for price trigger (all strategies)
         self.pending_signals: dict[str, dict] = st.load_pending_signals()
         self._trade_lock = threading.Lock()
+        # S5: track when OB invalidation last fired per symbol so the scanner can't immediately re-queue
+        self._s5_ob_invalidated_at: dict[str, float] = {}
         # Priority evaluation — candidates collected each scan cycle (all strategies)
         self.candidates: list = []
 
@@ -1626,8 +1628,11 @@ class MTFBot:
                             and not st.is_strategy_on_cooldown(strategy, sym):
                         self._queue_s6_pending(candidate)
                 elif strategy == "S5":
+                    _ob_inv_ts = self._s5_ob_invalidated_at.get(sym, 0)
+                    _ob_inv_cooldown = 15 * 60  # 15 minutes — one full 15m candle
                     if sym not in self.pending_signals and not st.is_pair_paused(sym) \
-                            and not st.is_strategy_on_cooldown(strategy, sym):
+                            and not st.is_strategy_on_cooldown(strategy, sym) \
+                            and (time.time() - _ob_inv_ts) > _ob_inv_cooldown:
                         # S5 PENDING — queue with rank so entry watcher respects ordering
                         self._queue_s5_pending(
                             sym, sig, candidate["trigger"], candidate["sl"], candidate["tp"],
@@ -2059,18 +2064,57 @@ class MTFBot:
                 notional = equity * config_s5.S5_TRADE_SIZE_PCT * config_s5.S5_LEVERAGE
                 mark     = tr.get_mark_price(symbol)
                 # Validate against live mark — evaluate_s5 uses 15m close which may lag the live tick.
-                # Bitget rejects limit orders placed too far below (LONG) or above (SHORT) the current mark.
-                if side == "LONG" and trigger < mark * (1 - config_s5.S5_MAX_ENTRY_BUFFER):
+                # Guard 1a: OB already invalidated (price broke through the OB entirely)
+                if side == "LONG" and mark < ob_low * (1 - config_s5.S5_OB_INVALIDATION_BUFFER_PCT):
                     logger.warning(
-                        f"[S5][{symbol}] ⚠️ PENDING LONG skipped: trigger {trigger:.5f} is "
-                        f">{config_s5.S5_MAX_ENTRY_BUFFER * 100:.0f}% below live mark {mark:.5f}"
+                        f"[S5][{symbol}] ⚠️ PENDING LONG skipped: mark {mark:.5f} already < "
+                        f"ob_low {ob_low:.5f} — OB invalidated"
                     )
                     self.pending_signals.pop(symbol, None)
                     return
-                elif side == "SHORT" and trigger > mark * (1 + config_s5.S5_MAX_ENTRY_BUFFER):
+                elif side == "SHORT" and mark > ob_high * (1 + config_s5.S5_MAX_ENTRY_BUFFER):
+                    logger.warning(
+                        f"[S5][{symbol}] ⚠️ PENDING SHORT skipped: mark {mark:.5f} already > "
+                        f"ob_high {ob_high:.5f} — OB invalidated"
+                    )
+                    self.pending_signals.pop(symbol, None)
+                    return
+                # Guard 1b: price must not have already blown through the trigger.
+                # A LONG trigger at ob_high should only be placed if mark is still BELOW the trigger
+                # (i.e. price hasn't yet reached the OB). If mark is already past trigger,
+                # the trigger would fire immediately at the wrong price or thrash near the level.
+                # Allow mark == trigger as valid edge case (order may fill immediately).
+                if side == "LONG" and mark > trigger:
+                    logger.warning(
+                        f"[S5][{symbol}] ⚠️ PENDING LONG skipped: mark {mark:.5f} already > "
+                        f"trigger {trigger:.5f} — price already above OB entry"
+                    )
+                    self.pending_signals.pop(symbol, None)
+                    return
+                elif side == "SHORT" and mark < trigger:
+                    logger.warning(
+                        f"[S5][{symbol}] ⚠️ PENDING SHORT skipped: mark {mark:.5f} already < "
+                        f"trigger {trigger:.5f} — price already below OB entry"
+                    )
+                    self.pending_signals.pop(symbol, None)
+                    return
+                # Guard 2: Bitget rejects trigger orders placed too far from current mark.
+                # For trigger orders: LONG trigger must be above mark, SHORT trigger below mark.
+                # But not TOO far (Bitget exchange limit ≈10-15%, we use 10% to be safe).
+                max_trigger_distance = 0.10  # 10% max distance from mark to trigger
+                if side == "LONG" and trigger > mark * (1 + max_trigger_distance):
+                    logger.warning(
+                        f"[S5][{symbol}] ⚠️ PENDING LONG skipped: trigger {trigger:.5f} is "
+                        f">{max_trigger_distance * 100:.0f}% above live mark {mark:.5f} "
+                        f"(Bitget exchange limit)"
+                    )
+                    self.pending_signals.pop(symbol, None)
+                    return
+                elif side == "SHORT" and trigger < mark * (1 - max_trigger_distance):
                     logger.warning(
                         f"[S5][{symbol}] ⚠️ PENDING SHORT skipped: trigger {trigger:.5f} is "
-                        f">{config_s5.S5_MAX_ENTRY_BUFFER * 100:.0f}% above live mark {mark:.5f}"
+                        f">{max_trigger_distance * 100:.0f}% below live mark {mark:.5f} "
+                        f"(Bitget exchange limit)"
                     )
                     self.pending_signals.pop(symbol, None)
                     return
@@ -2091,6 +2135,49 @@ class MTFBot:
                 self.pending_signals.pop(symbol, None)
                 return
         else:
+            try:
+                mark = tr.get_mark_price(symbol)
+                # Paper mode: same guards as live mode
+                if side == "LONG" and mark < ob_low * (1 - config_s5.S5_OB_INVALIDATION_BUFFER_PCT):
+                    logger.warning(
+                        f"[S5][{symbol}] ⚠️ PENDING LONG skipped (paper): mark {mark:.5f} < ob_low {ob_low:.5f} — OB invalidated"
+                    )
+                    self.pending_signals.pop(symbol, None)
+                    return
+                elif side == "SHORT" and mark > ob_high * (1 + config_s5.S5_MAX_ENTRY_BUFFER):
+                    logger.warning(
+                        f"[S5][{symbol}] ⚠️ PENDING SHORT skipped (paper): mark {mark:.5f} > ob_high {ob_high:.5f} — OB invalidated"
+                    )
+                    self.pending_signals.pop(symbol, None)
+                    return
+                if side == "LONG" and mark > trigger:
+                    logger.warning(
+                        f"[S5][{symbol}] ⚠️ PENDING LONG skipped (paper): mark {mark:.5f} already > trigger {trigger:.5f}"
+                    )
+                    self.pending_signals.pop(symbol, None)
+                    return
+                elif side == "SHORT" and mark < trigger:
+                    logger.warning(
+                        f"[S5][{symbol}] ⚠️ PENDING SHORT skipped (paper): mark {mark:.5f} already < trigger {trigger:.5f}"
+                    )
+                    self.pending_signals.pop(symbol, None)
+                    return
+                # Guard 2: trigger too far from mark (Bitget exchange limit)
+                max_trigger_distance = 0.10
+                if side == "LONG" and trigger > mark * (1 + max_trigger_distance):
+                    logger.warning(
+                        f"[S5][{symbol}] ⚠️ PENDING LONG skipped (paper): trigger {trigger:.5f} > 10% above mark {mark:.5f}"
+                    )
+                    self.pending_signals.pop(symbol, None)
+                    return
+                elif side == "SHORT" and trigger < mark * (1 - max_trigger_distance):
+                    logger.warning(
+                        f"[S5][{symbol}] ⚠️ PENDING SHORT skipped (paper): trigger {trigger:.5f} > 10% below mark {mark:.5f}"
+                    )
+                    self.pending_signals.pop(symbol, None)
+                    return
+            except Exception:
+                pass
             self.pending_signals[symbol]["order_id"] = "PAPER"
         st.save_pending_signals(self.pending_signals)
         logger.info(
@@ -2549,11 +2636,11 @@ class MTFBot:
                         fill_info = None
                         if PAPER_MODE and order_id == "PAPER":
                             # Simulate fill by price comparison
-                            # LONG limit BUY fills when price DROPS to trigger (mark <= trigger)
-                            # SHORT limit SELL fills when price RISES to trigger (mark >= trigger)
+                            # LONG trigger fires when price RISES to trigger (mark >= trigger)
+                            # SHORT trigger fires when price FALLS to trigger (mark <= trigger)
                             paper_triggered = (
-                                (side == "LONG"  and mark <= sig["trigger"]) or
-                                (side == "SHORT" and mark >= sig["trigger"])
+                                (side == "LONG"  and mark >= sig["trigger"]) or
+                                (side == "SHORT" and mark <= sig["trigger"])
                             )
                             if paper_triggered:
                                 fill_info = {"status": "filled", "fill_price": sig["trigger"]}
@@ -2587,6 +2674,7 @@ class MTFBot:
                                 f"[S5][{symbol}] ❌ Limit cancelled — OB invalidated (mark={mark:.5f})"
                             )
                             st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
+                            self._s5_ob_invalidated_at[symbol] = time.time()
                             self.pending_signals.pop(symbol, None)
 
                         elif (side == "SHORT" and
@@ -2599,6 +2687,7 @@ class MTFBot:
                                 f"[S5][{symbol}] ❌ Limit cancelled — OB invalidated (mark={mark:.5f})"
                             )
                             st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
+                            self._s5_ob_invalidated_at[symbol] = time.time()
                             self.pending_signals.pop(symbol, None)
 
                         elif time.time() > sig["expires"]:

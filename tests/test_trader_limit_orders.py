@@ -26,11 +26,13 @@ def test_place_limit_long_sends_correct_payload(monkeypatch):
     trader.place_limit_long("BTCUSDT", 60000.0, 58000.0, 65000.0, "0.001")
 
     p = captured["payload"]
-    assert p["orderType"] == "limit"
-    assert p["timeInForceValue"] == "gtc"
+    assert p["orderType"] == "market"
+    assert p["triggerType"] == "mark_price"
+    assert p["planType"] == "normal_plan"
     assert p["side"] == "buy"
     assert "presetStopLossPrice" in p
     assert "presetTakeProfitPrice" in p
+    assert "triggerPrice" in p
 
 
 def test_place_limit_short_sends_sell_side(monkeypatch):
@@ -45,10 +47,12 @@ def test_place_limit_short_sends_sell_side(monkeypatch):
 
     p = captured["payload"]
     assert p["side"] == "sell"
-    assert p["orderType"] == "limit"
-    assert p["timeInForceValue"] == "gtc"
+    assert p["orderType"] == "market"
+    assert p["triggerType"] == "mark_price"
+    assert p["planType"] == "normal_plan"
     assert "presetStopLossPrice" in p
     assert "presetTakeProfitPrice" in p
+    assert "triggerPrice" in p
 
 
 def test_place_limit_long_raises_on_error(monkeypatch):
@@ -70,7 +74,7 @@ def test_cancel_order_calls_correct_endpoint(monkeypatch):
     monkeypatch.setattr(bc, "post", fake_post)
     trader.cancel_order("BTCUSDT", "ORD123")
 
-    assert captured["path"] == "/api/v2/mix/order/cancel-order"
+    assert captured["path"] == "/api/v2/mix/order/cancel-plan-order"
     assert "orderId" in captured["payload"]
     assert captured["payload"]["orderId"] == "ORD123"
 
@@ -84,28 +88,75 @@ def test_cancel_order_raises_on_error(monkeypatch):
 # ── get_order_fill ────────────────────────────────────────────────── #
 
 def test_get_order_fill_live(monkeypatch):
-    monkeypatch.setattr(bc, "get", lambda path, params: {"code": "00000", "data": {"status": "live"}})
+    """Plan order with not_trigger status is treated as live."""
+    def fake_get(path, params):
+        return {
+            "code": "00000",
+            "data": {
+                "entrustedList": [
+                    {"orderId": "ORD123", "planStatus": "not_trigger"}
+                ]
+            }
+        }
+    monkeypatch.setattr(bc, "get", fake_get)
     result = trader.get_order_fill("BTCUSDT", "ORD123")
     assert result == {"status": "live", "fill_price": 0.0}
 
 
 def test_get_order_fill_filled(monkeypatch):
-    monkeypatch.setattr(bc, "get", lambda path, params: {
-        "code": "00000",
-        "data": {"status": "filled", "priceAvg": "0.07951"}
-    })
+    """Plan order with triggered status fetches fill price from position."""
+    call_count = {"n": 0}
+
+    def fake_get(path, params):
+        call_count["n"] += 1
+        if call_count["n"] == 1:  # First call to plan-orders
+            return {
+                "code": "00000",
+                "data": {
+                    "entrustedList": [
+                        {"orderId": "ORD123", "planStatus": "triggered"}
+                    ]
+                }
+            }
+        else:  # Second call to single-position
+            return {
+                "code": "00000",
+                "data": [{"openPriceAvg": "60000.0"}]
+            }
+
+    monkeypatch.setattr(bc, "get", fake_get)
     result = trader.get_order_fill("BTCUSDT", "ORD123")
-    assert result == {"status": "filled", "fill_price": 0.07951}
+    assert result == {"status": "filled", "fill_price": 60000.0}
 
 
 def test_get_order_fill_cancelled(monkeypatch):
-    monkeypatch.setattr(bc, "get", lambda path, params: {"code": "00000", "data": {"status": "cancelled"}})
+    """Plan order with cancel status is treated as cancelled."""
+    def fake_get(path, params):
+        return {
+            "code": "00000",
+            "data": {
+                "entrustedList": [
+                    {"orderId": "ORD123", "planStatus": "cancel"}
+                ]
+            }
+        }
+    monkeypatch.setattr(bc, "get", fake_get)
     result = trader.get_order_fill("BTCUSDT", "ORD123")
     assert result == {"status": "cancelled", "fill_price": 0.0}
 
 
 def test_get_order_fill_new_status_treated_as_live(monkeypatch):
-    monkeypatch.setattr(bc, "get", lambda path, params: {"code": "00000", "data": {"status": "new"}})
+    """Plan order with not_trigger status (pending) is treated as live."""
+    def fake_get(path, params):
+        return {
+            "code": "00000",
+            "data": {
+                "entrustedList": [
+                    {"orderId": "ORD123", "status": "not_trigger"}
+                ]
+            }
+        }
+    monkeypatch.setattr(bc, "get", fake_get)
     result = trader.get_order_fill("BTCUSDT", "ORD123")
     assert result == {"status": "live", "fill_price": 0.0}
 

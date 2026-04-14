@@ -50,7 +50,7 @@ INITIAL_BALANCE = 160.0  # Starting balance in USDT (update this to your actual 
 
 # --- Market Sentiment Filter ---
 # Volume-weighted: only LONG when majority green, only SHORT when majority red
-SENTIMENT_THRESHOLD = 0.75   # >75% green volume → BULLISH; <25% → BEARISH
+SENTIMENT_THRESHOLD = 0.70   # >70% green volume → BULLISH; <30% → BEARISH
 SENTIMENT_SCAN_SEC  = 60     # Re-calculate alongside pair scan
 
 # --- Claude Trade Filter ---

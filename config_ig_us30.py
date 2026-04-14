@@ -12,8 +12,8 @@ CONFIG = {
     "point_value":   1.0,  # USD per point per contract
 
     # Session window (hour, minute) in ET
-    "session_start": (9, 30),
-    "session_end":   (12, 30),
+    "session_start": (0, 0),
+    "session_end":   (23, 59),
 
     # Candle fetch limits
     "daily_limit": 100,

@@ -87,7 +87,7 @@ def test_place_limit_short_sends_sell_direction(monkeypatch):
 
 
 def test_place_limit_long_includes_sl_tp(monkeypatch):
-    """Payload must contain stopLevel and limitLevel."""
+    """Payload must contain stopDistance and limitDistance (relative to entry level)."""
     captured = {}
 
     def fake_post(endpoint, body, version):
@@ -100,10 +100,11 @@ def test_place_limit_long_includes_sl_tp(monkeypatch):
     _make_session(monkeypatch, post_side_effect=fake_post, get_side_effect=fake_get)
     ig_client.place_limit_long("CS.D.BITCOIN.CFD.IP", 50000.0, 48000.0, 55000.0, 1.0)
 
-    assert "stopLevel" in captured["body"]
-    assert "limitLevel" in captured["body"]
-    assert captured["body"]["stopLevel"] == 48000.0
-    assert captured["body"]["limitLevel"] == 55000.0
+    assert "stopDistance" in captured["body"]
+    assert "limitDistance" in captured["body"]
+    # For LONG: stopDistance = level - sl, limitDistance = tp - level
+    assert captured["body"]["stopDistance"] == 2000.0
+    assert captured["body"]["limitDistance"] == 5000.0
 
 
 # ── cancel_working_order ──────────────────────────────────────────── #

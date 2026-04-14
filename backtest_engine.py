@@ -467,15 +467,19 @@ class MockTrader:
         self._pending_orders.pop(order_id, None)
 
     def get_order_fill(self, symbol: str, order_id: str) -> dict:
-        """Check if current bar crossed the limit price."""
+        """
+        Check if current bar triggered the plan order.
+        LONG trigger: fires when mark rises to or above limit_price (from below).
+        SHORT trigger: fires when mark falls to or below limit_price (from above).
+        """
         order = self._pending_orders.get(order_id)
         if not order:
             return {"status": "cancelled", "fill_price": 0.0}
         mark = self.get_mark_price(symbol)
         lp   = order["limit_price"]
-        if order["side"] == "LONG" and mark <= lp:
+        if order["side"] == "LONG" and mark >= lp:
             return {"status": "filled", "fill_price": lp}
-        if order["side"] == "SHORT" and mark >= lp:
+        if order["side"] == "SHORT" and mark <= lp:
             return {"status": "filled", "fill_price": lp}
         return {"status": "live", "fill_price": 0.0}
 

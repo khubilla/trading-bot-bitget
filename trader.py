@@ -59,18 +59,27 @@ def _round_qty(qty: float, symbol: str) -> str:
 def get_candles(symbol: str, interval: str, limit: int = 100) -> pd.DataFrame:
     if interval in ("1D", "1d"):
         return get_daily_candles_utc(symbol, limit)
-    data = bc.get_public(
-        "/api/v2/mix/market/candles",
-        params={"symbol": symbol, "productType": PRODUCT_TYPE,
-                "granularity": interval, "limit": str(limit)}
-    )
-    rows = data.get("data", [])
-    if not rows:
+    try:
+        data = bc.get_public(
+            "/api/v2/mix/market/candles",
+            params={"symbol": symbol, "productType": PRODUCT_TYPE,
+                    "granularity": interval, "limit": str(limit)}
+        )
+        rows = data.get("data", [])
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows, columns=["ts","open","high","low","close","vol","quote_vol"])
+        df[["open","high","low","close","vol"]] = df[["open","high","low","close","vol"]].astype(float)
+        df["ts"] = df["ts"].astype(int)
+        return df.sort_values("ts").reset_index(drop=True)
+    except RuntimeError as e:
+        # Symbol might be delisted/invalid (e.g., Bitget error 48001)
+        # Return empty DataFrame so bot continues gracefully
+        if "48001" in str(e) or "Parameter validation failed" in str(e):
+            logger.warning(f"[{symbol}] Symbol invalid/delisted, skipping candles: {e}")
+        else:
+            logger.warning(f"[{symbol}] get_candles error: {e}")
         return pd.DataFrame()
-    df = pd.DataFrame(rows, columns=["ts","open","high","low","close","vol","quote_vol"])
-    df[["open","high","low","close","vol"]] = df[["open","high","low","close","vol"]].astype(float)
-    df["ts"] = df["ts"].astype(int)
-    return df.sort_values("ts").reset_index(drop=True)
 
 
 _ccxt_ex = None
@@ -82,29 +91,34 @@ def get_daily_candles_utc(symbol: str, limit: int = 100) -> pd.DataFrame:
     """
     import ccxt
     global _ccxt_ex
-    if _ccxt_ex is None:
-        _ccxt_ex = ccxt.bitget({"options": {"defaultType": "swap"}})
-        _ccxt_ex.load_markets()
-
-    base = symbol.replace("USDT", "")
-    ccxt_symbol = f"{base}/USDT:USDT"
-    ohlcv = _ccxt_ex.fetch_ohlcv(ccxt_symbol, "1d", limit=limit)
-    if not ohlcv:
-        return pd.DataFrame()
-    rows = [{"ts": c[0], "open": float(c[1]), "high": float(c[2]),
-             "low": float(c[3]), "close": float(c[4]), "vol": float(c[5])}
-            for c in ohlcv]
-    df = pd.DataFrame(rows)
-    df = df.sort_values("ts").reset_index(drop=True)
-    # Patch today's candle close with live mark price
     try:
-        mark = get_mark_price(symbol)
-        df.at[df.index[-1], "close"] = mark
-        df.at[df.index[-1], "high"]  = max(float(df.iloc[-1]["high"]), mark)
-        df.at[df.index[-1], "low"]   = min(float(df.iloc[-1]["low"]),  mark)
-    except Exception:
-        pass
-    return df
+        if _ccxt_ex is None:
+            _ccxt_ex = ccxt.bitget({"options": {"defaultType": "swap"}})
+            _ccxt_ex.load_markets()
+
+        base = symbol.replace("USDT", "")
+        ccxt_symbol = f"{base}/USDT:USDT"
+        ohlcv = _ccxt_ex.fetch_ohlcv(ccxt_symbol, "1d", limit=limit)
+        if not ohlcv:
+            return pd.DataFrame()
+        rows = [{"ts": c[0], "open": float(c[1]), "high": float(c[2]),
+                 "low": float(c[3]), "close": float(c[4]), "vol": float(c[5])}
+                for c in ohlcv]
+        df = pd.DataFrame(rows)
+        df = df.sort_values("ts").reset_index(drop=True)
+        # Patch today's candle close with live mark price
+        try:
+            mark = get_mark_price(symbol)
+            df.at[df.index[-1], "close"] = mark
+            df.at[df.index[-1], "high"]  = max(float(df.iloc[-1]["high"]), mark)
+            df.at[df.index[-1], "low"]   = min(float(df.iloc[-1]["low"]),  mark)
+        except Exception:
+            pass
+        return df
+    except Exception as e:
+        # Symbol might be delisted/invalid, or ccxt error
+        logger.warning(f"[{symbol}] get_daily_candles_utc error: {e}")
+        return pd.DataFrame()
 
 
 def get_mark_price(symbol: str) -> float:
@@ -832,14 +846,14 @@ def _place_plan_order(side: str, symbol: str, trigger_price: float,
 
     For a SHORT (sell), the order activates when mark price FALLS to trigger_price.
 
-    sl_price, tp_price: passed to Bitget as presetStopLossPrice/presetTakeProfitPrice.
-    If supported, the SL will be active immediately on fill (zero unprotected window).
+    sl_price, tp_price: passed to Bitget as stopLossTriggerPrice/stopSurplusTriggerPrice.
+    These will be active immediately on fill (zero unprotected window).
     _place_s5_exits() still runs after fill to set partial TP and trailing stop.
 
     triggerType "mark_price" means Bitget uses the mark price for activation.
     orderType "market" executes at market once triggered (avoids a second limit slip).
     """
-    resp = bc.post("/api/v2/mix/order/place-plan-order", {
+    body = {
         "symbol":                symbol,
         "productType":           PRODUCT_TYPE,
         "marginMode":            "isolated",
@@ -851,11 +865,17 @@ def _place_plan_order(side: str, symbol: str, trigger_price: float,
         "triggerPrice":          _round_price(trigger_price, symbol),
         "triggerType":           "mark_price",
         "planType":              "normal_plan",
-        "presetStopLossPrice":   _round_price(sl_price, symbol),
-        "presetTakeProfitPrice": _round_price(tp_price, symbol),
-    })
-    # Note: If Bitget accepts presetStopLossPrice/presetTakeProfitPrice on plan orders,
-    # the SL will be active immediately on fill (no unprotected window).
+        "stopLossTriggerPrice":  _round_price(sl_price, symbol),
+        "stopLossExecutePrice":  "",  # Empty = market order execution on SL trigger
+        "stopLossTriggerType":   "mark_price",
+        "stopSurplusTriggerPrice": _round_price(tp_price, symbol),
+        "stopSurplusExecutePrice": "",  # Empty = market order execution on TP trigger
+        "stopSurplusTriggerType": "mark_price",
+    }
+    resp = bc.post("/api/v2/mix/order/place-plan-order", body)
+    # Note: stopLossTriggerPrice and stopSurplusTriggerPrice are the correct parameters
+    # for plan orders (not presetStopLossPrice/presetTakeProfitPrice which are for limit orders).
+    # The SL will be active immediately on fill (no unprotected window).
     # _place_s5_exits() in bot.py will still run to set partial TP and trailing stop.
     if resp.get("code") != "00000":
         raise RuntimeError(f"place_plan_order failed: {resp}")

@@ -2603,20 +2603,47 @@ class MTFBot:
                         ps = st.get_pair_state(symbol)
                         if ps.get("s5_signal", "HOLD") != "PENDING":
                             order_id = sig.get("order_id")
-                            # Check fill status BEFORE cancelling — if already filled, register the trade
+                            # Check fill status BEFORE cancelling
+                            # If get_order_fill() fails (404), check if position actually exists
                             fill_info = None
                             try:
                                 fill_info = tr.get_order_fill(symbol, order_id)
                             except Exception as e:
                                 logger.warning(f"[S5][{symbol}] fill-check error: {e}")
+                                # When get_order_fill() fails (404), the order might be filled
+                                # Check if an open position exists for this symbol
+                                try:
+                                    positions = tr.get_all_open_positions()
+                                    if symbol in positions:
+                                        pos = positions[symbol]
+                                        expected_qty = float(sig.get("qty_str", 0))
+                                        actual_qty = pos["qty"]
+                                        # If position exists with matching qty, treat as filled
+                                        if abs(actual_qty - expected_qty) < 0.01:
+                                            logger.warning(
+                                                f"[S5][{symbol}] Fill-check failed but position exists! "
+                                                f"qty={actual_qty} entry={pos['entry_price']:.5f} — recovering"
+                                            )
+                                            fill_info = {
+                                                "status": "filled",
+                                                "fill_price": pos["entry_price"]
+                                            }
+                                except Exception as pos_err:
+                                    logger.warning(f"[S5][{symbol}] Position check error: {pos_err}")
+
                             if fill_info and fill_info["status"] == "filled":
-                                logger.info(f"[S5][{symbol}] Order already filled despite signal gone — registering trade")
+                                logger.info(
+                                    f"[S5][{symbol}] ✅ Order filled despite signal gone "
+                                    f"@ {fill_info['fill_price']:.5f} — registering trade"
+                                )
                                 with self._trade_lock:
                                     if symbol not in self.active_positions and not st.is_pair_paused(symbol):
                                         self._handle_limit_filled(symbol, sig, fill_info["fill_price"], balance)
                                 self.pending_signals.pop(symbol, None)
                                 st.save_pending_signals(self.pending_signals)
                                 continue
+
+                            # Only cancel if fill-check failed AND no position exists
                             try:
                                 tr.cancel_order(symbol, order_id)
                             except Exception as e:
@@ -2666,38 +2693,113 @@ class MTFBot:
 
                         elif (side == "LONG"  and
                               mark < sig["ob_low"] * (1 - config_s5.S5_OB_INVALIDATION_BUFFER_PCT)):
+                            cancel_success = False
                             try:
                                 tr.cancel_order(symbol, order_id)
+                                cancel_success = True
                             except Exception as e:
                                 logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
-                            logger.info(
-                                f"[S5][{symbol}] ❌ Limit cancelled — OB invalidated (mark={mark:.5f})"
-                            )
-                            st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
-                            self._s5_ob_invalidated_at[symbol] = time.time()
-                            self.pending_signals.pop(symbol, None)
+                                # Cancel failed — order might have filled at the exact moment
+                                # Check if position exists
+                                try:
+                                    positions = tr.get_all_open_positions()
+                                    if symbol in positions:
+                                        pos = positions[symbol]
+                                        expected_qty = float(sig.get("qty_str", 0))
+                                        actual_qty = pos["qty"]
+                                        if abs(actual_qty - expected_qty) < 0.01:
+                                            logger.warning(
+                                                f"[S5][{symbol}] Cancel failed but position exists! "
+                                                f"qty={actual_qty} entry={pos['entry_price']:.5f} — recovering"
+                                            )
+                                            with self._trade_lock:
+                                                if symbol not in self.active_positions and not st.is_pair_paused(symbol):
+                                                    self._handle_limit_filled(symbol, sig, pos['entry_price'], balance)
+                                            self.pending_signals.pop(symbol, None)
+                                            st.save_pending_signals(self.pending_signals)
+                                            continue
+                                except Exception as pos_err:
+                                    logger.warning(f"[S5][{symbol}] Position check after cancel error: {pos_err}")
+
+                            if cancel_success:
+                                logger.info(
+                                    f"[S5][{symbol}] ❌ Limit cancelled — OB invalidated (mark={mark:.5f})"
+                                )
+                                st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
+                                self._s5_ob_invalidated_at[symbol] = time.time()
+                                self.pending_signals.pop(symbol, None)
 
                         elif (side == "SHORT" and
                               mark > sig["ob_high"] * (1 + config_s5.S5_MAX_ENTRY_BUFFER)):
+                            cancel_success = False
                             try:
                                 tr.cancel_order(symbol, order_id)
+                                cancel_success = True
                             except Exception as e:
                                 logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
-                            logger.info(
-                                f"[S5][{symbol}] ❌ Limit cancelled — OB invalidated (mark={mark:.5f})"
-                            )
-                            st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
-                            self._s5_ob_invalidated_at[symbol] = time.time()
-                            self.pending_signals.pop(symbol, None)
+                                # Cancel failed — order might have filled at the exact moment
+                                # Check if position exists
+                                try:
+                                    positions = tr.get_all_open_positions()
+                                    if symbol in positions:
+                                        pos = positions[symbol]
+                                        expected_qty = float(sig.get("qty_str", 0))
+                                        actual_qty = pos["qty"]
+                                        if abs(actual_qty - expected_qty) < 0.01:
+                                            logger.warning(
+                                                f"[S5][{symbol}] Cancel failed but position exists! "
+                                                f"qty={actual_qty} entry={pos['entry_price']:.5f} — recovering"
+                                            )
+                                            with self._trade_lock:
+                                                if symbol not in self.active_positions and not st.is_pair_paused(symbol):
+                                                    self._handle_limit_filled(symbol, sig, pos['entry_price'], balance)
+                                            self.pending_signals.pop(symbol, None)
+                                            st.save_pending_signals(self.pending_signals)
+                                            continue
+                                except Exception as pos_err:
+                                    logger.warning(f"[S5][{symbol}] Position check after cancel error: {pos_err}")
+
+                            if cancel_success:
+                                logger.info(
+                                    f"[S5][{symbol}] ❌ Limit cancelled — OB invalidated (mark={mark:.5f})"
+                                )
+                                st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
+                                self._s5_ob_invalidated_at[symbol] = time.time()
+                                self.pending_signals.pop(symbol, None)
 
                         elif time.time() > sig["expires"]:
+                            cancel_success = False
                             try:
                                 tr.cancel_order(symbol, order_id)
+                                cancel_success = True
                             except Exception as e:
                                 logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
-                            logger.info(f"[S5][{symbol}] ⏰ Limit cancelled — expired")
-                            st.add_scan_log(f"[S5][{symbol}] ⏰ Limit expired — cancelled", "INFO")
-                            self.pending_signals.pop(symbol, None)
+                                # Cancel failed — order might have filled at the exact moment
+                                # Check if position exists
+                                try:
+                                    positions = tr.get_all_open_positions()
+                                    if symbol in positions:
+                                        pos = positions[symbol]
+                                        expected_qty = float(sig.get("qty_str", 0))
+                                        actual_qty = pos["qty"]
+                                        if abs(actual_qty - expected_qty) < 0.01:
+                                            logger.warning(
+                                                f"[S5][{symbol}] Cancel failed but position exists! "
+                                                f"qty={actual_qty} entry={pos['entry_price']:.5f} — recovering"
+                                            )
+                                            with self._trade_lock:
+                                                if symbol not in self.active_positions and not st.is_pair_paused(symbol):
+                                                    self._handle_limit_filled(symbol, sig, pos['entry_price'], balance)
+                                            self.pending_signals.pop(symbol, None)
+                                            st.save_pending_signals(self.pending_signals)
+                                            continue
+                                except Exception as pos_err:
+                                    logger.warning(f"[S5][{symbol}] Position check after cancel error: {pos_err}")
+
+                            if cancel_success:
+                                logger.info(f"[S5][{symbol}] ⏰ Limit cancelled — expired")
+                                st.add_scan_log(f"[S5][{symbol}] ⏰ Limit expired — cancelled", "INFO")
+                                self.pending_signals.pop(symbol, None)
 
                     elif strategy == "S2":
                         # ── S2: breakout trigger + invalidation ───────── #

@@ -698,10 +698,22 @@ class IGBot:
             logger.warning(f"[{name}] Candle fetch returned empty — skipping tick")
             return
 
-        # 6. Derive allowed_direction from daily EMA
+        # 6. Derive allowed_direction from daily EMA waterfall (must match strategy.py logic)
         ema_fast = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_fast"]).iloc[-1])
+        ema_med  = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_med"]).iloc[-1])
         ema_slow = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_slow"]).iloc[-1])
-        allowed_direction = "BULLISH" if ema_fast > ema_slow else "BEARISH"
+
+        ema_bull = ema_fast > ema_med > ema_slow
+        ema_bear = ema_slow > ema_med > ema_fast
+
+        if ema_bull:
+            allowed_direction = "BULLISH"
+        elif ema_bear:
+            allowed_direction = "BEARISH"
+        else:
+            # EMAs not in waterfall alignment - default based on fast vs slow
+            # Strategy will still reject entry until full waterfall alignment achieved
+            allowed_direction = "BULLISH" if ema_fast > ema_slow else "BEARISH"
 
         # 7. Evaluate S5
         epic = instrument["epic"]

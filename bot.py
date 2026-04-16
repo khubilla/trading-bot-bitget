@@ -2593,6 +2593,7 @@ class MTFBot:
                     # Already in a trade — clear the pending signal
                     if symbol in self.active_positions:
                         self.pending_signals.pop(symbol, None)
+                        st.save_pending_signals(self.pending_signals)
                         continue
 
                     strategy = sig.get("strategy")
@@ -2644,13 +2645,21 @@ class MTFBot:
                                 continue
 
                             # Only cancel if fill-check failed AND no position exists
+                            cancel_success = False
                             try:
                                 tr.cancel_order(symbol, order_id)
+                                cancel_success = True
                             except Exception as e:
                                 logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
-                            logger.info(f"[S5][{symbol}] 🚫 Signal gone — limit cancelled")
-                            st.add_scan_log(f"[S5][{symbol}] 🚫 Signal gone — limit cancelled", "INFO")
-                            self.pending_signals.pop(symbol, None)
+                            if cancel_success:
+                                logger.info(f"[S5][{symbol}] 🚫 Signal gone — limit cancelled")
+                                st.add_scan_log(f"[S5][{symbol}] 🚫 Signal gone — limit cancelled", "INFO")
+                                self.pending_signals.pop(symbol, None)
+                                st.save_pending_signals(self.pending_signals)
+                            else:
+                                logger.warning(
+                                    f"[S5][{symbol}] Signal gone but cancel unconfirmed — keeping pending for retry"
+                                )
                             continue
                         order_id = sig.get("order_id")
                         try:
@@ -2678,16 +2687,47 @@ class MTFBot:
                                 fill_info = tr.get_order_fill(symbol, order_id)
                             except Exception as e:
                                 logger.warning(f"[S5][{symbol}] get_order_fill error: {e}")
-                                continue
+                                try:
+                                    positions = tr.get_all_open_positions()
+                                    if symbol in positions:
+                                        pos = positions[symbol]
+                                        expected_qty = float(sig.get("qty_str", 0))
+                                        actual_qty = pos["qty"]
+                                        if abs(actual_qty - expected_qty) < 0.01 and pos["entry_price"] > 0:
+                                            fill_info = {"status": "filled", "fill_price": pos["entry_price"]}
+                                            logger.warning(
+                                                f"[S5][{symbol}] fill status unavailable but position exists — recovering fill"
+                                            )
+                                        else:
+                                            continue
+                                    else:
+                                        continue
+                                except Exception as pos_err:
+                                    logger.warning(f"[S5][{symbol}] position recovery after fill-check error failed: {pos_err}")
+                                    continue
 
                         if fill_info["status"] == "filled":
+                            fill_price = float(fill_info.get("fill_price") or 0.0)
+                            if fill_price <= 0:
+                                try:
+                                    positions = tr.get_all_open_positions()
+                                    if symbol in positions:
+                                        fill_price = float(positions[symbol].get("entry_price") or 0.0)
+                                except Exception as pos_err:
+                                    logger.warning(f"[S5][{symbol}] fill-price recovery failed: {pos_err}")
+                            if fill_price <= 0:
+                                logger.warning(
+                                    f"[S5][{symbol}] filled status received with invalid fill_price={fill_price}; will retry"
+                                )
+                                continue
                             with self._trade_lock:
                                 if symbol in self.active_positions:
                                     self.pending_signals.pop(symbol, None)
+                                    st.save_pending_signals(self.pending_signals)
                                     continue
                                 if st.is_pair_paused(symbol):
                                     continue
-                                self._handle_limit_filled(symbol, sig, fill_info["fill_price"], balance)
+                                self._handle_limit_filled(symbol, sig, fill_price, balance)
                             self.pending_signals.pop(symbol, None)
                             st.save_pending_signals(self.pending_signals)
 
@@ -2728,6 +2768,7 @@ class MTFBot:
                                 st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
                                 self._s5_ob_invalidated_at[symbol] = time.time()
                                 self.pending_signals.pop(symbol, None)
+                                st.save_pending_signals(self.pending_signals)
 
                         elif (side == "SHORT" and
                               mark > sig["ob_high"] * (1 + config_s5.S5_MAX_ENTRY_BUFFER)):
@@ -2800,6 +2841,7 @@ class MTFBot:
                                 logger.info(f"[S5][{symbol}] ⏰ Limit cancelled — expired")
                                 st.add_scan_log(f"[S5][{symbol}] ⏰ Limit expired — cancelled", "INFO")
                                 self.pending_signals.pop(symbol, None)
+                                st.save_pending_signals(self.pending_signals)
 
                     elif strategy == "S2":
                         # ── S2: breakout trigger + invalidation ───────── #
@@ -3015,6 +3057,9 @@ class MTFBot:
 
     def _handle_limit_filled(self, symbol: str, sig: dict, fill_price: float, balance: float) -> None:
         """Called when a GTC limit order fills. Sets up exits and logs the trade."""
+        if fill_price <= 0:
+            logger.warning(f"[S5][{symbol}] invalid fill_price={fill_price}; skipping fill handling until confirmed")
+            return
         side     = sig["side"]
         sl_price = sig["sl"]
         tp_price = sig["tp"]

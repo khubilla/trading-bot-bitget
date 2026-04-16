@@ -11,7 +11,7 @@ import pandas as pd
 
 import bitget_client as bc
 from config import PRODUCT_TYPE
-from strategy import evaluate_s5
+from strategies.s5 import evaluate_s5
 
 logger = logging.getLogger(__name__)
 

@@ -71,7 +71,6 @@ def test_tick_places_limit_on_pending_long(monkeypatch):
     monkeypatch.setattr(bot, "_get_candles", lambda interval, limit: dummy_df)
 
     # Patch calculate_ema so ema_fast > ema_slow (BULLISH)
-    import strategy as strat
     monkeypatch.setattr(ig_bot, "calculate_ema", lambda series, period: pd.Series([100.0]))
 
     # evaluate_s5 returns PENDING_LONG

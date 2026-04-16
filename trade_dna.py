@@ -21,7 +21,7 @@ def ema_slope(closes: pd.Series, period: int, n: int = 10) -> str:
     """
     if len(closes) < period + n:
         return ""
-    from strategy import calculate_ema
+    from indicators import calculate_ema
     ema = calculate_ema(closes, period)
     v_now  = float(ema.iloc[-1])
     v_prev = float(ema.iloc[-n])
@@ -102,7 +102,7 @@ def _s1_fields(candles: dict) -> dict:
     m3    = candles.get("m3")
 
     if not _is_empty(daily):
-        from strategy import calculate_ema, calculate_adx
+        from indicators import calculate_ema, calculate_adx
         closes_d = _closes_from(daily)
         ema_d    = calculate_ema(closes_d, 20)
         out["snap_trend_daily_ema_slope"]    = ema_slope(closes_d, 20)
@@ -114,14 +114,14 @@ def _s1_fields(candles: dict) -> dict:
             out["snap_trend_daily_adx_state"] = ""
 
     if not _is_empty(h1):
-        from strategy import calculate_ema
+        from indicators import calculate_ema
         closes_h = _closes_from(h1)
         ema_h    = calculate_ema(closes_h, 20)
         out["snap_trend_h1_ema_slope"]    = ema_slope(closes_h, 20)
         out["snap_trend_h1_price_vs_ema"] = price_vs_ema(float(closes_h.iloc[-1]), float(ema_h.iloc[-1]))
 
     if not _is_empty(m3):
-        from strategy import calculate_ema
+        from indicators import calculate_ema
         closes_m3 = _closes_from(m3)
         ema_m3    = calculate_ema(closes_m3, 20)
         out["snap_trend_m3_price_vs_ema"] = price_vs_ema(float(closes_m3.iloc[-1]), float(ema_m3.iloc[-1]))
@@ -134,7 +134,7 @@ def _s2_fields(candles: dict) -> dict:
     daily = candles.get("daily")
     if _is_empty(daily):
         return out
-    from strategy import calculate_ema, calculate_rsi
+    from indicators import calculate_ema, calculate_rsi
     closes_d = _closes_from(daily)
     ema_d    = calculate_ema(closes_d, 20)
     rsi_d    = calculate_rsi(closes_d)
@@ -149,7 +149,7 @@ def _s3_fields(candles: dict) -> dict:
     m15 = candles.get("m15")
     if _is_empty(m15):
         return out
-    from strategy import calculate_ema, calculate_adx
+    from indicators import calculate_ema, calculate_adx
     closes_m15 = _closes_from(m15)
     ema_m15    = calculate_ema(closes_m15, 20)
     out["snap_trend_m15_ema_slope"]    = ema_slope(closes_m15, 20)
@@ -168,7 +168,7 @@ def _s4_fields(candles: dict) -> dict:
     h1    = candles.get("h1")
     if _is_empty(daily):
         return out
-    from strategy import calculate_ema, calculate_rsi
+    from indicators import calculate_ema, calculate_rsi
     closes_d = _closes_from(daily)
     ema_d    = calculate_ema(closes_d, 20)
     rsi_d    = calculate_rsi(closes_d)
@@ -176,7 +176,7 @@ def _s4_fields(candles: dict) -> dict:
     out["snap_trend_daily_price_vs_ema"] = price_vs_ema(float(closes_d.iloc[-1]), float(ema_d.iloc[-1]))
     out["snap_trend_daily_rsi_bucket"]   = rsi_bucket(float(rsi_d.iloc[-1]))
     if not _is_empty(h1):
-        from strategy import calculate_ema as _ema
+        from indicators import calculate_ema as _ema
         closes_h = _closes_from(h1)
         ema_h    = _ema(closes_h, 20)
         out["snap_trend_h1_ema_slope"]    = ema_slope(closes_h, 20)
@@ -190,19 +190,19 @@ def _s5_fields(candles: dict) -> dict:
     h1    = candles.get("h1")
     m15   = candles.get("m15")
     if not _is_empty(daily):
-        from strategy import calculate_ema
+        from indicators import calculate_ema
         closes_d = _closes_from(daily)
         ema_d    = calculate_ema(closes_d, 20)
         out["snap_trend_daily_ema_slope"]    = ema_slope(closes_d, 20)
         out["snap_trend_daily_price_vs_ema"] = price_vs_ema(float(closes_d.iloc[-1]), float(ema_d.iloc[-1]))
     if not _is_empty(h1):
-        from strategy import calculate_ema
+        from indicators import calculate_ema
         closes_h = _closes_from(h1)
         ema_h    = calculate_ema(closes_h, 20)
         out["snap_trend_h1_ema_slope"]    = ema_slope(closes_h, 20)
         out["snap_trend_h1_price_vs_ema"] = price_vs_ema(float(closes_h.iloc[-1]), float(ema_h.iloc[-1]))
     if not _is_empty(m15):
-        from strategy import calculate_ema
+        from indicators import calculate_ema
         closes_m15 = _closes_from(m15)
         ema_m15    = calculate_ema(closes_m15, 20)
         out["snap_trend_m15_ema_slope"]    = ema_slope(closes_m15, 20)
@@ -215,7 +215,7 @@ def _s6_fields(candles: dict) -> dict:
     daily = candles.get("daily")
     if _is_empty(daily):
         return out
-    from strategy import calculate_ema, calculate_rsi
+    from indicators import calculate_ema, calculate_rsi
     closes_d = _closes_from(daily)
     ema_d    = calculate_ema(closes_d, 20)
     rsi_d    = calculate_rsi(closes_d)

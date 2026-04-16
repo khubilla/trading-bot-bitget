@@ -91,11 +91,12 @@ config_s3_mod.S3_TRAILING_TRIGGER_PCT = 0.10
 config_s3_mod.S3_TRAILING_RANGE_PCT   = 10
 sys.modules["config_s3"] = config_s3_mod
 
-from strategy import (
+from indicators import (
     calculate_rsi, calculate_ema, calculate_adx,
-    detect_consolidation, _body_pct, _upper_wick, _body_size,
     calculate_stoch, calculate_macd,
 )
+from tools import body_pct, upper_wick, body_size
+from strategies.s1 import detect_consolidation
 
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
@@ -559,7 +560,7 @@ def backtest_s2_symbol(sym: str, df: pd.DataFrame,
         dbg["rsi_pass"] += 1
 
         lookback  = window.iloc[-(S2_BIG_CANDLE_LOOKBACK + 1):-1]
-        best_body = max((_body_pct(r) for _, r in lookback.iterrows()), default=0)
+        best_body = max((body_pct(r) for _, r in lookback.iterrows()), default=0)
         if best_body < S2_BIG_CANDLE_BODY_PCT:
             dbg["big_fail"] += 1; i += 1; continue
         dbg["big_pass"] += 1
@@ -590,8 +591,8 @@ def backtest_s2_symbol(sym: str, df: pd.DataFrame,
             box_high = wh
             box_low  = wl
             hc   = cw.loc[cw["high"].idxmax()]
-            uw   = _upper_wick(hc)
-            body = _body_size(hc)
+            uw   = upper_wick(hc)
+            body = body_size(hc)
             if uw > S2_LONG_WICK_RATIO * body:
                 entry_trigger = max(float(hc["close"]), float(hc["open"])) * (1 + S2_BREAKOUT_BUFFER)
             else:

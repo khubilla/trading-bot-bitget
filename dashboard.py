@@ -423,7 +423,11 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
         import trader as tr
         import config
         import config_s1
-        from strategy import detect_consolidation, calculate_rsi, evaluate_s2, evaluate_s4, find_nearest_resistance, find_nearest_support
+        from strategies.s1 import detect_consolidation
+        from strategies.s2 import evaluate_s2
+        from strategies.s4 import evaluate_s4
+        from indicators import calculate_rsi
+        from tools import find_nearest_resistance, find_nearest_support
 
         # Fetch extra candles for indicator warmup (EMA/ADX need history to converge)
         # Then trim to display_limit for the chart
@@ -481,7 +485,7 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
                 continue
             rsi_series.append({"time": t, "value": round(float(v), 2)})
 
-        from strategy import calculate_ema, calculate_adx as _calc_adx
+        from indicators import calculate_ema, calculate_adx as _calc_adx
         ema10_full = calculate_ema(closes_full, 10).tail(display_limit)
         ema20_full = calculate_ema(closes_full, 20).tail(display_limit)
         ema10 = [
@@ -635,7 +639,9 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
 
         if is_15m:
             import numpy as _np
-            from strategy import calculate_stoch, calculate_macd, evaluate_s3, evaluate_s5
+            from indicators import calculate_stoch, calculate_macd
+            from strategies.s3 import evaluate_s3
+            from strategies.s5 import evaluate_s5
             from config_s3 import (
                 S3_STOCH_K_PERIOD, S3_STOCH_D_SMOOTH,
                 S3_MACD_FAST, S3_MACD_SLOW, S3_MACD_SIGNAL,
@@ -823,7 +829,7 @@ def get_entry_chart(
         import bitget_client as bc
         import snapshot as _snap
         from datetime import datetime
-        from strategy import calculate_stoch
+        from indicators import calculate_stoch
 
         interval = _STRATEGY_INTERVAL.get(strategy, "15m")
         interval_ms = {"3m": 180_000, "15m": 900_000, "1D": 86_400_000}.get(interval, 900_000)

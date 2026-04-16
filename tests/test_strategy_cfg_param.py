@@ -33,7 +33,7 @@ _BASE_CFG = {
 
 def test_evaluate_s5_accepts_cfg_keyword():
     """evaluate_s5() accepts a cfg= keyword argument without raising TypeError."""
-    from strategy import evaluate_s5
+    from strategies.s5 import evaluate_s5
     result = evaluate_s5("TEST", _DF, _DF, _DF, "LONG", cfg=_BASE_CFG)
     assert result is not None
 
@@ -41,7 +41,7 @@ def test_evaluate_s5_accepts_cfg_keyword():
 
 def test_evaluate_s5_cfg_disabled_returns_hold():
     """When cfg has s5_enabled=False, returns 'HOLD'."""
-    from strategy import evaluate_s5
+    from strategies.s5 import evaluate_s5
     sig, *_ = evaluate_s5("TEST", _DF, _DF, _DF, "LONG", cfg={**_BASE_CFG, "s5_enabled": False})
     assert sig == "HOLD"
 
@@ -52,7 +52,7 @@ def test_evaluate_s5_no_cfg_uses_bitget_path(monkeypatch):
     original = config_s5.S5_ENABLED
     try:
         config_s5.S5_ENABLED = False
-        from strategy import evaluate_s5
+        from strategies.s5 import evaluate_s5
         sig, *_ = evaluate_s5("TEST", _DF, _DF, _DF, "LONG")
         assert sig == "HOLD"
     finally:

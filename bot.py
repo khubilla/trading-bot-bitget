@@ -21,11 +21,15 @@ import config_s5
 import config_s6
 import state as st
 from scanner import get_qualified_pairs_and_sentiment
-from strategy import (
-    evaluate_s1, evaluate_s2, evaluate_s3, evaluate_s4, evaluate_s5, evaluate_s6,
-    check_htf, check_exit,
-    calculate_rsi, detect_consolidation,
-    check_daily_trend,
+from strategies.s1 import evaluate_s1, detect_consolidation, check_daily_trend, check_exit
+from strategies.s2 import evaluate_s2
+from strategies.s3 import evaluate_s3
+from strategies.s4 import evaluate_s4
+from strategies.s5 import evaluate_s5
+from strategies.s6 import evaluate_s6
+from indicators import calculate_rsi
+from tools import (
+    check_htf,
     find_nearest_resistance, find_nearest_support, find_spike_base,
     find_bullish_ob, find_bearish_ob,
     find_swing_high_target, find_swing_low_target,
@@ -1312,7 +1316,7 @@ class MTFBot:
             )
         htf_bull, htf_bear = check_htf(htf_df)
 
-        from strategy import check_daily_trend as _trend
+        from strategies.s1 import check_daily_trend as _trend
         trend_ok, adx_val, daily_rsi = _trend(daily_df, "LONG" if allowed_direction == "BULLISH" else "SHORT")
         rsi_ser = calculate_rsi(ltf_df["close"].astype(float))
         rsi_val = float(rsi_ser.iloc[-1])
@@ -1329,7 +1333,7 @@ class MTFBot:
         if   not htf_pass:   s1_reason = "No HTF break"
         elif not trend_ok:
             closes_d  = daily_df["close"].astype(float)
-            from strategy import calculate_ema as _ema
+            from indicators import calculate_ema as _ema
             ema20_d   = float(_ema(closes_d, config_s1.DAILY_EMA_SLOW).iloc[-1])
             price_d   = float(closes_d.iloc[-1])
             if adx_val <= config_s1.ADX_TREND_THRESHOLD:

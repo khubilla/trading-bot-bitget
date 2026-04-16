@@ -100,7 +100,7 @@ def _make_bearish_pivot_df():
 # ── Tests ─────────────────────────────────────────────────── #
 
 def test_hold_when_direction_not_bearish():
-    from strategy import evaluate_s6
+    from strategies.s6 import evaluate_s6
     df = _make_v_df()
     sig, *_ = evaluate_s6("TEST", df, "BULLISH")
     assert sig == "HOLD"
@@ -109,14 +109,14 @@ def test_hold_when_direction_not_bearish():
 def test_hold_when_s6_disabled(monkeypatch):
     import config_s6
     monkeypatch.setattr(config_s6, "S6_ENABLED", False)
-    from strategy import evaluate_s6
+    from strategies.s6 import evaluate_s6
     df = _make_v_df()
     sig, *_ = evaluate_s6("TEST", df, "BEARISH")
     assert sig == "HOLD"
 
 
 def test_pending_short_on_valid_v_formation():
-    from strategy import evaluate_s6
+    from strategies.s6 import evaluate_s6
     df = _make_v_df()
     sig, peak_level, sl_price, drop_pct, rsi_at_peak, reason = evaluate_s6("TEST", df, "BEARISH")
     assert sig == "PENDING_SHORT"
@@ -128,7 +128,7 @@ def test_pending_short_on_valid_v_formation():
 
 
 def test_peak_level_equals_swing_high_candle_high():
-    from strategy import evaluate_s6
+    from strategies.s6 import evaluate_s6
     df = _make_v_df()
     _, peak_level, _, _, _, _ = evaluate_s6("TEST", df, "BEARISH")
     # peak_level must match the high of candle 24 (the swing high)
@@ -137,7 +137,7 @@ def test_peak_level_equals_swing_high_candle_high():
 
 def test_sl_price_is_peak_times_sl_pct():
     import config_s6
-    from strategy import evaluate_s6
+    from strategies.s6 import evaluate_s6
     df = _make_v_df()
     _, peak_level, sl_price, _, _, _ = evaluate_s6("TEST", df, "BEARISH")
     expected_sl = peak_level * (1 + config_s6.S6_SL_PCT)
@@ -145,21 +145,21 @@ def test_sl_price_is_peak_times_sl_pct():
 
 
 def test_hold_when_drop_below_threshold():
-    from strategy import evaluate_s6
+    from strategies.s6 import evaluate_s6
     df = _make_shallow_drop_df()
     sig, *_ = evaluate_s6("TEST", df, "BEARISH")
     assert sig == "HOLD"
 
 
 def test_hold_when_no_pivot_candle():
-    from strategy import evaluate_s6
+    from strategies.s6 import evaluate_s6
     df = _make_no_pivot_df()
     sig, *_ = evaluate_s6("TEST", df, "BEARISH")
     assert sig == "HOLD"
 
 
 def test_hold_when_pivot_candle_bearish():
-    from strategy import evaluate_s6
+    from strategies.s6 import evaluate_s6
     df = _make_bearish_pivot_df()
     sig, *_ = evaluate_s6("TEST", df, "BEARISH")
     assert sig == "HOLD"
@@ -167,10 +167,10 @@ def test_hold_when_pivot_candle_bearish():
 
 def test_hold_when_rsi_at_swing_high_below_threshold(monkeypatch):
     """When RSI at the swing-high candle is < 70, no signal."""
-    import strategy as strat
-    # Return constant RSI of 60 everywhere
-    monkeypatch.setattr(strat, "calculate_rsi", lambda closes, period=14: pd.Series([60.0] * len(closes), index=closes.index))
-    from strategy import evaluate_s6
+    from strategies import s6 as s6_mod
+    # Return constant RSI of 60 everywhere (patched in s6's namespace)
+    monkeypatch.setattr(s6_mod, "calculate_rsi", lambda closes, period=14: pd.Series([60.0] * len(closes), index=closes.index))
+    from strategies.s6 import evaluate_s6
     df = _make_v_df()
     sig, *_ = evaluate_s6("TEST", df, "BEARISH")
     assert sig == "HOLD"

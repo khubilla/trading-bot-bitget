@@ -24,7 +24,8 @@ from dotenv import load_dotenv
 load_dotenv()
 sys.path.insert(0, str(Path(__file__).parent))
 
-from strategy import evaluate_s5, calculate_ema
+from strategies.s5 import evaluate_s5
+from indicators import calculate_ema
 from config_ig import INSTRUMENTS
 
 # ── Constants ──────────────────────────────────────────────────────── #

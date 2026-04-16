@@ -88,7 +88,7 @@ def _make_m15_ob_touched_no_choch(
 
 def test_pending_long_fires_without_choch():
     """PENDING_LONG fires when OB is touched even though no candle closed above ob_high."""
-    from strategy import evaluate_s5
+    from strategies.s5 import evaluate_s5
     daily = _make_daily_bullish()
     htf   = _make_htf_bos()
     m15   = _make_m15_ob_touched_no_choch()
@@ -103,7 +103,7 @@ def test_pending_long_fires_without_choch():
 
 def test_entry_trigger_equals_ob_high():
     """entry_trigger must be ob_high exactly (no buffer added)."""
-    from strategy import evaluate_s5
+    from strategies.s5 import evaluate_s5
     daily = _make_daily_bullish()
     htf   = _make_htf_bos()
     m15   = _make_m15_ob_touched_no_choch(ob_high=1.000)
@@ -118,7 +118,7 @@ def test_entry_trigger_equals_ob_high():
 
 def test_stale_ob_returns_hold():
     """HOLD when current price is already >4% above ob_high (stale OB)."""
-    from strategy import evaluate_s5
+    from strategies.s5 import evaluate_s5
     daily = _make_daily_bullish()
     htf   = _make_htf_bos()
 
@@ -135,7 +135,7 @@ def test_stale_ob_returns_hold():
 
 def test_return_tuple_has_7_elements():
     """evaluate_s5 always returns a 7-tuple regardless of signal."""
-    from strategy import evaluate_s5
+    from strategies.s5 import evaluate_s5
     daily = _make_daily_bullish()
     htf   = _make_htf_bos()
     m15   = _make_m15_ob_touched_no_choch()
@@ -146,7 +146,7 @@ def test_return_tuple_has_7_elements():
 
 def test_no_immediate_long_signal():
     """evaluate_s5 never returns LONG — only PENDING_LONG or HOLD."""
-    from strategy import evaluate_s5
+    from strategies.s5 import evaluate_s5
     daily = _make_daily_bullish()
     htf   = _make_htf_bos()
     m15   = _make_m15_ob_touched_no_choch()
@@ -227,7 +227,7 @@ def _make_m15_bearish_ob_touched(
 
 def test_pending_short_fires_without_choch():
     """PENDING_SHORT fires when bearish OB is touched even without ChoCH close below ob_low."""
-    from strategy import evaluate_s5
+    from strategies.s5 import evaluate_s5
     daily = _make_daily_bearish()
     htf   = _make_htf_bos_bear()
     m15   = _make_m15_bearish_ob_touched()
@@ -242,7 +242,7 @@ def test_pending_short_fires_without_choch():
 
 def test_stale_short_ob_returns_hold():
     """HOLD when price is already >4% below ob_low (stale bearish OB)."""
-    from strategy import evaluate_s5
+    from strategies.s5 import evaluate_s5
     daily = _make_daily_bearish()
     htf   = _make_htf_bos_bear()
     ob_low = 1.000

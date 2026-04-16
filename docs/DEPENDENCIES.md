@@ -1,6 +1,6 @@
 # Codebase Dependency Map
 
-**Last updated:** 2026-04-13
+**Last updated:** 2026-04-16
 **Update frequency:** After every PR that changes interfaces, data contracts, or cross-file dependencies
 
 ---
@@ -32,11 +32,18 @@
 │  Output: state.json, trades.csv (or _paper variants)       │
 └─────────────────────────────────────────────────────────────┘
                               ↓
-                    ┌─────────────────┐
-                    │  strategy.py    │ ← SHARED
-                    │  config_s5.py   │ ← SHARED (Bitget only)
-                    │  paper_trader.py│ ← SHARED
-                    └─────────────────┘
+                    ┌─────────────────────────────────────┐
+                    │  indicators.py      ← SHARED TOOLS  │
+                    │  tools.py           ← SHARED TOOLS  │
+                    │  strategies/s1.py   ← Bitget only   │
+                    │  strategies/s2.py   ← Bitget only   │
+                    │  strategies/s3.py   ← Bitget only   │
+                    │  strategies/s4.py   ← Bitget only   │
+                    │  strategies/s5.py   ← BOTH bots     │
+                    │  strategies/s6.py   ← Bitget only   │
+                    │  config_s5.py       ← Bitget only   │
+                    │  paper_trader.py    ← SHARED        │
+                    └─────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                      IG BOT (ig_bot.py)                     │
@@ -50,14 +57,25 @@
 ### Shared Code Contract
 
 **Files shared between bots:**
-- `strategy.py` — all evaluate_s1 through evaluate_s6 functions
+- `indicators.py` — pure numeric indicators (EMA, RSI, ADX, stoch, MACD). No config deps.
+- `tools.py` — generic tool helpers (swing highs/lows, order blocks, FVG, support/resistance, HTF check, candle geometry). No config deps, no strategy rules.
+- `strategies/s5.py` — evaluate_s5 (called by both Bitget and IG)
 - `config_s5.py` — S5 parameters (Bitget only; IG now uses per-instrument CONFIG dicts)
 - `paper_trader.py` — simulation engine (used by Bitget bot only in paper mode)
 
+**Bot-specific strategy modules (Bitget only):**
+- `strategies/s1.py` — evaluate_s1 plus its private helpers (check_daily_trend, detect_consolidation, check_ltf_long/short, check_exit)
+- `strategies/s2.py` — evaluate_s2
+- `strategies/s3.py` — evaluate_s3
+- `strategies/s4.py` — evaluate_s4
+- `strategies/s6.py` — evaluate_s6
+
 **Separation rules:**
-- Changes to shared files require testing BOTH bots
-- Bitget and IG must work independently (no cross-bot state)
-- config_s5 changes affect Bitget only; IG uses `cfg=instrument` param to `evaluate_s5()`
+- Each strategy file owns its own entry/exit logic. Strategies do NOT import from each other.
+- Only `indicators.py` and `tools.py` are shared between strategies.
+- Changes to shared files (indicators.py, tools.py, strategies/s5.py) require testing BOTH bots.
+- Bitget and IG must work independently (no cross-bot state).
+- config_s5 changes affect Bitget only; IG uses `cfg=instrument` param to `evaluate_s5()`.
 
 ### Data Flow
 
@@ -75,16 +93,29 @@ paper_trader.py → paper_state.json (internal simulation state)
 
 ## 2. Shared Files (Cross-Bot)
 
-### 2.1 strategy.py
+### 2.1 indicators.py + tools.py + strategies/ package
 
-**Purpose:** Contains all strategy evaluation logic (S1-S6) shared by both Bitget and IG bots. S6 is Bitget-only; ig_bot.py does not call evaluate_s6.
+The old monolithic `strategy.py` has been split into:
+
+- `indicators.py` — pure indicators (EMA, RSI, ADX, stoch, MACD). No config deps.
+- `tools.py` — generic structure/pattern helpers (swing targets, order blocks, FVG, support/resistance, HTF check, candle geometry `body_pct`/`upper_wick`/`body_size`). No config deps.
+- `strategies/s1.py`..`strategies/s6.py` — one file per strategy. Each file owns its entry/exit rules and imports only from `indicators.py`, `tools.py`, and its own `config_sN.py`. Strategies do NOT import from each other.
+
+**Shared by both Bitget and IG:**
+- `indicators.py`, `tools.py`, `strategies/s5.py`
+
+**Bitget only:**
+- `strategies/s1.py`, `s2.py`, `s3.py`, `s4.py`, `s6.py`
 
 **Used by:**
-- `bot.py` (Bitget bot) — imports and calls evaluate_s1 through evaluate_s6
-- `ig_bot.py` (IG bot) — imports and calls evaluate_s5 only
-- `backtest.py` — historical strategy testing (uses evaluate_s1, s2, s3; does NOT use evaluate_s5)
+- `bot.py` (Bitget bot) — imports evaluate_s1..evaluate_s6 from respective strategy modules
+- `ig_bot.py` (IG bot) — imports evaluate_s5 from `strategies.s5`
+- `backtest.py` — imports indicators + `strategies.s1.detect_consolidation`
+- `backtest_ig.py` — imports evaluate_s5 from `strategies.s5`
+- `startup_recovery.py` — imports evaluate_s5 from `strategies.s5`
+- `dashboard.py`, `trade_dna.py` — lazy-import indicators and individual evaluate_sN functions
 
-**Key function:** `evaluate_s5()`
+**Key function:** `evaluate_s5()` in `strategies/s5.py`
 
 #### evaluate_s5()
 
@@ -100,7 +131,7 @@ def evaluate_s5(
 ) -> tuple[Signal, float, float, float, float, float, str]:
 ```
 
-**Defined:** `strategy.py` line 1067
+**Defined:** `strategies/s5.py`
 
 **Called by:**
 - `bot.py` — `s5_sig, s5_trigger, s5_sl, s5_tp, s5_ob_low, s5_ob_high, s5_reason = evaluate_s5(...)` (no `cfg`)
@@ -163,16 +194,16 @@ The function resolves S5 parameters via one of two paths depending on the `cfg` 
 
 ```bash
 # Find evaluate_s5 definition
-grep -n "^def evaluate_s5" strategy.py
+grep -n "^def evaluate_s5" strategies/s5.py
 
 # Find all callers
-grep -n "evaluate_s5" bot.py ig_bot.py
+grep -rn "evaluate_s5" bot.py ig_bot.py backtest_ig.py startup_recovery.py
 
 # Verify config import is inside function
-sed -n '1067,1095p' strategy.py | grep "from config_s5 import"
+grep -n "from config_s5 import" strategies/s5.py
 
-# Check IG patching mechanism
-sed -n '24,36p' ig_bot.py
+# Check IG imports
+grep -n "evaluate_s5\|calculate_ema" ig_bot.py | head -5
 ```
 
 #### evaluate_s6()
@@ -1110,8 +1141,8 @@ Each strategy (S2, S3, S5) has its own minimum reward:risk ratio parameter, and 
 | Parameter | Strategy | Minimum RR | Applied where | Default |
 |-----------|----------|-----------|----------------|---------|
 | `S2_MIN_RR` | Not defined | — | Strategy S2 does not use MIN_RR | N/A |
-| `S3_MIN_RR` | S3 (Smart Money Confluence) | 2.0 | strategy.py line 739 (breakout R:R check) | 2.0 |
-| `S5_MIN_RR` | S5 (SMC Order Block Pullback) | 2.0 | strategy.py lines 1228, 1297 (R:R checks) | 2.0 |
+| `S3_MIN_RR` | S3 (Smart Money Confluence) | 2.0 | strategies/s3.py (breakout R:R check) | 2.0 |
+| `S5_MIN_RR` | S5 (SMC Order Block Pullback) | 2.0 | strategies/s5.py (R:R checks) | 2.0 |
 
 **Why the confusion:**
 
@@ -1123,7 +1154,7 @@ Each strategy (S2, S3, S5) has its own minimum reward:risk ratio parameter, and 
 
 1. **Adding S2_MIN_RR to config_s5.py**
    - Mistake: Thinking "all strategies should have MIN_RR"
-   - Fix: Check strategy.py to see which strategies actually use it
+   - Fix: Check strategies/s*.py to see which strategies actually use it
    - Impact: Unused parameter clutters config; wastes time troubleshooting
 
 2. **Tuning the wrong parameter**
@@ -1149,8 +1180,8 @@ grep "MIN_RR" config_*.py
 # Verify S2 has no MIN_RR
 grep "S2_MIN_RR\|MIN_RR" config_s*.py | grep -c S2 || echo "S2 has no MIN_RR (correct)"
 
-# Find where MIN_RR is used in strategy.py
-grep -n "MIN_RR" strategy.py
+# Find where MIN_RR is used in strategy files
+grep -rn "MIN_RR" strategies/
 ```
 
 ### 10.3 Import Timing Traps
@@ -1165,7 +1196,7 @@ IG now passes S5 parameters via the `cfg=instrument` argument to `evaluate_s5()`
 
 **Why the Bitget-path import remains inside the function:**
 
-`strategy.py`'s `evaluate_s5()` still performs `from config_s5 import ...` INSIDE the function body when `cfg is None`. This is intentional — it preserves the late-binding behaviour for the Bitget and backtest paths (though the IG patching use case no longer applies).
+`strategies/s5.py`'s `evaluate_s5()` still performs `from config_s5 import ...` INSIDE the function body when `cfg is None`. This is intentional — it preserves the late-binding behaviour for the Bitget and backtest paths (though the IG patching use case no longer applies).
 
 **Common mistakes (updated):**
 
@@ -1175,7 +1206,7 @@ IG now passes S5 parameters via the `cfg=instrument` argument to `evaluate_s5()`
    - Why hard to debug: Both bots run without errors; parameter overrides silently stop working
 
 2. **Adding new S5 keys to config_s5.py without adding them to the instrument CONFIG dicts**
-   - Mistake: Extending the `cfg is not None` branch in strategy.py but not updating `config_ig_us30.py` / `config_ig_gold.py`
+   - Mistake: Extending the `cfg is not None` branch in strategies/s5.py but not updating `config_ig_us30.py` / `config_ig_gold.py`
    - Impact: `KeyError` at runtime when IG bot calls evaluate_s5 with the instrument config
    - Fix: Always add new S5 keys to both `config_s5.py` AND each instrument CONFIG file; `_validate_instruments()` will catch missing keys at startup
 
@@ -1208,7 +1239,7 @@ bot.py (Bitget path, unchanged):
 
 ```bash
 # Confirm evaluate_s5 has function-level import for None path
-grep -n "from config_s5 import" strategy.py
+grep -n "from config_s5 import" strategies/s5.py
 # Expected: inside the function body (not at top of file)
 
 # Confirm IG patching block is gone
@@ -1349,7 +1380,7 @@ Update DEPENDENCIES.md immediately after any of these changes:
 python -c "import bot; import ig_bot; print('Import OK')"
 
 # 2. Check actual line numbers match docs
-grep -n "evaluate_s5" bot.py ig_bot.py strategy.py
+grep -rn "evaluate_s5" bot.py ig_bot.py strategies/s5.py
 
 # 3. Check field references in dashboard
 grep -n "s2_sr_resistance_pct" dashboard.py dashboard.html

@@ -26,7 +26,9 @@ import ig_client as ig
 import ig_stream
 import config_ig
 
-from strategy import evaluate_s5, find_swing_low_target, find_swing_high_target, calculate_ema
+from strategies.s5 import evaluate_s5
+from indicators import calculate_ema
+from tools import find_swing_low_target, find_swing_high_target
 
 
 def _check_disclaimer():

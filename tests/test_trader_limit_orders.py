@@ -30,8 +30,10 @@ def test_place_limit_long_sends_correct_payload(monkeypatch):
     assert p["triggerType"] == "mark_price"
     assert p["planType"] == "normal_plan"
     assert p["side"] == "buy"
-    assert "presetStopLossPrice" in p
-    assert "presetTakeProfitPrice" in p
+    assert "stopLossTriggerPrice" in p
+    assert "stopLossTriggerType" in p
+    assert "stopSurplusTriggerPrice" in p
+    assert "stopSurplusTriggerType" in p
     assert "triggerPrice" in p
 
 
@@ -50,8 +52,10 @@ def test_place_limit_short_sends_sell_side(monkeypatch):
     assert p["orderType"] == "market"
     assert p["triggerType"] == "mark_price"
     assert p["planType"] == "normal_plan"
-    assert "presetStopLossPrice" in p
-    assert "presetTakeProfitPrice" in p
+    assert "stopLossTriggerPrice" in p
+    assert "stopLossTriggerType" in p
+    assert "stopSurplusTriggerPrice" in p
+    assert "stopSurplusTriggerType" in p
     assert "triggerPrice" in p
 
 

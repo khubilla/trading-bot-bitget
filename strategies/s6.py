@@ -101,3 +101,46 @@ def evaluate_s6(
         return "PENDING_SHORT", peak_level, sl_price, drop_pct, rsi_at_peak, reason
 
     return _hold(f"No V-formation in last {S6_SPIKE_LOOKBACK} days")
+
+
+# ── S6 Exit Placement ─────────────────────────────────────── #
+
+def _place_partial_trail_exits(symbol: str, hold_side: str, qty_str: str,
+                               sl_trig: float, sl_exec: float,
+                               trail_trigger: float, trail_range: float) -> bool:
+    """3-leg S6 exits: full SL, 50% partial at trail_trigger, trailing stop on 50%."""
+    import time as _t
+    import trader
+    import bitget as bg
+
+    half_qty   = trader._round_qty(float(qty_str) / 2, symbol)
+    rest_qty   = trader._round_qty(float(qty_str) - float(half_qty), symbol)
+    range_rate = str(round(trail_range, 4))
+
+    for attempt in range(3):
+        try:
+            bg.place_pos_sl_only(symbol, hold_side, sl_trig, sl_exec)
+            _t.sleep(0.5)
+            bg.place_profit_plan(symbol, hold_side, half_qty, trail_trigger)
+            _t.sleep(0.5)
+            bg.place_moving_plan(symbol, hold_side, rest_qty, trail_trigger, range_rate)
+            return True
+        except Exception as e:
+            logger.warning(f"[{symbol}] S6 exits attempt {attempt+1}/3: {e}")
+            if attempt < 2:
+                _t.sleep(1.5)
+    return False
+
+
+def compute_and_place_short_exits(symbol: str, qty_str: str, fill: float,
+                                  sl_trig: float, sl_exec: float) -> tuple[bool, float, float]:
+    """
+    Compute S6 short-side trail level and place exits.
+    Returns (ok, sl_trig, trail_trig).
+    """
+    import trader
+    from config_s6 import S6_TRAILING_TRIGGER_PCT, S6_TRAIL_RANGE_PCT
+
+    trail_trig = float(trader._round_price(fill * (1 - S6_TRAILING_TRIGGER_PCT), symbol))
+    ok = _place_partial_trail_exits(symbol, "short", qty_str, sl_trig, sl_exec, trail_trig, S6_TRAIL_RANGE_PCT)
+    return ok, sl_trig, trail_trig

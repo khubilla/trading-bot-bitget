@@ -758,7 +758,11 @@ class BacktestEngine:
     def _patch_modules(self, mock_trader: MockTrader,
                        bs: BacktestState,
                        mock_scanner: MockScanner) -> None:
-        """Install mocks into sys.modules before bot.py is imported."""
+        """Install mocks into sys.modules before bot.py is imported.
+
+        Originals (if any) are saved into self._module_snapshot so that
+        _unpatch_modules() can restore them after the backtest run.
+        """
         # backtest.py replaces sys.modules["config"] and "config_sN" with
         # lightweight stubs that lack many attributes.  Restore the real
         # modules from their source files so scanner/bot/strategy get the
@@ -779,6 +783,11 @@ class BacktestEngine:
             except Exception:
                 pass
 
+        self._module_snapshot = {}
+        _MISSING = object()
+        for _name in ("trader", "state", "snapshot", "claude_filter", "startup_recovery"):
+            self._module_snapshot[_name] = sys.modules.get(_name, _MISSING)
+
         sys.modules["trader"]           = mock_trader          # type: ignore[assignment]
         sys.modules["state"]            = bs                   # type: ignore[assignment]
         sys.modules["snapshot"]         = _MockSnapshot()      # type: ignore[assignment]
@@ -786,12 +795,31 @@ class BacktestEngine:
         sys.modules["startup_recovery"] = _MockStartupRecovery()  # type: ignore[assignment]
 
         # Patch scanner module's function directly
+        self._scanner_snapshot = None
         try:
             import scanner as _scanner_mod
+            self._scanner_snapshot = (_scanner_mod, _scanner_mod.get_qualified_pairs_and_sentiment)
             _scanner_mod.get_qualified_pairs_and_sentiment = \
                 mock_scanner.get_qualified_pairs_and_sentiment
         except ImportError:
             pass
+
+    def _unpatch_modules(self) -> None:
+        """Restore sys.modules entries saved by _patch_modules."""
+        _MISSING = object()
+        snapshot = getattr(self, "_module_snapshot", None) or {}
+        for _name, _orig in snapshot.items():
+            if _orig is _MISSING or _orig is None:
+                sys.modules.pop(_name, None)
+            else:
+                sys.modules[_name] = _orig
+        self._module_snapshot = {}
+
+        scanner_snap = getattr(self, "_scanner_snapshot", None)
+        if scanner_snap is not None:
+            _scanner_mod, _orig_fn = scanner_snap
+            _scanner_mod.get_qualified_pairs_and_sentiment = _orig_fn
+            self._scanner_snapshot = None
 
     def _build_timeline(self) -> list[int]:
         """Sorted unique 3m timestamps across all symbols."""
@@ -808,7 +836,15 @@ class BacktestEngine:
         mock_scanner = MockScanner(self.universe, self.parquet)
 
         self._patch_modules(mock_trader, bs, mock_scanner)
+        try:
+            return self._run_inner(mock_trader, bs, mock_scanner)
+        finally:
+            self._unpatch_modules()
+            sys.modules.pop("bot", None)
+            sys.modules.pop("scanner", None)
 
+    def _run_inner(self, mock_trader: MockTrader, bs: BacktestState,
+                   mock_scanner: MockScanner) -> list[dict]:
         # Import bot AFTER patching; remove cached modules for test isolation
         sys.modules.pop("bot", None)
         sys.modules.pop("scanner", None)

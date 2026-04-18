@@ -222,3 +222,109 @@ def evaluate_s1(
         return "HOLD", rsi, bh, bl, adx, daily_rsi
 
     return "HOLD", 50.0, 0.0, 0.0, 0.0, 0.0
+
+
+# ── S1 Exit Placement ─────────────────────────────────────── #
+
+def _place_exits(symbol: str, hold_side: str, qty_str: str,
+                 sl_trig: float, sl_exec: float,
+                 trail_trigger: float, trail_range: float) -> bool:
+    """
+    S1 exit orders (3 legs): SL on full qty, partial TP (50% at trail_trigger),
+    trailing stop on the remaining 50%.
+    """
+    import time as _t
+    import trader  # late import (avoids circular dep; picks up test patches of trader._sym_info)
+    import bitget as bg
+
+    half_qty = trader._round_qty(float(qty_str) / 2, symbol)
+    rest_qty = trader._round_qty(float(qty_str) - float(half_qty), symbol)
+    range_rate = str(round(trail_range, 4))
+
+    for attempt in range(3):
+        try:
+            bg.place_pos_sl_only(symbol, hold_side, sl_trig, sl_exec)
+            _t.sleep(0.5)
+            bg.place_profit_plan(symbol, hold_side, half_qty, trail_trigger)
+            _t.sleep(0.5)
+            bg.place_moving_plan(symbol, hold_side, rest_qty, trail_trigger, range_rate)
+            return True
+        except Exception as e:
+            logger.warning(f"[{symbol}] S1 exits attempt {attempt+1}/3: {e}")
+            if attempt < 2:
+                _t.sleep(1.5)
+    return False
+
+
+def compute_and_place_long_exits(symbol: str, qty_str: str, fill: float, sl_floor: float) -> tuple[bool, float, float]:
+    """Compute S1 long-side SL/trail levels and place exits. Returns (ok, sl_trig, trail_trig)."""
+    import trader
+    from config_s1 import S1_TRAIL_RANGE_PCT, TAKE_PROFIT_PCT
+
+    trail_trig = float(trader._round_price(fill * (1 + TAKE_PROFIT_PCT), symbol))
+    sl_trig    = float(trader._round_price(sl_floor, symbol))
+    sl_exec    = float(trader._round_price(sl_trig * 0.995, symbol))
+    ok = _place_exits(symbol, "long", qty_str, sl_trig, sl_exec, trail_trig, S1_TRAIL_RANGE_PCT)
+    return ok, sl_trig, trail_trig
+
+
+def compute_and_place_short_exits(symbol: str, qty_str: str, fill: float, sl_trig: float, sl_exec: float) -> tuple[bool, float, float]:
+    """Compute S1 short-side trail level and place exits. Returns (ok, sl_trig, trail_trig)."""
+    import trader
+    from config_s1 import S1_TRAIL_RANGE_PCT, TAKE_PROFIT_PCT
+
+    trail_trig = float(trader._round_price(fill * (1 - TAKE_PROFIT_PCT), symbol))
+    ok = _place_exits(symbol, "short", qty_str, sl_trig, sl_exec, trail_trig, S1_TRAIL_RANGE_PCT)
+    return ok, sl_trig, trail_trig
+
+
+# ── S1 Swing Trail ────────────────────────────────────────── #
+
+def maybe_trail_sl(symbol: str, ap: dict, tr_mod, st_mod) -> None:
+    """
+    Structural swing trail for S1: LONG pulls SL up to latest 3m swing-low
+    after price reaches the prior swing-high; SHORT mirrors for swing-high.
+    """
+    from config_s1 import (
+        S1_USE_SWING_TRAIL, S1_SWING_LOOKBACK, S1_SL_BUFFER_PCT, LTF_INTERVAL,
+    )
+    from tools import (
+        find_swing_high_target, find_swing_low_target,
+        find_swing_low_after_ref, find_swing_high_after_ref,
+    )
+
+    if not S1_USE_SWING_TRAIL:
+        return
+    try:
+        cs_df = tr_mod.get_candles(symbol, LTF_INTERVAL, limit=S1_SWING_LOOKBACK + 5)
+        mark  = tr_mod.get_mark_price(symbol)
+        if cs_df.empty or len(cs_df) < 3:
+            return
+        if ap["side"] == "LONG":
+            ref = ap.get("swing_trail_ref")
+            if ref is None:
+                ap["swing_trail_ref"] = find_swing_high_target(cs_df, mark, lookback=S1_SWING_LOOKBACK)
+            elif mark >= ref:
+                raw = find_swing_low_after_ref(cs_df, mark, ref, lookback=S1_SWING_LOOKBACK)
+                if raw:
+                    swing_sl = raw * (1 - S1_SL_BUFFER_PCT)
+                    if swing_sl > ap.get("sl", 0) and tr_mod.update_position_sl(symbol, swing_sl, hold_side="long"):
+                        ap["sl"] = swing_sl
+                        st_mod.update_open_trade_sl(symbol, swing_sl)
+                        ap["swing_trail_ref"] = find_swing_high_target(cs_df, mark, lookback=S1_SWING_LOOKBACK)
+                        logger.info(f"[S1][{symbol}] 📍 Swing trail: SL → {swing_sl:.5f} (3m swing low after ref high {ref:.5f})")
+        else:
+            ref = ap.get("swing_trail_ref")
+            if ref is None:
+                ap["swing_trail_ref"] = find_swing_low_target(cs_df, mark, lookback=S1_SWING_LOOKBACK)
+            elif mark <= ref:
+                raw = find_swing_high_after_ref(cs_df, mark, ref, lookback=S1_SWING_LOOKBACK)
+                if raw:
+                    swing_sl = raw * (1 + S1_SL_BUFFER_PCT)
+                    if swing_sl < ap.get("sl", float("inf")) and tr_mod.update_position_sl(symbol, swing_sl, hold_side="short"):
+                        ap["sl"] = swing_sl
+                        st_mod.update_open_trade_sl(symbol, swing_sl)
+                        ap["swing_trail_ref"] = find_swing_low_target(cs_df, mark, lookback=S1_SWING_LOOKBACK)
+                        logger.info(f"[S1][{symbol}] 📍 Swing trail: SL → {swing_sl:.5f} (3m swing high after ref low {ref:.5f})")
+    except Exception as e:
+        logger.error(f"S1 swing trail error [{symbol}]: {e}")

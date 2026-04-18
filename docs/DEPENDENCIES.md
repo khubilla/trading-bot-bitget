@@ -868,26 +868,50 @@ ls config_ig_s5.py 2>/dev/null && echo "WARNING: should be deleted" || echo "Cor
 
 ## 6. Function Call Graph
 
+### 6.0 bitget.py — Generic Bitget API operations
+
+**Purpose:** Endpoint-level wrappers over the low-level HTTP/auth client (`bitget_client.py`). No strategy knowledge — generic primitives that `trader.py` and `strategies/sN.py` compose.
+
+**Key exports:**
+- `place_pos_sl_only(symbol, hold_side, sl_trig, sl_exec)` — position-level SL via `place-pos-tpsl`
+- `place_pos_tpsl_full(symbol, hold_side, tp_trig, tp_exec, sl_trig, sl_exec)` — combined TP+SL with retries
+- `place_profit_plan(symbol, hold_side, qty_str, trigger, execute="0")` — partial-TP plan order
+- `place_moving_plan(symbol, hold_side, qty_str, trigger, range_rate)` — trailing-stop plan order
+- `place_market_order(symbol, side, qty_str)` — market entry (open)
+- `place_plan_order(side, symbol, trigger_price, sl_price, tp_price, qty_str) → order_id` — trigger entry
+- `cancel_plan_order(symbol, order_id)`, `cancel_all_orders(symbol)`
+- `update_position_sl(symbol, new_sl, hold_side="long")`, `refresh_plan_exits(symbol, hold_side, new_trail_trigger=0)`
+- `get_candles(symbol, interval, limit=100)`, `get_daily_candles_utc(symbol, limit=100)`, `fetch_candles_at(symbol, interval, limit, end_ms)`, `get_mark_price(symbol)`
+- `get_usdt_balance()`, `get_total_equity()`, `get_all_open_positions()`, `get_single_position_entry(symbol)`
+- `set_leverage(symbol, leverage)`
+- `sym_info(symbol)`, `round_price(price, symbol)`, `round_qty(qty, symbol)` — symbol-metadata cache and rounding (mirror of `trader._sym_info` / `trader._round_*`)
+
+**Imported by:** `strategies/s1.py`–`strategies/s6.py` (lazy `import bitget as bg` inside exit-placement functions), `trader.py` only indirectly (trader keeps its own `bc`-direct calls for now).
+
+**Breaking change:** Any signature change here ripples across all six strategy modules.
+
+---
+
 ### 6.1 trader.py — Exit Order Functions
 
 These functions place and manage exit orders on Bitget. All are called from `bot.py` only (not `ig_bot.py`).
 
 #### `_place_s1_exits(symbol, hold_side, qty_str, sl_trig, sl_exec, trail_trigger, trail_range)`
-Places 3 exit orders for S1 strategy:
+Thin delegate to `strategies.s1._place_exits` (late import). Places 3 exit orders for S1 strategy:
 1. `place-pos-tpsl` — position-level SL (full position, auto-scales with size changes)
 2. `place-tpsl-order profit_plan` — sell 50% at `trail_trigger` (+10% from fill)
 3. `place-tpsl-order moving_plan` — trail remaining 50% with `rangeRate=trail_range` (5%)
 
 **Called from:** `open_long` (S1 path), `open_short` (S1 path)
 
-**Qty splitting:** uses `_round_qty` to respect symbol minimum volume. On odd integer qty (e.g. 209): half=104, rest=105.
+**Qty splitting:** uses `trader._round_qty` (via late import inside the strategy module) to respect symbol minimum volume. On odd integer qty (e.g. 209): half=104, rest=105.
 
 **Retry:** 3 attempts with 1.5s sleep between attempts. Returns `True` on success, `False` after 3 consecutive failures.
 
 ---
 
 #### `_place_s2_exits(symbol, hold_side, qty_str, sl_trig, sl_exec, trail_trigger, trail_range)`
-Places 3 exit orders for S2 (LONG) and S4 (SHORT) strategies:
+Thin delegate to `strategies.s2._place_partial_trail_exits` (late import). Places 3 exit orders for S2 (LONG) and S4 (SHORT) strategies:
 1. `place-pos-tpsl` — position-level SL (full position, auto-scales with size changes)
 2. `place-tpsl-order profit_plan` — partial TP at `trail_trigger` for `half_qty`
 3. `place-tpsl-order moving_plan` — trailing stop at `trail_trigger` for `rest_qty`
@@ -895,8 +919,8 @@ Places 3 exit orders for S2 (LONG) and S4 (SHORT) strategies:
 **Called from:** `open_long` (S2/S3 path), `open_short` (S4 path)
 
 **Key behaviour:**
-- `half_qty = _round_qty(qty / 2, symbol)` — respects `volume_place` (e.g. integer-only symbols like STOUSDT)
-- `rest_qty = _round_qty(qty - half, symbol)` — covers true remainder (not a duplicate half)
+- `half_qty = trader._round_qty(qty / 2, symbol)` — respects `volume_place` (e.g. integer-only symbols like STOUSDT)
+- `rest_qty = trader._round_qty(qty - half, symbol)` — covers true remainder (not a duplicate half)
 - Returns `False` if all 3 retry attempts fail → `tpsl_set=False` in CSV row
 
 **Breaking change:** Changing the `size` format or plan types breaks live exit execution for S2/S4 trades.
@@ -904,7 +928,7 @@ Places 3 exit orders for S2 (LONG) and S4 (SHORT) strategies:
 ---
 
 #### `_place_s5_exits(symbol, hold_side, qty_str, sl_trig, sl_exec, partial_trig, tp_target, trail_range_pct)`
-Places 3 exit orders for S5 strategy:
+Thin delegate to `strategies.s5._place_exits` (late import). Places 3 exit orders for S5 strategy:
 1. `place-pos-tpsl` — position-level SL
 2. `place-tpsl-order profit_plan` — partial TP at 1:1 R:R for `half_qty`
 3. If `tp_target > 0`: hard TP for `rest_qty`; else: `moving_plan` trailing stop for `rest_qty`
@@ -915,18 +939,23 @@ Places 3 exit orders for S5 strategy:
 
 ---
 
-#### `open_long(symbol, box_low, sl_floor, leverage, trade_size_pct, take_profit_pct, stop_loss_pct, use_s1_exits, use_s2_exits, use_s5_exits, tp_price_abs)`
-Opens a LONG market order then places exits based on the `use_*_exits` flag.
+#### `open_long(symbol, box_low, sl_floor, leverage, trade_size_pct, take_profit_pct, stop_loss_pct, use_s1_exits, use_s2_exits, use_s3_exits, use_s5_exits, strategy=None, tp_price_abs)`
+Opens a LONG market order then places exits based on the `use_*_exits` flag (or `strategy="S1"|"S2"|"S3"|"S5"` shorthand, which sets the corresponding `use_*_exits` to True).
+
+**Strategy dispatch:** Each S1/S2/S3/S5 branch delegates to `strategies.sN.compute_and_place_long_exits(...)`, which computes per-strategy SL/TP/trail levels and calls the strategy's local `_place_exits` / `_place_partial_trail_exits`. trader.py owns sizing, leverage, market order, and fill detection only — strategy-specific arithmetic lives in `strategies/sN.py`.
 
 **Fill price:** After placing the market order and sleeping 2s, calls `get_all_open_positions()` to get `openPriceAvg` as the actual fill price. All exit-level calculations (SL, TP, trail trigger, partial TP) use this fill price. Falls back to the pre-order mark price if the position is not yet visible. The pre-order mark is still used for qty sizing.
 
-**S1 path (`use_s1_exits=True`):** `trail_trigger = fill * (1 + TAKE_PROFIT_PCT)`, `sl_trig = sl_floor`. Calls `_place_s1_exits`.
+**S1 path (`use_s1_exits=True`):** `trail_trigger = fill * (1 + TAKE_PROFIT_PCT)`, `sl_trig = sl_floor`. Calls `strategies.s1.compute_and_place_long_exits` → `_place_s1_exits`.
 
 **SL cap (S2 path):** `sl_trig = max(box_low * 0.999, fill * (1 - stop_loss_pct))` — prevents box_low from being so far below entry that the SL exceeds the intended max loss (e.g. `-50%` at 10x for `S2_STOP_LOSS_PCT=0.05`).
 
 **Returns:** dict with `{symbol, side, qty, entry, sl, tp, box_low, leverage, margin, tpsl_set}` — `entry` is the actual fill price from `get_all_open_positions()` (falls back to pre-order mark if position not yet visible).
 
 **Called from:** `bot.py` — `_execute_s1`, `_execute_s2`, `_execute_s3`, `_execute_s5` (paper path)
+
+#### `open_short(...)` — same shape as `open_long`
+Mirror function for SHORT entries. Branches over `use_s1_exits` / `use_s4_exits` / `use_s5_exits` / `use_s6_exits` (or `strategy="S1"|"S4"|"S5"|"S6"`). Each branch delegates to `strategies.sN.compute_and_place_short_exits(...)`.
 
 ---
 
@@ -962,7 +991,53 @@ After scale-in, resizes `profit_plan` and `moving_plan` orders to the current to
 
 ## 7. Strategy Implementations
 
-[To be populated in Task 9]
+Each strategy lives in `strategies/sN.py` and owns:
+- The signal evaluator (`evaluate_sN`)
+- Per-strategy exit computation + placement (`compute_and_place_long_exits` / `compute_and_place_short_exits`)
+- The internal exit primitive (`_place_exits` for S1/S5, `_place_partial_trail_exits` for S2/S3/S4/S6)
+- Optional structural swing trail (`maybe_trail_sl`) where applicable
+
+**trader.py** keeps thin delegate wrappers (`_place_s1_exits`, `_place_s2_exits`, `_place_s5_exits`) that import the strategy module lazily and forward the call. This preserves the legacy public API while concentrating per-strategy arithmetic in one place per strategy.
+
+**Late-import pattern.** Strategy modules use late imports (`import trader`, `import bitget as bg` inside the function body) to:
+1. Break the circular dependency between `trader.py` and `strategies/sN.py`.
+2. Allow tests that monkey-patch `trader._sym_info` / `bitget_client.post` to take effect — bare-name lookups inside `trader._round_qty` and `bitget.bc.post` see the patched attributes because attribute lookup is performed at call time, not at module load time.
+
+### 7.1 Per-strategy public functions
+
+| Strategy | File | Evaluator | Exit computer (LONG) | Exit computer (SHORT) | Internal exit primitive | Swing trail |
+|---|---|---|---|---|---|---|
+| S1 | `strategies/s1.py` | `evaluate_s1` | `compute_and_place_long_exits` | `compute_and_place_short_exits` | `_place_exits` | — |
+| S2 | `strategies/s2.py` | `evaluate_s2` | `compute_and_place_long_exits` | — | `_place_partial_trail_exits` | `maybe_trail_sl` (LONG) |
+| S3 | `strategies/s3.py` | `evaluate_s3` | `compute_and_place_long_exits` | — | `_place_partial_trail_exits` | `maybe_trail_sl` (LONG) |
+| S4 | `strategies/s4.py` | `evaluate_s4` | — | `compute_and_place_short_exits` | `_place_partial_trail_exits` | `maybe_trail_sl` (SHORT) |
+| S5 | `strategies/s5.py` | `evaluate_s5` | `compute_and_place_long_exits` | `compute_and_place_short_exits` | `_place_exits` | `maybe_trail_sl` |
+| S6 | `strategies/s6.py` | `evaluate_s6` | — | `compute_and_place_short_exits` | `_place_partial_trail_exits` | — |
+
+### 7.2 `compute_and_place_*_exits(symbol, qty_str, fill, ...) → (ok, sl_trig, trail_trig)`
+
+Each strategy's `compute_and_place_long_exits` / `compute_and_place_short_exits`:
+1. Computes per-strategy `sl_trig`, `sl_exec`, and `trail_trig` from the actual `fill` price using `trader._round_price` (so test patches of `trader._sym_info` propagate).
+2. Calls the strategy's internal `_place_exits` / `_place_partial_trail_exits`.
+3. Returns `(ok: bool, sl_trig: float, trail_trig: float)` for trader.py to surface in the `open_long`/`open_short` result dict.
+
+**Called from:** `trader.open_long` and `trader.open_short` — one branch per strategy. Not called directly from `bot.py`.
+
+### 7.3 `strategies.s5.place_exits_from_signal(symbol, qty_str, fill, signal) → (ok, sl_trig, tp_trig)`
+
+S5-specific helper that wraps `compute_and_place_*_exits` for the live S5 limit-fill path in `bot.py`. Reads the SL/TP/OB levels from the original pending-signal dict (rather than recomputing from the fill price).
+
+**Called from:** `bot.py._handle_limit_filled` after an S5 trigger fills. Allows `bot.py` to set up exits without round-tripping through `trader.open_long` (since the position is already open).
+
+### 7.4 `maybe_trail_sl(symbol, ap, tr_mod, st_mod, partial_done) → None`
+
+Per-strategy structural swing trail, called once per bot tick from `bot.py._maybe_trail_sl_for_open_trade`. Pulls the SL toward a recent daily/HTF swing once the partial TP has fired.
+
+**Side-specific defaults:**
+- S2/S3/S5 LONG: trail SL up to the daily swing-low after the most recent swing-high reference.
+- S4 SHORT: trail SL down to the daily swing-high after the most recent swing-low reference.
+
+Each strategy reads its own `S{N}_USE_SWING_TRAIL` and `S{N}_SWING_LOOKBACK` config gate. No-op when the gate is off, the side doesn't match, or the partial hasn't fired yet.
 
 ---
 

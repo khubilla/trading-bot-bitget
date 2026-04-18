@@ -82,7 +82,7 @@ def test_long_sl_uses_box_low_when_near_entry(monkeypatch):
     monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: mark)
 
     captured = {}
-    def fake_open_long(symbol, sl_floor, leverage, trade_size_pct, use_s1_exits):
+    def fake_open_long(symbol, sl_floor, leverage, trade_size_pct, strategy):
         captured["sl_floor"] = sl_floor
         return {"symbol": symbol, "side": "LONG", "qty": 1.0, "entry": mark,
                 "sl": sl_floor, "tp": mark * 1.1, "leverage": leverage,
@@ -111,7 +111,7 @@ def test_long_sl_uses_stop_loss_floor_when_box_low_far(monkeypatch):
     monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: mark)
 
     captured = {}
-    def fake_open_long(symbol, sl_floor, leverage, trade_size_pct, use_s1_exits):
+    def fake_open_long(symbol, sl_floor, leverage, trade_size_pct, strategy):
         captured["sl_floor"] = sl_floor
         return {"symbol": symbol, "side": "LONG", "qty": 1.0, "entry": mark,
                 "sl": sl_floor, "tp": mark * 1.1, "leverage": leverage,
@@ -140,7 +140,7 @@ def test_short_sl_uses_box_high_when_near_entry(monkeypatch):
     monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: mark)
 
     captured = {}
-    def fake_open_short(symbol, sl_floor, leverage, trade_size_pct, use_s1_exits):
+    def fake_open_short(symbol, sl_floor, leverage, trade_size_pct, strategy):
         captured["sl_floor"] = sl_floor
         return {"symbol": symbol, "side": "SHORT", "qty": 1.0, "entry": mark,
                 "sl": sl_floor, "tp": mark * 0.9, "leverage": leverage,
@@ -169,7 +169,7 @@ def test_short_sl_uses_stop_loss_ceiling_when_box_high_far(monkeypatch):
     monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: mark)
 
     captured = {}
-    def fake_open_short(symbol, sl_floor, leverage, trade_size_pct, use_s1_exits):
+    def fake_open_short(symbol, sl_floor, leverage, trade_size_pct, strategy):
         captured["sl_floor"] = sl_floor
         return {"symbol": symbol, "side": "SHORT", "qty": 1.0, "entry": mark,
                 "sl": sl_floor, "tp": mark * 0.9, "leverage": leverage,
@@ -241,7 +241,7 @@ def test_long_proceeds_when_sr_clearance_at_gate(monkeypatch):
     monkeypatch.setattr(bot.tr, "get_mark_price", lambda sym: mark)
 
     opened = []
-    def fake_open_long(symbol, sl_floor, leverage, trade_size_pct, use_s1_exits):
+    def fake_open_long(symbol, sl_floor, leverage, trade_size_pct, strategy):
         opened.append("long")
         return {"symbol": symbol, "side": "LONG", "qty": 1.0, "entry": mark,
                 "sl": sl_floor, "tp": mark * 1.1, "leverage": leverage,

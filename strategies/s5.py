@@ -271,3 +271,154 @@ def evaluate_s5(
         )
 
     return "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, "Direction not BULLISH or BEARISH — S5 skipped"
+
+
+# ── S5 Exit Placement ─────────────────────────────────────── #
+
+def _place_exits(symbol: str, hold_side: str, qty_str: str,
+                 sl_trig: float, sl_exec: float,
+                 partial_trig: float, tp_target: float,
+                 trail_range_pct: float) -> bool:
+    """
+    S5 SMC exits (3 legs):
+      1. SL (loss_plan) — full position at OB outer edge
+      2. Partial TP (profit_plan, 50%) — at 1:1 R:R level
+      3. Hard TP (profit_plan, 50%) — at structural swing target
+         Falls back to trailing stop if tp_target == 0
+    """
+    import time as _t
+    import trader
+    import bitget as bg
+
+    half_qty = trader._round_qty(float(qty_str) / 2, symbol)
+    rest_qty = trader._round_qty(float(qty_str) - float(half_qty), symbol)
+
+    for attempt in range(3):
+        try:
+            bg.place_pos_sl_only(symbol, hold_side, sl_trig, sl_exec)
+            _t.sleep(0.5)
+            bg.place_profit_plan(symbol, hold_side, half_qty, partial_trig)
+            _t.sleep(0.5)
+            if tp_target > 0:
+                bg.place_profit_plan(symbol, hold_side, rest_qty, tp_target)
+            else:
+                bg.place_moving_plan(symbol, hold_side, rest_qty, partial_trig,
+                                     str(round(trail_range_pct / 100, 4)))
+            return True
+        except Exception as e:
+            logger.warning(f"[{symbol}] S5 exits attempt {attempt+1}/3: {e}")
+            if attempt < 2:
+                _t.sleep(1.5)
+    return False
+
+
+def compute_and_place_long_exits(symbol: str, qty_str: str, fill: float,
+                                 sl_floor: float, tp_price_abs: float) -> tuple[bool, float, float]:
+    """
+    Compute S5 long-side levels and place exits.
+    Returns (ok, sl_trig, tp_display) where tp_display = tp_target or 1R partial.
+    """
+    import trader
+    from config_s5 import S5_TRAIL_RANGE_PCT
+
+    sl_trig   = float(trader._round_price(sl_floor, symbol))
+    sl_exec   = float(trader._round_price(sl_trig * 0.995, symbol))
+    one_r     = fill - sl_trig
+    part_trig = float(trader._round_price(fill + one_r, symbol))
+    tp_targ   = float(trader._round_price(tp_price_abs, symbol)) if tp_price_abs > fill else 0.0
+    ok = _place_exits(symbol, "long", qty_str, sl_trig, sl_exec, part_trig, tp_targ, S5_TRAIL_RANGE_PCT)
+    tp_display = tp_targ if tp_targ > 0 else part_trig
+    return ok, sl_trig, tp_display
+
+
+def compute_and_place_short_exits(symbol: str, qty_str: str, fill: float,
+                                  sl_trig: float, sl_exec: float,
+                                  tp_price_abs: float) -> tuple[bool, float, float]:
+    """
+    Compute S5 short-side levels and place exits.
+    Returns (ok, sl_trig, tp_display).
+    """
+    import trader
+    from config_s5 import S5_TRAIL_RANGE_PCT
+
+    one_r     = sl_trig - fill
+    part_trig = float(trader._round_price(fill - one_r, symbol))
+    tp_targ   = float(trader._round_price(tp_price_abs, symbol)) if 0 < tp_price_abs < fill else 0.0
+    ok = _place_exits(symbol, "short", qty_str, sl_trig, sl_exec, part_trig, tp_targ, S5_TRAIL_RANGE_PCT)
+    tp_display = tp_targ if tp_targ > 0 else part_trig
+    return ok, sl_trig, tp_display
+
+
+def place_exits_from_signal(symbol: str, side: str, qty_str: str, fill: float,
+                            sl_price: float, tp_price: float) -> tuple[bool, float, float, float]:
+    """
+    Place S5 exits when opening a position from a filled plan order (signal watcher).
+    Returns (ok, sl_trig, part_trig, tp_targ).
+    """
+    import trader
+    from config_s5 import S5_TRAIL_RANGE_PCT
+
+    if side == "LONG":
+        sl_trig   = float(trader._round_price(sl_price, symbol))
+        sl_exec   = float(trader._round_price(sl_trig * 0.995, symbol))
+        one_r     = fill - sl_trig
+        part_trig = float(trader._round_price(fill + one_r, symbol))
+        tp_targ   = float(trader._round_price(tp_price, symbol)) if tp_price > fill else 0.0
+        hold_side = "long"
+    else:
+        sl_trig   = float(trader._round_price(sl_price, symbol))
+        sl_exec   = float(trader._round_price(sl_trig * 1.005, symbol))
+        one_r     = sl_trig - fill
+        part_trig = float(trader._round_price(fill - one_r, symbol))
+        tp_targ   = float(trader._round_price(tp_price, symbol)) if 0 < tp_price < fill else 0.0
+        hold_side = "short"
+    ok = _place_exits(symbol, hold_side, qty_str, sl_trig, sl_exec, part_trig, tp_targ, S5_TRAIL_RANGE_PCT)
+    return ok, sl_trig, part_trig, tp_targ
+
+
+# ── S5 Swing Trail ────────────────────────────────────────── #
+
+def maybe_trail_sl(symbol: str, ap: dict, tr_mod, st_mod) -> None:
+    """Structural swing trail for S5 (SMC): LONG pulls SL up to swing-low, SHORT mirror."""
+    import config_s5
+    from tools import (
+        find_swing_high_target, find_swing_low_target,
+        find_swing_low_after_ref, find_swing_high_after_ref,
+    )
+
+    if not config_s5.S5_USE_SWING_TRAIL:
+        return
+    try:
+        lb    = config_s5.S5_SWING_LOOKBACK
+        cs_df = tr_mod.get_candles(symbol, config_s5.S5_LTF_INTERVAL, limit=lb + 5)
+        mark  = tr_mod.get_mark_price(symbol)
+        if cs_df.empty or len(cs_df) < 3:
+            return
+        if ap["side"] == "LONG":
+            ref = ap.get("swing_trail_ref")
+            if ref is None:
+                ap["swing_trail_ref"] = find_swing_high_target(cs_df, mark, lookback=lb)
+            elif mark >= ref:
+                raw = find_swing_low_after_ref(cs_df, mark, ref, lookback=lb)
+                if raw:
+                    swing_sl = raw * (1 - config_s5.S5_SL_BUFFER_PCT)
+                    if swing_sl > ap.get("sl", 0) and tr_mod.update_position_sl(symbol, swing_sl, hold_side="long"):
+                        ap["sl"] = swing_sl
+                        st_mod.update_open_trade_sl(symbol, swing_sl)
+                        ap["swing_trail_ref"] = find_swing_high_target(cs_df, mark, lookback=lb)
+                        logger.info(f"[S5][{symbol}] 📍 Swing trail: SL → {swing_sl:.5f} (swing low after ref high {ref:.5f})")
+        else:
+            ref = ap.get("swing_trail_ref")
+            if ref is None:
+                ap["swing_trail_ref"] = find_swing_low_target(cs_df, mark, lookback=lb)
+            elif mark <= ref:
+                raw = find_swing_high_after_ref(cs_df, mark, ref, lookback=lb)
+                if raw:
+                    swing_sl = raw * (1 + config_s5.S5_SL_BUFFER_PCT)
+                    if swing_sl < ap.get("sl", float("inf")) and tr_mod.update_position_sl(symbol, swing_sl, hold_side="short"):
+                        ap["sl"] = swing_sl
+                        st_mod.update_open_trade_sl(symbol, swing_sl)
+                        ap["swing_trail_ref"] = find_swing_low_target(cs_df, mark, lookback=lb)
+                        logger.info(f"[S5][{symbol}] 📍 Swing trail: SL → {swing_sl:.5f} (swing high after ref low {ref:.5f})")
+    except Exception as e:
+        logger.error(f"S5 swing trail error [{symbol}]: {e}")

@@ -138,9 +138,7 @@ def open_long(
     trade_size_pct: float  = 0.25,
     take_profit_pct: float = 0.05,
     stop_loss_pct: float   = 0.015,
-    use_s2_exits: bool     = False,
-    use_s3_exits: bool     = False,
-    use_s5_exits: bool     = False,
+    strategy: str | None   = None,
     tp_price_abs: float    = 0,
 ) -> dict:
     state  = _load()
@@ -155,13 +153,13 @@ def open_long(
     trail_range   = None
     tp_price      = mark * (1 + take_profit_pct)
 
-    if use_s2_exits:
+    if strategy == "S2":
         from config_s2 import S2_TRAILING_TRIGGER_PCT, S2_TRAILING_RANGE_PCT
         trail_trigger = mark * (1 + S2_TRAILING_TRIGGER_PCT)
         trail_range   = S2_TRAILING_RANGE_PCT
         tp_price      = trail_trigger
         use_trailing  = True
-    elif use_s3_exits:
+    elif strategy == "S3":
         from config_s3 import S3_TRAILING_TRIGGER_PCT, S3_TRAILING_RANGE_PCT
         trail_trigger = mark * (1 + S3_TRAILING_TRIGGER_PCT)
         trail_range   = S3_TRAILING_RANGE_PCT
@@ -169,7 +167,7 @@ def open_long(
         use_trailing  = True
 
     breakeven_after_partial = False
-    if use_s5_exits:
+    if strategy == "S5":
         from config_s5 import S5_TRAIL_RANGE_PCT
         one_r         = mark - sl_price          # risk distance
         trail_trigger = mark + one_r             # 1:1 R:R level
@@ -221,8 +219,7 @@ def open_short(
     leverage: int          = 10,
     trade_size_pct: float  = 0.25,
     take_profit_pct: float = 0.05,
-    use_s4_exits: bool     = False,
-    use_s5_exits: bool     = False,
+    strategy: str | None   = None,
     tp_price_abs: float    = 0,
 ) -> dict:
     state  = _load()
@@ -242,7 +239,7 @@ def open_short(
     trail_range   = None
     tp_price      = mark * (1 - take_profit_pct)
 
-    if use_s4_exits:
+    if strategy == "S4":
         from config_s4 import S4_TRAILING_TRIGGER_PCT, S4_TRAILING_RANGE_PCT
         trail_trigger = mark * (1 - S4_TRAILING_TRIGGER_PCT)  # price target for partial TP
         trail_range   = S4_TRAILING_RANGE_PCT                  # callback % for trailing stop
@@ -250,7 +247,7 @@ def open_short(
         use_trailing  = True
 
     breakeven_after_partial = False
-    if use_s5_exits:
+    if strategy == "S5":
         from config_s5 import S5_TRAIL_RANGE_PCT
         one_r         = sl_price - mark             # risk distance
         trail_trigger = mark - one_r                # 1:1 R:R level (below entry)

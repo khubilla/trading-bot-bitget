@@ -259,7 +259,9 @@ def test_handle_limit_filled_adds_active_position(monkeypatch):
     fill_price = 0.07951
 
     monkeypatch.setattr(bot.tr, "_round_price", lambda p, sym: str(round(p, 5)))
-    monkeypatch.setattr(bot.tr, "_place_s5_exits", lambda *a, **kw: True)
+    import strategies.s5 as _s5mod
+    monkeypatch.setattr(_s5mod, "place_exits_from_signal",
+                        lambda *a, **kw: (True, 0.0, 0.0, 0.0))
     monkeypatch.setattr(bot, "_log_trade", lambda action, details: None)
     monkeypatch.setattr(bot.st, "add_open_trade", lambda t: None)
 
@@ -282,7 +284,9 @@ def test_handle_limit_filled_entry_price_correct(monkeypatch):
     logged_trades = []
 
     monkeypatch.setattr(bot.tr, "_round_price", lambda p, sym: str(round(p, 5)))
-    monkeypatch.setattr(bot.tr, "_place_s5_exits", lambda *a, **kw: True)
+    import strategies.s5 as _s5mod
+    monkeypatch.setattr(_s5mod, "place_exits_from_signal",
+                        lambda *a, **kw: (True, 0.0, 0.0, 0.0))
     monkeypatch.setattr(bot, "_log_trade", lambda action, details: logged_trades.append((action, details)))
     monkeypatch.setattr(bot.st, "add_open_trade", lambda t: None)
 
@@ -305,7 +309,9 @@ def test_handle_limit_filled_logs_trade(monkeypatch):
 
     logged = []
     monkeypatch.setattr(bot.tr, "_round_price", lambda p, sym: str(round(p, 5)))
-    monkeypatch.setattr(bot.tr, "_place_s5_exits", lambda *a, **kw: True)
+    import strategies.s5 as _s5mod
+    monkeypatch.setattr(_s5mod, "place_exits_from_signal",
+                        lambda *a, **kw: (True, 0.0, 0.0, 0.0))
     monkeypatch.setattr(bot, "_log_trade", lambda action, details: logged.append((action, details)))
     monkeypatch.setattr(bot.st, "add_open_trade", lambda t: None)
 
@@ -328,7 +334,9 @@ def test_handle_limit_filled_logs_trade_short(monkeypatch):
 
     logged = []
     monkeypatch.setattr(bot.tr, "_round_price", lambda p, sym: str(round(p, 5)))
-    monkeypatch.setattr(bot.tr, "_place_s5_exits", lambda *a, **kw: True)
+    import strategies.s5 as _s5mod
+    monkeypatch.setattr(_s5mod, "place_exits_from_signal",
+                        lambda *a, **kw: (True, 0.0, 0.0, 0.0))
     monkeypatch.setattr(bot, "_log_trade", lambda action, details: logged.append((action, details)))
     monkeypatch.setattr(bot.st, "add_open_trade", lambda t: None)
 

@@ -160,3 +160,87 @@ def evaluate_s2(
         f"S2 ✅ {consol_size}d coil | big_candle={best_body_pct*100:.0f}% | "
         f"RSI={daily_rsi:.1f} | {trigger_type}"
     )
+
+
+# ── S2 Exit Placement ─────────────────────────────────────── #
+
+def _place_partial_trail_exits(symbol: str, hold_side: str, qty_str: str,
+                               sl_trig: float, sl_exec: float,
+                               trail_trigger: float, trail_range: float) -> bool:
+    """
+    3-leg exits: full-qty SL + 50% partial TP at trail_trigger + 50% trailing
+    stop on the remainder. Shared by S2/S3/S4/S6 wrappers.
+    """
+    import time as _t
+    import trader  # late import — respects test patches of trader._sym_info
+    import bitget as bg
+
+    half_qty   = trader._round_qty(float(qty_str) / 2, symbol)
+    rest_qty   = trader._round_qty(float(qty_str) - float(half_qty), symbol)
+    range_rate = str(round(trail_range, 4))
+
+    for attempt in range(3):
+        try:
+            bg.place_pos_sl_only(symbol, hold_side, sl_trig, sl_exec)
+            _t.sleep(0.5)
+            bg.place_profit_plan(symbol, hold_side, half_qty, trail_trigger)
+            _t.sleep(0.5)
+            bg.place_moving_plan(symbol, hold_side, rest_qty, trail_trigger, range_rate)
+            return True
+        except Exception as e:
+            logger.warning(f"[{symbol}] S2 exits attempt {attempt+1}/3: {e}")
+            if attempt < 2:
+                _t.sleep(1.5)
+    return False
+
+
+def compute_and_place_long_exits(symbol: str, qty_str: str, fill: float, stop_loss_pct: float) -> tuple[bool, float, float]:
+    """
+    Compute S2 long-side SL/trail levels and place exits.
+    Returns (ok, sl_trig, trail_trig).
+    """
+    import trader
+    from config_s2 import S2_TRAILING_TRIGGER_PCT, S2_TRAILING_RANGE_PCT
+
+    trail_trig = float(trader._round_price(fill * (1 + S2_TRAILING_TRIGGER_PCT), symbol))
+    sl_trig    = float(trader._round_price(fill * (1 - stop_loss_pct), symbol))
+    sl_exec    = float(trader._round_price(sl_trig * 0.995, symbol))
+    ok = _place_partial_trail_exits(symbol, "long", qty_str, sl_trig, sl_exec, trail_trig, S2_TRAILING_RANGE_PCT)
+    return ok, sl_trig, trail_trig
+
+
+# ── S2 Swing Trail ────────────────────────────────────────── #
+
+def maybe_trail_sl(symbol: str, ap: dict, tr_mod, st_mod, partial_done: bool) -> None:
+    """
+    Structural swing trail for S2 LONG: only active after the partial has fired.
+    Pulls SL up to the 1D swing-low after price exceeds the prior swing-high.
+    """
+    import config_s2
+    from tools import find_swing_high_target, find_swing_low_after_ref
+
+    if not getattr(config_s2, "S2_USE_SWING_TRAIL", False):
+        return
+    if ap.get("side") != "LONG" or not partial_done:
+        return
+    try:
+        lb    = config_s2.S2_SWING_LOOKBACK
+        cs_df = tr_mod.get_candles(symbol, "1D", limit=lb + 5)
+        mark  = tr_mod.get_mark_price(symbol)
+        if cs_df.empty or len(cs_df) < 3:
+            return
+        ref = ap.get("swing_trail_ref")
+        if ref is None:
+            ap["swing_trail_ref"] = find_swing_high_target(cs_df, mark, lookback=lb)
+            return
+        if mark >= ref:
+            raw = find_swing_low_after_ref(cs_df, mark, ref, lookback=lb)
+            if raw:
+                swing_sl = raw * (1 - config_s2.S2_STOP_LOSS_PCT)
+                if swing_sl > ap.get("sl", 0) and tr_mod.update_position_sl(symbol, swing_sl, hold_side="long"):
+                    ap["sl"] = swing_sl
+                    st_mod.update_open_trade_sl(symbol, swing_sl)
+                    ap["swing_trail_ref"] = find_swing_high_target(cs_df, mark, lookback=lb)
+                    logger.info(f"[S2][{symbol}] 📍 Swing trail: SL → {swing_sl:.5f} (daily swing low after ref high {ref:.5f})")
+    except Exception as e:
+        logger.error(f"S2 swing trail error [{symbol}]: {e}")

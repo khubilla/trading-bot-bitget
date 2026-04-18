@@ -279,199 +279,29 @@ def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0
 def _place_s2_exits(symbol: str, hold_side: str, qty_str: str,
                     sl_trig: float, sl_exec: float,
                     trail_trigger: float, trail_range: float) -> bool:
-    """
-    S2 exit orders placed at entry:
-    1. SL at box_low (place-pos-tpsl loss_plan)
-    2. Partial TP — sell 50% at trail_trigger (place-tpsl-order profit_plan)
-    3. Trailing stop on remaining 50% (place-plan-order moving_plan)
-    """
-    import time as _t
-    half_qty = _round_qty(float(qty_str) / 2, symbol)
-    rest_qty = _round_qty(float(qty_str) - float(half_qty), symbol)
+    """Delegate to strategies.s2._place_partial_trail_exits (qty rounded via trader._round_qty)."""
+    from strategies.s2 import _place_partial_trail_exits
+    return _place_partial_trail_exits(symbol, hold_side, qty_str,
+                                       sl_trig, sl_exec, trail_trigger, trail_range)
 
-    for attempt in range(3):
-        try:
-            # 1. SL on full position
-            bc.post("/api/v2/mix/order/place-pos-tpsl", {
-                "symbol":               symbol,
-                "productType":          PRODUCT_TYPE,
-                "marginCoin":           MARGIN_COIN,
-                "holdSide":             hold_side,
-                "stopLossTriggerPrice": str(sl_trig),
-                "stopLossTriggerType":  "mark_price",
-                "stopLossExecutePrice": str(sl_exec),
-            })
-            _t.sleep(0.5)
-
-            # 2. Partial TP — sell 50% when trail_trigger hit
-            bc.post("/api/v2/mix/order/place-tpsl-order", {
-                "symbol":       symbol,
-                "productType":  PRODUCT_TYPE,
-                "marginCoin":   MARGIN_COIN,
-                "planType":     "profit_plan",
-                "triggerPrice": str(trail_trigger),
-                "triggerType":  "mark_price",
-                "executePrice": "0",
-                "holdSide":     hold_side,
-                "size":         half_qty,
-            })
-            _t.sleep(0.5)
-
-            # 3. Trailing stop on remaining position
-            bc.post("/api/v2/mix/order/place-tpsl-order", {
-                "symbol":       symbol,
-                "productType":  PRODUCT_TYPE,
-                "marginCoin":   MARGIN_COIN,
-                "planType":     "moving_plan",
-                "triggerPrice": str(trail_trigger),
-                "triggerType":  "mark_price",
-                "holdSide":     hold_side,
-                "size":         rest_qty,
-                "rangeRate":    str(round(trail_range, 4)),  # API expects pct string: 10% → "10"
-            })
-            return True
-        except Exception as e:
-            logger.warning(f"[{symbol}] S2 exits attempt {attempt+1}/3: {e}")
-            if attempt < 2:
-                _t.sleep(1.5)
-    return False
 
 def _place_s1_exits(symbol: str, hold_side: str, qty_str: str,
                     sl_trig: float, sl_exec: float,
                     trail_trigger: float, trail_range: float) -> bool:
-    """
-    S1 exit orders placed at entry:
-    1. SL on full position (place-pos-tpsl loss_plan)
-    2. Partial TP — sell 50% at trail_trigger (place-tpsl-order profit_plan)
-    3. Trailing stop on remaining 50% (place-tpsl-order moving_plan)
-    """
-    import time as _t
-    half_qty = _round_qty(float(qty_str) / 2, symbol)
-    rest_qty = _round_qty(float(qty_str) - float(half_qty), symbol)
-
-    for attempt in range(3):
-        try:
-            # 1. SL on full position
-            bc.post("/api/v2/mix/order/place-pos-tpsl", {
-                "symbol":               symbol,
-                "productType":          PRODUCT_TYPE,
-                "marginCoin":           MARGIN_COIN,
-                "holdSide":             hold_side,
-                "stopLossTriggerPrice": str(sl_trig),
-                "stopLossTriggerType":  "mark_price",
-                "stopLossExecutePrice": str(sl_exec),
-            })
-            _t.sleep(0.5)
-
-            # 2. Partial TP — sell 50% when trail_trigger hit
-            bc.post("/api/v2/mix/order/place-tpsl-order", {
-                "symbol":       symbol,
-                "productType":  PRODUCT_TYPE,
-                "marginCoin":   MARGIN_COIN,
-                "planType":     "profit_plan",
-                "triggerPrice": str(trail_trigger),
-                "triggerType":  "mark_price",
-                "executePrice": "0",
-                "holdSide":     hold_side,
-                "size":         half_qty,
-            })
-            _t.sleep(0.5)
-
-            # 3. Trailing stop on remaining position
-            bc.post("/api/v2/mix/order/place-tpsl-order", {
-                "symbol":       symbol,
-                "productType":  PRODUCT_TYPE,
-                "marginCoin":   MARGIN_COIN,
-                "planType":     "moving_plan",
-                "triggerPrice": str(trail_trigger),
-                "triggerType":  "mark_price",
-                "holdSide":     hold_side,
-                "size":         rest_qty,
-                "rangeRate":    str(round(trail_range, 4)),
-            })
-            return True
-        except Exception as e:
-            logger.warning(f"[{symbol}] S1 exits attempt {attempt+1}/3: {e}")
-            if attempt < 2:
-                _t.sleep(1.5)
-    return False
+    """Delegate to strategies.s1._place_exits."""
+    from strategies.s1 import _place_exits
+    return _place_exits(symbol, hold_side, qty_str,
+                        sl_trig, sl_exec, trail_trigger, trail_range)
 
 
 def _place_s5_exits(symbol: str, hold_side: str, qty_str: str,
                     sl_trig: float, sl_exec: float,
                     partial_trig: float, tp_target: float,
                     trail_range_pct: float) -> bool:
-    """
-    S5 SMC exits:
-    1. SL (loss_plan) — full position at OB outer edge
-    2. Partial TP (profit_plan, 50%) — at 1:1 R:R level
-    3. Hard TP (profit_plan, 50%) — at structural swing target
-       Falls back to trailing stop if tp_target is 0
-    """
-    import time as _t
-    half_qty = _round_qty(float(qty_str) / 2, symbol)
-    rest_qty = _round_qty(float(qty_str) - float(half_qty), symbol)
-
-    for attempt in range(3):
-        try:
-            # 1. SL on full position
-            bc.post("/api/v2/mix/order/place-pos-tpsl", {
-                "symbol":               symbol,
-                "productType":          PRODUCT_TYPE,
-                "marginCoin":           MARGIN_COIN,
-                "holdSide":             hold_side,
-                "stopLossTriggerPrice": str(sl_trig),
-                "stopLossTriggerType":  "mark_price",
-                "stopLossExecutePrice": str(sl_exec),
-            })
-            _t.sleep(0.5)
-
-            # 2. Partial TP at 1:1 R:R
-            bc.post("/api/v2/mix/order/place-tpsl-order", {
-                "symbol":       symbol,
-                "productType":  PRODUCT_TYPE,
-                "marginCoin":   MARGIN_COIN,
-                "planType":     "profit_plan",
-                "triggerPrice": str(partial_trig),
-                "triggerType":  "mark_price",
-                "executePrice": "0",
-                "holdSide":     hold_side,
-                "size":         half_qty,
-            })
-            _t.sleep(0.5)
-
-            if tp_target > 0:
-                # 3. Hard TP at structural swing target
-                bc.post("/api/v2/mix/order/place-tpsl-order", {
-                    "symbol":       symbol,
-                    "productType":  PRODUCT_TYPE,
-                    "marginCoin":   MARGIN_COIN,
-                    "planType":     "profit_plan",
-                    "triggerPrice": str(tp_target),
-                    "triggerType":  "mark_price",
-                    "executePrice": "0",
-                    "holdSide":     hold_side,
-                    "size":         rest_qty,
-                })
-            else:
-                # Fallback: trailing stop on remaining position
-                bc.post("/api/v2/mix/order/place-tpsl-order", {
-                    "symbol":       symbol,
-                    "productType":  PRODUCT_TYPE,
-                    "marginCoin":   MARGIN_COIN,
-                    "planType":     "moving_plan",
-                    "triggerPrice": str(partial_trig),
-                    "triggerType":  "mark_price",
-                    "holdSide":     hold_side,
-                    "size":         rest_qty,
-                    "rangeRate":    str(round(trail_range_pct / 100, 4)),
-                })
-            return True
-        except Exception as e:
-            logger.warning(f"[{symbol}] S5 exits attempt {attempt+1}/3: {e}")
-            if attempt < 2:
-                _t.sleep(1.5)
-    return False
+    """Delegate to strategies.s5._place_exits."""
+    from strategies.s5 import _place_exits
+    return _place_exits(symbol, hold_side, qty_str,
+                        sl_trig, sl_exec, partial_trig, tp_target, trail_range_pct)
 
 
 def open_long(
@@ -486,6 +316,7 @@ def open_long(
     use_s2_exits: bool     = False,
     use_s3_exits: bool     = False,
     use_s5_exits: bool     = False,
+    strategy: str | None   = None,
     tp_price_abs: float    = 0,
 ) -> dict:
     """
@@ -496,6 +327,12 @@ def open_long(
     S2: fixed SL at fill * (1 - stop_loss_pct); partial TP + trailing stop.
     S3: structural SL at max(sl_floor, fill * (1 - stop_loss_pct)); same TP/trail.
     """
+    # Map `strategy=` string to the legacy use_sN_exits kwargs (string dispatch is preferred
+    # externally; bool kwargs preserved for tests that still call with them).
+    if strategy == "S1": use_s1_exits = True
+    elif strategy == "S2": use_s2_exits = True
+    elif strategy == "S3": use_s3_exits = True
+    elif strategy == "S5": use_s5_exits = True
     import time as _t
     balance  = get_usdt_balance()
     equity   = _get_total_equity() or balance
@@ -520,45 +357,17 @@ def open_long(
     fill = _pos_after.get(symbol, {}).get("entry_price", 0) or mark
 
     if use_s5_exits:
-        from config_s5 import S5_TRAIL_RANGE_PCT
-        sl_trig     = float(_round_price(sl_floor, symbol))
-        sl_exec     = float(_round_price(sl_trig * 0.995, symbol))
-        one_r       = fill - sl_trig
-        part_trig   = float(_round_price(fill + one_r, symbol))   # 1:1 R:R
-        tp_targ     = float(_round_price(tp_price_abs, symbol)) if tp_price_abs > fill else 0.0
-        ok = _place_s5_exits(symbol, "long", qty,
-                             sl_trig, sl_exec,
-                             part_trig, tp_targ, S5_TRAIL_RANGE_PCT)
-        tp_trig = tp_targ if tp_targ > 0 else part_trig
+        from strategies.s5 import compute_and_place_long_exits as _s5_long_exits
+        ok, sl_trig, tp_trig = _s5_long_exits(symbol, qty, fill, sl_floor, tp_price_abs)
     elif use_s1_exits:
-        from config_s1 import S1_TRAIL_RANGE_PCT, TAKE_PROFIT_PCT as _S1_TP_PCT
-        trail_trig = float(_round_price(fill * (1 + _S1_TP_PCT), symbol))
-        sl_trig    = float(_round_price(sl_floor, symbol))
-        sl_exec    = float(_round_price(sl_trig * 0.995, symbol))
-        ok = _place_s1_exits(symbol, "long", qty,
-                             sl_trig, sl_exec,
-                             trail_trig, S1_TRAIL_RANGE_PCT)
-        tp_trig = trail_trig
+        from strategies.s1 import compute_and_place_long_exits as _s1_long_exits
+        ok, sl_trig, tp_trig = _s1_long_exits(symbol, qty, fill, sl_floor)
     elif use_s2_exits:
-        from config_s2 import S2_TRAILING_TRIGGER_PCT, S2_TRAILING_RANGE_PCT
-        trail_trig = float(_round_price(fill * (1 + S2_TRAILING_TRIGGER_PCT), symbol))
-        sl_trig    = float(_round_price(fill * (1 - stop_loss_pct), symbol))
-        sl_exec    = float(_round_price(sl_trig * 0.995, symbol))
-        ok = _place_s2_exits(symbol, "long", qty,
-                             sl_trig, sl_exec,
-                             trail_trig, S2_TRAILING_RANGE_PCT)
-        tp_trig = trail_trig  # For dashboard display: show where partial TP triggers
+        from strategies.s2 import compute_and_place_long_exits as _s2_long_exits
+        ok, sl_trig, tp_trig = _s2_long_exits(symbol, qty, fill, stop_loss_pct)
     elif use_s3_exits:
-        from config_s3 import S3_TRAILING_TRIGGER_PCT, S3_TRAILING_RANGE_PCT
-        trail_trig = float(_round_price(fill * (1 + S3_TRAILING_TRIGGER_PCT), symbol))
-        raw_sl  = sl_floor if sl_floor > 0 else box_low * 0.999
-        sl_cap  = fill * (1 - stop_loss_pct)
-        sl_trig = float(_round_price(max(raw_sl, sl_cap), symbol))
-        sl_exec = float(_round_price(sl_trig * 0.995, symbol))
-        ok = _place_s2_exits(symbol, "long", qty,
-                             sl_trig, sl_exec,
-                             trail_trig, S3_TRAILING_RANGE_PCT)
-        tp_trig = trail_trig
+        from strategies.s3 import compute_and_place_long_exits as _s3_long_exits
+        ok, sl_trig, tp_trig = _s3_long_exits(symbol, qty, fill, sl_floor, box_low, stop_loss_pct)
     else:
         tp_trig = float(_round_price(fill * (1 + take_profit_pct), symbol))
         tp_exec = float(_round_price(tp_trig * 1.005, symbol))
@@ -597,6 +406,7 @@ def open_short(
     use_s4_exits: bool     = False,
     use_s5_exits: bool     = False,
     use_s6_exits: bool     = False,
+    strategy: str | None   = None,
     tp_price_abs: float    = 0,
 ) -> dict:
     """
@@ -606,6 +416,10 @@ def open_short(
     (falls back to pre-order mark if position not yet visible).
     use_s4_exits: trailing stop — 50% close at -10%, trailing stop on remainder.
     """
+    if strategy == "S1": use_s1_exits = True
+    elif strategy == "S4": use_s4_exits = True
+    elif strategy == "S5": use_s5_exits = True
+    elif strategy == "S6": use_s6_exits = True
     import time as _t
     balance  = get_usdt_balance()
     equity   = _get_total_equity() or balance
@@ -636,35 +450,17 @@ def open_short(
     fill = _pos_after.get(symbol, {}).get("entry_price", 0) or mark
 
     if use_s5_exits:
-        from config_s5 import S5_TRAIL_RANGE_PCT
-        one_r     = sl_trig - fill
-        part_trig = float(_round_price(fill - one_r, symbol))    # 1:1 R:R below entry
-        tp_targ   = float(_round_price(tp_price_abs, symbol)) if 0 < tp_price_abs < fill else 0.0
-        ok = _place_s5_exits(symbol, "short", qty,
-                             sl_trig, sl_exec,
-                             part_trig, tp_targ, S5_TRAIL_RANGE_PCT)
-        tp_trig = tp_targ if tp_targ > 0 else part_trig
+        from strategies.s5 import compute_and_place_short_exits as _s5_short_exits
+        ok, sl_trig, tp_trig = _s5_short_exits(symbol, qty, fill, sl_trig, sl_exec, tp_price_abs)
     elif use_s1_exits:
-        from config_s1 import S1_TRAIL_RANGE_PCT, TAKE_PROFIT_PCT as _S1_TP_PCT
-        trail_trig = float(_round_price(fill * (1 - _S1_TP_PCT), symbol))
-        ok = _place_s1_exits(symbol, "short", qty,
-                             sl_trig, sl_exec,
-                             trail_trig, S1_TRAIL_RANGE_PCT)
-        tp_trig = trail_trig
+        from strategies.s1 import compute_and_place_short_exits as _s1_short_exits
+        ok, sl_trig, tp_trig = _s1_short_exits(symbol, qty, fill, sl_trig, sl_exec)
     elif use_s4_exits:
-        from config_s4 import S4_TRAILING_TRIGGER_PCT, S4_TRAILING_RANGE_PCT
-        trail_trig = float(_round_price(fill * (1 - S4_TRAILING_TRIGGER_PCT), symbol))
-        ok = _place_s2_exits(symbol, "short", qty,
-                             sl_trig, sl_exec,
-                             trail_trig, S4_TRAILING_RANGE_PCT)
-        tp_trig = trail_trig  # For dashboard display
+        from strategies.s4 import compute_and_place_short_exits as _s4_short_exits
+        ok, sl_trig, tp_trig = _s4_short_exits(symbol, qty, fill, sl_trig, sl_exec)
     elif use_s6_exits:
-        from config_s6 import S6_TRAILING_TRIGGER_PCT, S6_TRAIL_RANGE_PCT
-        trail_trig = float(_round_price(fill * (1 - S6_TRAILING_TRIGGER_PCT), symbol))
-        ok = _place_s2_exits(symbol, "short", qty,
-                             sl_trig, sl_exec,
-                             trail_trig, S6_TRAIL_RANGE_PCT)
-        tp_trig = trail_trig
+        from strategies.s6 import compute_and_place_short_exits as _s6_short_exits
+        ok, sl_trig, tp_trig = _s6_short_exits(symbol, qty, fill, sl_trig, sl_exec)
     else:
         tp_trig = float(_round_price(fill * (1 - take_profit_pct), symbol))
         tp_exec = float(_round_price(tp_trig * 0.995, symbol))

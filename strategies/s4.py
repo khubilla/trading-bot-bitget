@@ -120,3 +120,83 @@ def evaluate_s4(
         f"S4 ✅ spike={best_body_pct*100:.0f}% | RSI peak={rsi_peak:.1f}{div_note} | "
         f"entry≤{entry_trigger:.5f}"
     )
+
+
+# ── S4 Exit Placement ─────────────────────────────────────── #
+
+def _place_partial_trail_exits(symbol: str, hold_side: str, qty_str: str,
+                               sl_trig: float, sl_exec: float,
+                               trail_trigger: float, trail_range: float) -> bool:
+    """3-leg S4 exits: full SL, 50% partial at trail_trigger, trailing stop on 50%."""
+    import time as _t
+    import trader
+    import bitget as bg
+
+    half_qty   = trader._round_qty(float(qty_str) / 2, symbol)
+    rest_qty   = trader._round_qty(float(qty_str) - float(half_qty), symbol)
+    range_rate = str(round(trail_range, 4))
+
+    for attempt in range(3):
+        try:
+            bg.place_pos_sl_only(symbol, hold_side, sl_trig, sl_exec)
+            _t.sleep(0.5)
+            bg.place_profit_plan(symbol, hold_side, half_qty, trail_trigger)
+            _t.sleep(0.5)
+            bg.place_moving_plan(symbol, hold_side, rest_qty, trail_trigger, range_rate)
+            return True
+        except Exception as e:
+            logger.warning(f"[{symbol}] S4 exits attempt {attempt+1}/3: {e}")
+            if attempt < 2:
+                _t.sleep(1.5)
+    return False
+
+
+def compute_and_place_short_exits(symbol: str, qty_str: str, fill: float,
+                                  sl_trig: float, sl_exec: float) -> tuple[bool, float, float]:
+    """
+    Compute S4 short-side trail level and place exits.
+    Returns (ok, sl_trig, trail_trig).
+    """
+    import trader
+    from config_s4 import S4_TRAILING_TRIGGER_PCT, S4_TRAILING_RANGE_PCT
+
+    trail_trig = float(trader._round_price(fill * (1 - S4_TRAILING_TRIGGER_PCT), symbol))
+    ok = _place_partial_trail_exits(symbol, "short", qty_str, sl_trig, sl_exec, trail_trig, S4_TRAILING_RANGE_PCT)
+    return ok, sl_trig, trail_trig
+
+
+# ── S4 Swing Trail ────────────────────────────────────────── #
+
+def maybe_trail_sl(symbol: str, ap: dict, tr_mod, st_mod, partial_done: bool) -> None:
+    """
+    Structural swing trail for S4 SHORT: after partial fires, pull SL down to
+    the nearest daily swing-high above entry.
+    """
+    import config_s4
+    from tools import find_swing_low_target, find_swing_high_after_ref
+
+    if not config_s4.S4_USE_SWING_TRAIL:
+        return
+    if ap.get("side") != "SHORT" or not partial_done:
+        return
+    try:
+        lb    = config_s4.S4_SWING_LOOKBACK
+        cs_df = tr_mod.get_candles(symbol, "1D", limit=lb + 5)
+        mark  = tr_mod.get_mark_price(symbol)
+        if cs_df.empty or len(cs_df) < 3:
+            return
+        ref = ap.get("swing_trail_ref")
+        if ref is None:
+            ap["swing_trail_ref"] = find_swing_low_target(cs_df, mark, lookback=lb)
+            return
+        if mark <= ref:
+            raw = find_swing_high_after_ref(cs_df, mark, ref, lookback=lb)
+            if raw:
+                swing_sl = raw * (1 + config_s4.S4_ENTRY_BUFFER)
+                if swing_sl < ap.get("sl", float("inf")) and tr_mod.update_position_sl(symbol, swing_sl, hold_side="short"):
+                    ap["sl"] = swing_sl
+                    st_mod.update_open_trade_sl(symbol, swing_sl)
+                    ap["swing_trail_ref"] = find_swing_low_target(cs_df, mark, lookback=lb)
+                    logger.info(f"[S4][{symbol}] 📍 Swing trail: SL → {swing_sl:.5f} (daily swing high after ref low {ref:.5f})")
+    except Exception as e:
+        logger.error(f"S4 swing trail error [{symbol}]: {e}")

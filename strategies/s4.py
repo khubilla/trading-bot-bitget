@@ -325,3 +325,30 @@ def compute_paper_trail_short(mark: float, sl_price: float, tp_price_abs: float 
     trail_trigger = mark * (1 - S4_TRAILING_TRIGGER_PCT)
     trail_range   = S4_TRAILING_RANGE_PCT
     return True, trail_trigger, trail_range, trail_trigger, False
+
+
+# ── S4 Scale-In Helpers ───────────────────────────────────── #
+
+def scale_in_specs() -> dict:
+    """Per-strategy scale-in orchestration constants for S4 (SHORT)."""
+    import config_s4
+    return {
+        "direction": "BEARISH",
+        "hold_side": "short",
+        "leverage":  config_s4.S4_LEVERAGE,
+    }
+
+
+def is_scale_in_window(ap: dict, mark_now: float) -> bool:
+    """True when price is bouncing back toward the S4 prev_low zone (retest)."""
+    import config_s4
+    pl = ap["s4_prev_low"]
+    return pl * (1 - config_s4.S4_MAX_ENTRY_BUFFER) <= mark_now <= pl * (1 - config_s4.S4_ENTRY_BUFFER)
+
+
+def recompute_scale_in_sl_trigger(ap: dict, new_avg: float) -> tuple[float, float]:
+    """S4 post-scale-in: SL at new_avg*(1+0.50/LEVERAGE), trail at new_avg*(1-TRIG_PCT)."""
+    import config_s4
+    new_sl   = new_avg * (1 + 0.50 / config_s4.S4_LEVERAGE)
+    new_trig = new_avg * (1 - config_s4.S4_TRAILING_TRIGGER_PCT)
+    return new_sl, new_trig

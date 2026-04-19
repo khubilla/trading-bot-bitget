@@ -254,3 +254,28 @@ def dna_fields(candles: dict) -> dict:
     out["snap_trend_daily_price_vs_ema"] = price_vs_ema(float(closes_d.iloc[-1]), float(ema_d.iloc[-1]))
     out["snap_trend_daily_rsi_bucket"]   = rsi_bucket(float(rsi_d.iloc[-1]))
     return out
+
+
+# ── S6 Scale-In Helpers ───────────────────────────────────── #
+
+def scale_in_specs() -> dict:
+    """Per-strategy scale-in orchestration constants for S6 (SHORT)."""
+    import config_s6
+    return {
+        "direction": "BEARISH",
+        "hold_side": "short",
+        "leverage":  config_s6.S6_LEVERAGE,
+    }
+
+
+def is_scale_in_window(ap: dict, mark_now: float) -> bool:
+    """True while price is still below peak_level (fakeout reversal still valid)."""
+    return mark_now < ap["box_low"]
+
+
+def recompute_scale_in_sl_trigger(ap: dict, new_avg: float) -> tuple[float, float]:
+    """S6 post-scale-in: SL at new_avg*(1+SL_PCT/LEVERAGE), trail at new_avg*(1-TRIG_PCT)."""
+    import config_s6
+    new_sl   = new_avg * (1 + config_s6.S6_SL_PCT / config_s6.S6_LEVERAGE)
+    new_trig = new_avg * (1 - config_s6.S6_TRAILING_TRIGGER_PCT)
+    return new_sl, new_trig

@@ -355,3 +355,32 @@ def compute_paper_trail_long(mark: float, sl_price: float, tp_price_abs: float =
     trail_trigger = mark * (1 + S2_TRAILING_TRIGGER_PCT)
     trail_range   = S2_TRAILING_RANGE_PCT
     return True, trail_trigger, trail_range, trail_trigger, False
+
+
+# ── S2 Scale-In Helpers ───────────────────────────────────── #
+
+def scale_in_specs() -> dict:
+    """Per-strategy scale-in orchestration constants for S2 (LONG)."""
+    import config_s2
+    return {
+        "direction": "BULLISH",
+        "hold_side": "long",
+        "leverage":  config_s2.S2_LEVERAGE,
+    }
+
+
+def is_scale_in_window(ap: dict, mark_now: float) -> bool:
+    """True when price is re-entering the S2 box_high zone (retest)."""
+    import config_s2
+    return ap["box_high"] <= mark_now <= ap["box_high"] * (1 + config_s2.S2_MAX_ENTRY_BUFFER)
+
+
+def recompute_scale_in_sl_trigger(ap: dict, new_avg: float) -> tuple[float, float]:
+    """S2 post-scale-in: SL at max(box_low*0.999, new_avg*(1-SL_PCT)), trail at new_avg*(1+TRIG_PCT)."""
+    import config_s2
+    new_sl = max(
+        ap.get("box_low", 0) * 0.999,
+        new_avg * (1 - config_s2.S2_STOP_LOSS_PCT),
+    )
+    new_trig = new_avg * (1 + config_s2.S2_TRAILING_TRIGGER_PCT)
+    return new_sl, new_trig

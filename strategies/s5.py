@@ -457,6 +457,33 @@ def dna_fields(candles: dict) -> dict:
     return out
 
 
+# ── S5 OB Invalidation Cooldown ───────────────────────────── #
+# After an OB gets invalidated, suppress new PENDING queues for one full 15m candle
+# so a stale evaluator result doesn't re-queue the same setup moments later.
+
+_OB_INV_COOLDOWN_SEC = 15 * 60
+
+
+def _ob_inv_map(bot) -> dict:
+    """Lazily-init per-bot OB-invalidation timestamp map."""
+    if not hasattr(bot, "_s5_ob_invalidated_at"):
+        bot._s5_ob_invalidated_at = {}
+    return bot._s5_ob_invalidated_at
+
+
+def is_ob_cooldown_active(bot, symbol: str) -> bool:
+    """True while within the 15m window after the last OB invalidation for `symbol`."""
+    import time as _t
+    ts = _ob_inv_map(bot).get(symbol, 0)
+    return (_t.time() - ts) <= _OB_INV_COOLDOWN_SEC
+
+
+def mark_ob_invalidated(bot, symbol: str) -> None:
+    """Stamp `symbol` as just-invalidated; starts the OB cooldown window."""
+    import time as _t
+    _ob_inv_map(bot)[symbol] = _t.time()
+
+
 # ── S5 Pending-Signal Queue ───────────────────────────────── #
 
 def queue_pending(bot, symbol: str, sig: str, trigger: float, sl: float,
@@ -704,7 +731,7 @@ def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
             logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
         logger.info(f"[S5][{symbol}] ❌ Limit cancelled — OB invalidated (mark={mark:.5f})")
         st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
-        bot._s5_ob_invalidated_at[symbol] = _t.time()
+        mark_ob_invalidated(bot, symbol)
         bot.pending_signals.pop(symbol, None)
 
     elif (side == "SHORT" and
@@ -715,7 +742,7 @@ def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
             logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
         logger.info(f"[S5][{symbol}] ❌ Limit cancelled — OB invalidated (mark={mark:.5f})")
         st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
-        bot._s5_ob_invalidated_at[symbol] = _t.time()
+        mark_ob_invalidated(bot, symbol)
         bot.pending_signals.pop(symbol, None)
 
     elif _t.time() > sig["expires"]:

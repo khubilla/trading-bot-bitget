@@ -274,8 +274,6 @@ class MTFBot:
         # Entry watcher — pending signals waiting for price trigger (all strategies)
         self.pending_signals: dict[str, dict] = st.load_pending_signals()
         self._trade_lock = threading.Lock()
-        # S5: track when OB invalidation last fired per symbol so the scanner can't immediately re-queue
-        self._s5_ob_invalidated_at: dict[str, float] = {}
         # Priority evaluation — candidates collected each scan cycle (all strategies)
         self.candidates: list = []
 
@@ -1507,11 +1505,10 @@ class MTFBot:
                             and not st.is_strategy_on_cooldown(strategy, sym):
                         self._queue_s6_pending(candidate)
                 elif strategy == "S5":
-                    _ob_inv_ts = self._s5_ob_invalidated_at.get(sym, 0)
-                    _ob_inv_cooldown = 15 * 60  # 15 minutes — one full 15m candle
+                    from strategies import s5 as _s5_mod
                     if sym not in self.pending_signals and not st.is_pair_paused(sym) \
                             and not st.is_strategy_on_cooldown(strategy, sym) \
-                            and (time.time() - _ob_inv_ts) > _ob_inv_cooldown:
+                            and not _s5_mod.is_ob_cooldown_active(self, sym):
                         # S5 PENDING — queue with rank so entry watcher respects ordering
                         self._queue_s5_pending(
                             sym, sig, candidate["trigger"], candidate["sl"], candidate["tp"],
@@ -1565,38 +1562,31 @@ class MTFBot:
     def _do_scale_in(self, sym: str, ap: dict) -> None:
         """Execute scale-in for S2/S4/S6 and save candle snapshot."""
         try:
+            from importlib import import_module
+            strat = ap["strategy"]
+            mod   = import_module(f"strategies.{strat.lower()}")
+            specs = mod.scale_in_specs()
+
             # Sentiment gate: only scale in when market direction matches the trade.
-            # S2 (LONG): requires BULLISH — no scale-in on NEUTRAL.
-            # S4/S6 (SHORT): requires BEARISH — no scale-in on NEUTRAL.
             _sentiment = getattr(self, "sentiment", None)
-            if _sentiment is not None:
-                current_direction = _sentiment.direction
-                if ap["strategy"] == "S2" and current_direction != "BULLISH":
-                    logger.info(f"[S2][{sym}] ⏸️ Scale-in skipped — market is {current_direction} (need BULLISH)")
-                    return  # keep scale_in_pending=True; retry next tick
-                if ap["strategy"] in ("S4", "S6") and current_direction != "BEARISH":
-                    logger.info(f"[{ap['strategy']}][{sym}] ⏸️ Scale-in skipped — market is {current_direction} (need BEARISH)")
-                    return  # keep scale_in_pending=True; retry next tick
+            if _sentiment is not None and _sentiment.direction != specs["direction"]:
+                logger.info(
+                    f"[{strat}][{sym}] ⏸️ Scale-in skipped — market is "
+                    f"{_sentiment.direction} (need {specs['direction']})"
+                )
+                return  # keep scale_in_pending=True; retry next tick
 
             mark_now  = tr.get_mark_price(sym)
-            in_window = False
-            if ap["strategy"] == "S2":
-                in_window = ap["box_high"] <= mark_now <= ap["box_high"] * (1 + config_s2.S2_MAX_ENTRY_BUFFER)
-            elif ap["strategy"] == "S4":
-                pl = ap["s4_prev_low"]
-                in_window = pl * (1 - config_s4.S4_MAX_ENTRY_BUFFER) <= mark_now <= pl * (1 - config_s4.S4_ENTRY_BUFFER)
-            elif ap["strategy"] == "S6":
-                # Scale in while price is still below peak_level (fakeout reversal still valid)
-                in_window = mark_now < ap["box_low"]
+            in_window = mod.is_scale_in_window(ap, mark_now)
             remaining = ap["scale_in_trade_size_pct"] * 0.5
             if in_window:
-                if ap["strategy"] == "S2":
-                    tr.scale_in_long(sym, remaining, config_s2.S2_LEVERAGE)
+                if specs["hold_side"] == "long":
+                    tr.scale_in_long(sym, remaining, specs["leverage"])
                 else:
-                    tr.scale_in_short(sym, remaining, config_s4.S4_LEVERAGE if ap["strategy"] == "S4" else config_s6.S6_LEVERAGE)
-                logger.info(f"[{ap['strategy']}][{sym}] ✅ Scale-in +{remaining*100:.0f}% @ {mark_now:.5f}")
-                st.add_scan_log(f"[{ap['strategy']}][{sym}] Scale-in executed @ {mark_now:.5f}", "INFO")
-                _log_trade(f"{ap['strategy']}_SCALE_IN", {
+                    tr.scale_in_short(sym, remaining, specs["leverage"])
+                logger.info(f"[{strat}][{sym}] ✅ Scale-in +{remaining*100:.0f}% @ {mark_now:.5f}")
+                st.add_scan_log(f"[{strat}][{sym}] Scale-in executed @ {mark_now:.5f}", "INFO")
+                _log_trade(f"{strat}_SCALE_IN", {
                     "trade_id": ap.get("trade_id", ""),
                     "symbol": sym, "side": ap["side"],
                     "entry": round(mark_now, 8),
@@ -1628,10 +1618,10 @@ class MTFBot:
                             _si_t.sleep(1.5)
                         else:
                             logger.warning(
-                                f"[{ap['strategy']}][{sym}] ⚠️ Position qty did not increase "
+                                f"[{strat}][{sym}] ⚠️ Position qty did not increase "
                                 f"after scale-in within 12s (pre={_pre_qty})"
                             )
-                        hold_side = "long" if ap["side"] == "LONG" else "short"
+                        hold_side = specs["hold_side"]
                         # Recompute trail trigger and SL from new average entry after scale-in
                         new_trig = 0.0
                         # Update initial_qty and margin to reflect scaled-in position
@@ -1643,41 +1633,18 @@ class MTFBot:
                             st.update_open_trade_margin(sym, float(_scale_pos["margin"]))
                         new_avg = _scale_pos.get("entry_price", 0)
                         if new_avg > 0:
-                            if ap["strategy"] == "S2":
-                                new_trig = new_avg * (1 + config_s2.S2_TRAILING_TRIGGER_PCT)
-                                # Recompute SL from new avg entry — always re-place so the
-                                # trigger reflects the scaled-in avg, not the original entry.
-                                new_sl = max(
-                                    ap.get("box_low", 0) * 0.999,
-                                    new_avg * (1 - config_s2.S2_STOP_LOSS_PCT),
-                                )
-                                if tr.update_position_sl(sym, new_sl, hold_side="long"):
-                                    ap["sl"] = new_sl
-                                    st.update_open_trade_sl(sym, new_sl)
-                            elif ap["strategy"] == "S4":
-                                new_trig = new_avg * (1 - config_s4.S4_TRAILING_TRIGGER_PCT)
-                                # Recompute SL from new avg entry — always re-place so the
-                                # trigger reflects the scaled-in avg, not the original fill.
-                                new_sl = new_avg * (1 + 0.50 / config_s4.S4_LEVERAGE)
-                                if tr.update_position_sl(sym, new_sl, hold_side="short"):
-                                    ap["sl"] = new_sl
-                                    st.update_open_trade_sl(sym, new_sl)
-                            elif ap["strategy"] == "S6":
-                                new_trig = new_avg * (1 - config_s6.S6_TRAILING_TRIGGER_PCT)
-                                # Recompute SL from new avg entry — always re-place so the
-                                # trigger reflects the scaled-in avg, not the original fill.
-                                new_sl = new_avg * (1 + config_s6.S6_SL_PCT / config_s6.S6_LEVERAGE)
-                                if tr.update_position_sl(sym, new_sl, hold_side="short"):
-                                    ap["sl"] = new_sl
-                                    st.update_open_trade_sl(sym, new_sl)
+                            new_sl, new_trig = mod.recompute_scale_in_sl_trigger(ap, new_avg)
+                            if tr.update_position_sl(sym, new_sl, hold_side=hold_side):
+                                ap["sl"] = new_sl
+                                st.update_open_trade_sl(sym, new_sl)
                         if not tr.refresh_plan_exits(sym, hold_side, new_trig):
-                            logger.warning(f"[{ap['strategy']}][{sym}] ⚠️ Scale-in exits refresh failed — verify plan orders manually")
-                            st.add_scan_log(f"[{ap['strategy']}][{sym}] ⚠️ Scale-in exits refresh failed", "WARN")
+                            logger.warning(f"[{strat}][{sym}] ⚠️ Scale-in exits refresh failed — verify plan orders manually")
+                            st.add_scan_log(f"[{strat}][{sym}] ⚠️ Scale-in exits refresh failed", "WARN")
                     except Exception as _ref_e:
-                        logger.warning(f"[{ap['strategy']}][{sym}] ⚠️ Scale-in exits refresh error: {_ref_e}")
+                        logger.warning(f"[{strat}][{sym}] ⚠️ Scale-in exits refresh error: {_ref_e}")
                 # Save scale-in snapshot
                 try:
-                    interval = _snapshot_interval(ap["strategy"])
+                    interval = _snapshot_interval(strat)
                     _snap_df = tr.get_candles(sym, interval, limit=100)
                     if not _snap_df.empty:
                         snapshot.save_snapshot(
@@ -1687,9 +1654,9 @@ class MTFBot:
                             event_price=round(mark_now, 8),
                         )
                 except Exception as e:
-                    logger.warning(f"[{ap['strategy']}][{sym}] scale_in snapshot failed: {e}")
+                    logger.warning(f"[{strat}][{sym}] scale_in snapshot failed: {e}")
             else:
-                logger.info(f"[{ap['strategy']}][{sym}] ⏸️ Scale-in waiting — price {mark_now:.5f} outside entry window")
+                logger.info(f"[{strat}][{sym}] ⏸️ Scale-in waiting — price {mark_now:.5f} outside entry window")
                 return  # keep scale_in_pending=True; retry next tick
             ap["scale_in_pending"] = False
         except Exception as e:

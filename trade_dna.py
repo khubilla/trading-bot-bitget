@@ -93,149 +93,26 @@ def _closes_from(df_or_series) -> pd.Series:
     return df_or_series.astype(float)
 
 
-# ── Per-strategy field computation ────────────────────────────────────── #
-
-def _s1_fields(candles: dict) -> dict:
-    out = {}
-    daily = candles.get("daily")
-    h1    = candles.get("h1")
-    m3    = candles.get("m3")
-
-    if not _is_empty(daily):
-        from indicators import calculate_ema, calculate_adx
-        closes_d = _closes_from(daily)
-        ema_d    = calculate_ema(closes_d, 20)
-        out["snap_trend_daily_ema_slope"]    = ema_slope(closes_d, 20)
-        out["snap_trend_daily_price_vs_ema"] = price_vs_ema(float(closes_d.iloc[-1]), float(ema_d.iloc[-1]))
-        if hasattr(daily, "columns") and len(daily) >= 20:
-            adx_d = calculate_adx(daily)["adx"]
-            out["snap_trend_daily_adx_state"] = adx_state(adx_d)
-        else:
-            out["snap_trend_daily_adx_state"] = ""
-
-    if not _is_empty(h1):
-        from indicators import calculate_ema
-        closes_h = _closes_from(h1)
-        ema_h    = calculate_ema(closes_h, 20)
-        out["snap_trend_h1_ema_slope"]    = ema_slope(closes_h, 20)
-        out["snap_trend_h1_price_vs_ema"] = price_vs_ema(float(closes_h.iloc[-1]), float(ema_h.iloc[-1]))
-
-    if not _is_empty(m3):
-        from indicators import calculate_ema
-        closes_m3 = _closes_from(m3)
-        ema_m3    = calculate_ema(closes_m3, 20)
-        out["snap_trend_m3_price_vs_ema"] = price_vs_ema(float(closes_m3.iloc[-1]), float(ema_m3.iloc[-1]))
-
-    return out
-
-
-def _s2_fields(candles: dict) -> dict:
-    out = {}
-    daily = candles.get("daily")
-    if _is_empty(daily):
-        return out
-    from indicators import calculate_ema, calculate_rsi
-    closes_d = _closes_from(daily)
-    ema_d    = calculate_ema(closes_d, 20)
-    rsi_d    = calculate_rsi(closes_d)
-    out["snap_trend_daily_ema_slope"]    = ema_slope(closes_d, 20)
-    out["snap_trend_daily_price_vs_ema"] = price_vs_ema(float(closes_d.iloc[-1]), float(ema_d.iloc[-1]))
-    out["snap_trend_daily_rsi_bucket"]   = rsi_bucket(float(rsi_d.iloc[-1]))
-    return out
-
-
-def _s3_fields(candles: dict) -> dict:
-    out = {}
-    m15 = candles.get("m15")
-    if _is_empty(m15):
-        return out
-    from indicators import calculate_ema, calculate_adx
-    closes_m15 = _closes_from(m15)
-    ema_m15    = calculate_ema(closes_m15, 20)
-    out["snap_trend_m15_ema_slope"]    = ema_slope(closes_m15, 20)
-    out["snap_trend_m15_price_vs_ema"] = price_vs_ema(float(closes_m15.iloc[-1]), float(ema_m15.iloc[-1]))
-    if hasattr(m15, "columns") and len(m15) >= 20:
-        adx_m15 = calculate_adx(m15)["adx"]
-        out["snap_trend_m15_adx_state"] = adx_state(adx_m15)
-    else:
-        out["snap_trend_m15_adx_state"] = ""
-    return out
-
-
-def _s4_fields(candles: dict) -> dict:
-    out = {}
-    daily = candles.get("daily")
-    h1    = candles.get("h1")
-    if _is_empty(daily):
-        return out
-    from indicators import calculate_ema, calculate_rsi
-    closes_d = _closes_from(daily)
-    ema_d    = calculate_ema(closes_d, 20)
-    rsi_d    = calculate_rsi(closes_d)
-    out["snap_trend_daily_ema_slope"]    = ema_slope(closes_d, 20)
-    out["snap_trend_daily_price_vs_ema"] = price_vs_ema(float(closes_d.iloc[-1]), float(ema_d.iloc[-1]))
-    out["snap_trend_daily_rsi_bucket"]   = rsi_bucket(float(rsi_d.iloc[-1]))
-    if not _is_empty(h1):
-        from indicators import calculate_ema as _ema
-        closes_h = _closes_from(h1)
-        ema_h    = _ema(closes_h, 20)
-        out["snap_trend_h1_ema_slope"]    = ema_slope(closes_h, 20)
-        out["snap_trend_h1_price_vs_ema"] = price_vs_ema(float(closes_h.iloc[-1]), float(ema_h.iloc[-1]))
-    return out
-
-
-def _s5_fields(candles: dict) -> dict:
-    out = {}
-    daily = candles.get("daily")
-    h1    = candles.get("h1")
-    m15   = candles.get("m15")
-    if not _is_empty(daily):
-        from indicators import calculate_ema
-        closes_d = _closes_from(daily)
-        ema_d    = calculate_ema(closes_d, 20)
-        out["snap_trend_daily_ema_slope"]    = ema_slope(closes_d, 20)
-        out["snap_trend_daily_price_vs_ema"] = price_vs_ema(float(closes_d.iloc[-1]), float(ema_d.iloc[-1]))
-    if not _is_empty(h1):
-        from indicators import calculate_ema
-        closes_h = _closes_from(h1)
-        ema_h    = calculate_ema(closes_h, 20)
-        out["snap_trend_h1_ema_slope"]    = ema_slope(closes_h, 20)
-        out["snap_trend_h1_price_vs_ema"] = price_vs_ema(float(closes_h.iloc[-1]), float(ema_h.iloc[-1]))
-    if not _is_empty(m15):
-        from indicators import calculate_ema
-        closes_m15 = _closes_from(m15)
-        ema_m15    = calculate_ema(closes_m15, 20)
-        out["snap_trend_m15_ema_slope"]    = ema_slope(closes_m15, 20)
-        out["snap_trend_m15_price_vs_ema"] = price_vs_ema(float(closes_m15.iloc[-1]), float(ema_m15.iloc[-1]))
-    return out
-
-
-def _s6_fields(candles: dict) -> dict:
-    out = {}
-    daily = candles.get("daily")
-    if _is_empty(daily):
-        return out
-    from indicators import calculate_ema, calculate_rsi
-    closes_d = _closes_from(daily)
-    ema_d    = calculate_ema(closes_d, 20)
-    rsi_d    = calculate_rsi(closes_d)
-    out["snap_trend_daily_ema_slope"]    = ema_slope(closes_d, 20)
-    out["snap_trend_daily_price_vs_ema"] = price_vs_ema(float(closes_d.iloc[-1]), float(ema_d.iloc[-1]))
-    out["snap_trend_daily_rsi_bucket"]   = rsi_bucket(float(rsi_d.iloc[-1]))
-    return out
-
-
-_STRATEGY_HANDLERS = {
-    "S1": _s1_fields,
-    "S2": _s2_fields,
-    "S3": _s3_fields,
-    "S4": _s4_fields,
-    "S5": _s5_fields,
-    "S6": _s6_fields,
-}
-
-
 # ── Public API ─────────────────────────────────────────────────────────── #
+
+def _get_handler(strategy: str):
+    """Late import to avoid circular deps: strategies/sN.py may import trade_dna helpers."""
+    if strategy == "S1":
+        from strategies.s1 import dna_fields
+    elif strategy == "S2":
+        from strategies.s2 import dna_fields
+    elif strategy == "S3":
+        from strategies.s3 import dna_fields
+    elif strategy == "S4":
+        from strategies.s4 import dna_fields
+    elif strategy == "S5":
+        from strategies.s5 import dna_fields
+    elif strategy == "S6":
+        from strategies.s6 import dna_fields
+    else:
+        return None
+    return dna_fields
+
 
 def snapshot(strategy: str, symbol: str, candles: dict) -> dict:
     """
@@ -248,7 +125,7 @@ def snapshot(strategy: str, symbol: str, candles: dict) -> dict:
     Returns flat dict of snap_trend_* keys → bucketed string values.
     On any error: logs warning and returns {} so trades are never blocked.
     """
-    handler = _STRATEGY_HANDLERS.get(strategy)
+    handler = _get_handler(strategy)
     if handler is None:
         logger.warning("trade_dna.snapshot: unknown strategy %s — skipping", strategy)
         return {}

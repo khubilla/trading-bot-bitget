@@ -28,6 +28,9 @@ from tools import body_pct, upper_wick
 logger = logging.getLogger(__name__)
 Signal = Literal["LONG", "SHORT", "HOLD", "PENDING_LONG", "PENDING_SHORT"]
 
+# Default candle interval for S2 event snapshots.
+SNAPSHOT_INTERVAL = "1D"
+
 
 def evaluate_s2(
     symbol: str,
@@ -244,3 +247,111 @@ def maybe_trail_sl(symbol: str, ap: dict, tr_mod, st_mod, partial_done: bool) ->
                     logger.info(f"[S2][{symbol}] 📍 Swing trail: SL → {swing_sl:.5f} (daily swing low after ref high {ref:.5f})")
     except Exception as e:
         logger.error(f"S2 swing trail error [{symbol}]: {e}")
+
+
+# ── S2 DNA Snapshot Fields ────────────────────────────────── #
+
+def dna_fields(candles: dict) -> dict:
+    """S2 trade fingerprint: daily EMA slope, price vs EMA, RSI bucket."""
+    from indicators import calculate_ema, calculate_rsi
+    from trade_dna import ema_slope, price_vs_ema, rsi_bucket, _is_empty, _closes_from
+
+    out = {}
+    daily = candles.get("daily")
+    if _is_empty(daily):
+        return out
+    closes_d = _closes_from(daily)
+    ema_d    = calculate_ema(closes_d, 20)
+    rsi_d    = calculate_rsi(closes_d)
+    out["snap_trend_daily_ema_slope"]    = ema_slope(closes_d, 20)
+    out["snap_trend_daily_price_vs_ema"] = price_vs_ema(float(closes_d.iloc[-1]), float(ema_d.iloc[-1]))
+    out["snap_trend_daily_rsi_bucket"]   = rsi_bucket(float(rsi_d.iloc[-1]))
+    return out
+
+
+# ── S2 Pending-Signal Queue ───────────────────────────────── #
+
+def queue_pending(bot, c: dict) -> None:
+    """Queue an S2 LONG breakout on bot.pending_signals for the entry watcher."""
+    import time as _t
+    import state as st
+
+    symbol = c["symbol"]
+    bot.pending_signals[symbol] = {
+        "strategy":           "S2",
+        "side":               "LONG",
+        "trigger":            c["s2_bh"],
+        "s2_bh":              c["s2_bh"],
+        "s2_bl":              c["s2_bl"],
+        "priority_rank":      c.get("priority_rank", 999),
+        "priority_score":     c.get("priority_score", 0.0),
+        "snap_daily_rsi":     round(c["s2_rsi"], 1),
+        "snap_box_range_pct": round((c["s2_bh"] - c["s2_bl"]) / c["s2_bl"] * 100, 3)
+                              if c["s2_bh"] and c["s2_bl"] else None,
+        "snap_sentiment":     bot.sentiment.direction if bot.sentiment else "?",
+        "expires":            _t.time() + 86400,
+    }
+    st.save_pending_signals(bot.pending_signals)
+    logger.info(
+        f"[S2][{symbol}] 🕐 PENDING LONG queued | "
+        f"trigger={c['s2_bh']:.5f} | SL={c['s2_bl']:.5f}"
+    )
+    st.add_scan_log(
+        f"[S2][{symbol}] 🕐 PENDING LONG | trigger={c['s2_bh']:.5f}", "SIGNAL"
+    )
+
+
+# ── S2 Entry Watcher (pending tick) ───────────────────────── #
+
+def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
+                        paper_mode: bool | None = None) -> str | None:
+    """S2 breakout trigger + invalidation check. Return 'break' to stop outer loop."""
+    import state as st
+    import trader as tr
+    import config, config_s2
+
+    ps = st.get_pair_state(symbol)
+    if ps.get("s2_signal", "HOLD") not in ("LONG",):
+        logger.info(f"[S2][{symbol}] 🚫 Signal gone — cancelling pending")
+        st.add_scan_log(f"[S2][{symbol}] 🚫 Pending cancelled (signal gone)", "INFO")
+        bot.pending_signals.pop(symbol, None)
+        st.save_pending_signals(bot.pending_signals)
+        return None
+    try:
+        mark = tr.get_mark_price(symbol)
+    except Exception:
+        return None
+    s2_bh = sig["s2_bh"]
+    s2_bl = sig["s2_bl"]
+    if mark < s2_bl:
+        logger.info(f"[S2][{symbol}] ❌ Invalidated — mark {mark:.5f} < box_low {s2_bl:.5f}")
+        st.add_scan_log(f"[S2][{symbol}] ❌ Pending cancelled (price below box)", "INFO")
+        bot.pending_signals.pop(symbol, None)
+        st.save_pending_signals(bot.pending_signals)
+        return None
+    in_window = s2_bh <= mark <= s2_bh * (1 + config_s2.S2_MAX_ENTRY_BUFFER)
+    if in_window:
+        with bot._trade_lock:
+            if symbol in bot.active_positions:
+                bot.pending_signals.pop(symbol, None)
+                st.save_pending_signals(bot.pending_signals)
+                return None
+            if len(bot.active_positions) >= config.MAX_CONCURRENT_TRADES:
+                return "break"
+            if st.is_pair_paused(symbol):
+                return None
+            bot._fire_s2(symbol, sig, mark, balance)
+        bot.pending_signals.pop(symbol, None)
+        st.save_pending_signals(bot.pending_signals)
+    return None
+
+
+# ── S2 Paper Trail Setup ──────────────────────────────────── #
+
+def compute_paper_trail_long(mark: float, sl_price: float, tp_price_abs: float = 0,
+                             take_profit_pct: float = 0.05) -> tuple[bool, float, float, float, bool]:
+    """Paper-trader LONG trail setup for S2. Returns (use_trailing, trail_trigger, trail_range, tp_price, breakeven_after_partial)."""
+    from config_s2 import S2_TRAILING_TRIGGER_PCT, S2_TRAILING_RANGE_PCT
+    trail_trigger = mark * (1 + S2_TRAILING_TRIGGER_PCT)
+    trail_range   = S2_TRAILING_RANGE_PCT
+    return True, trail_trigger, trail_range, trail_trigger, False

@@ -18,6 +18,9 @@ from indicators import calculate_rsi
 logger = logging.getLogger(__name__)
 Signal = Literal["LONG", "SHORT", "HOLD", "PENDING_LONG", "PENDING_SHORT"]
 
+# Default candle interval for S6 event snapshots.
+SNAPSHOT_INTERVAL = "1D"
+
 
 def evaluate_s6(
     symbol: str,
@@ -144,3 +147,110 @@ def compute_and_place_short_exits(symbol: str, qty_str: str, fill: float,
     trail_trig = float(trader._round_price(fill * (1 - S6_TRAILING_TRIGGER_PCT), symbol))
     ok = _place_partial_trail_exits(symbol, "short", qty_str, sl_trig, sl_exec, trail_trig, S6_TRAIL_RANGE_PCT)
     return ok, sl_trig, trail_trig
+
+
+# ── S6 Pending-Signal Queue ───────────────────────────────── #
+
+def queue_pending(bot, candidate: dict) -> None:
+    """Queue an S6 V-formation watcher on bot.pending_signals."""
+    import time as _t
+    import state as st
+
+    symbol = candidate["symbol"]
+    bot.pending_signals[symbol] = {
+        "strategy":           "S6",
+        "side":               "SHORT",
+        "peak_level":         candidate["s6_peak_level"],
+        "sl":                 candidate["s6_sl"],
+        "drop_pct":           candidate["s6_drop_pct"],
+        "rsi_at_peak":        candidate["s6_rsi_at_peak"],
+        "fakeout_seen":       False,
+        "detected_at":        _t.time(),
+        "snap_s6_peak":       round(candidate["s6_peak_level"], 8),
+        "snap_s6_drop_pct":   round(candidate["s6_drop_pct"] * 100, 2),
+        "snap_s6_rsi_at_peak": round(candidate["s6_rsi_at_peak"], 1),
+        "snap_sentiment":     bot.sentiment.direction if bot.sentiment else "?",
+        "priority_rank":      candidate.get("priority_rank", 999),
+        "priority_score":     candidate.get("priority_score", 0.0),
+        "expires":            _t.time() + 30 * 86400,
+    }
+    st.patch_pair_state(symbol, {"s6_fakeout_seen": False})
+    st.save_pending_signals(bot.pending_signals)
+    logger.info(
+        f"[S6][{symbol}] 🕐 V-formation watcher queued | "
+        f"peak={candidate['s6_peak_level']:.5f} | SL={candidate['s6_sl']:.5f}"
+    )
+    st.add_scan_log(
+        f"[S6][{symbol}] 🕐 V-formation watcher | peak={candidate['s6_peak_level']:.5f}",
+        "SIGNAL"
+    )
+
+
+# ── S6 Entry Watcher (pending tick) ───────────────────────── #
+
+def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
+                        paper_mode: bool | None = None) -> str | None:
+    """S6 two-phase V-formation check. Return 'break' to stop outer loop."""
+    import state as st
+    import trader as tr
+    import config
+
+    if bot.sentiment and bot.sentiment.direction == "BULLISH":
+        logger.info(f"[S6][{symbol}] 🚫 Cancelled — sentiment BULLISH")
+        st.add_scan_log(f"[S6][{symbol}] 🚫 Cancelled (BULLISH)", "WARN")
+        bot.pending_signals.pop(symbol, None)
+        st.save_pending_signals(bot.pending_signals)
+        return None
+    ps = st.get_pair_state(symbol)
+    if ps.get("s6_signal", "HOLD") not in ("PENDING_SHORT",):
+        logger.info(f"[S6][{symbol}] 🚫 Signal gone — cancelling watcher")
+        bot.pending_signals.pop(symbol, None)
+        st.save_pending_signals(bot.pending_signals)
+        return None
+    try:
+        mark = tr.get_mark_price(symbol)
+    except Exception:
+        return None
+    peak = sig["peak_level"]
+    if not sig.get("fakeout_seen"):
+        if mark > peak:
+            sig["fakeout_seen"] = True
+            st.patch_pair_state(symbol, {"s6_fakeout_seen": True})
+            st.save_pending_signals(bot.pending_signals)
+            logger.info(f"[S6][{symbol}] 🚀 Phase 1 — fakeout above peak {peak:.5f}")
+            st.add_scan_log(f"[S6][{symbol}] Phase 1 fakeout above {peak:.5f}", "INFO")
+    else:
+        if mark < peak:
+            with bot._trade_lock:
+                if symbol in bot.active_positions:
+                    bot.pending_signals.pop(symbol, None)
+                    st.save_pending_signals(bot.pending_signals)
+                    return None
+                if len(bot.active_positions) >= config.MAX_CONCURRENT_TRADES:
+                    return "break"
+                if st.is_pair_paused(symbol):
+                    return None
+                bot._fire_s6(symbol, sig, mark, balance)
+            bot.pending_signals.pop(symbol, None)
+            st.save_pending_signals(bot.pending_signals)
+    return None
+
+
+# ── S6 DNA Snapshot Fields ────────────────────────────────── #
+
+def dna_fields(candles: dict) -> dict:
+    """S6 trade fingerprint: daily EMA slope, price vs EMA, RSI bucket."""
+    from indicators import calculate_ema, calculate_rsi
+    from trade_dna import ema_slope, price_vs_ema, rsi_bucket, _is_empty, _closes_from
+
+    out = {}
+    daily = candles.get("daily")
+    if _is_empty(daily):
+        return out
+    closes_d = _closes_from(daily)
+    ema_d    = calculate_ema(closes_d, 20)
+    rsi_d    = calculate_rsi(closes_d)
+    out["snap_trend_daily_ema_slope"]    = ema_slope(closes_d, 20)
+    out["snap_trend_daily_price_vs_ema"] = price_vs_ema(float(closes_d.iloc[-1]), float(ema_d.iloc[-1]))
+    out["snap_trend_daily_rsi_bucket"]   = rsi_bucket(float(rsi_d.iloc[-1]))
+    return out

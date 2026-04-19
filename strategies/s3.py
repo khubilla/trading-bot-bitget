@@ -20,11 +20,15 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from config_s3 import S3_LTF_INTERVAL
 from indicators import calculate_adx, calculate_ema, calculate_macd, calculate_stoch
 from tools import find_nearest_resistance
 
 logger = logging.getLogger(__name__)
 Signal = Literal["LONG", "SHORT", "HOLD", "PENDING_LONG", "PENDING_SHORT"]
+
+# Default candle interval for S3 event snapshots.
+SNAPSHOT_INTERVAL = S3_LTF_INTERVAL  # "15m"
 
 
 def evaluate_s3(
@@ -250,3 +254,120 @@ def maybe_trail_sl(symbol: str, ap: dict, tr_mod, st_mod) -> None:
                     logger.info(f"[S3][{symbol}] 📍 Swing trail: SL → {swing_sl:.5f} (15m swing low after ref high {ref:.5f})")
     except Exception as e:
         logger.error(f"S3 swing trail error [{symbol}]: {e}")
+
+
+# ── S3 DNA Snapshot Fields ────────────────────────────────── #
+
+def dna_fields(candles: dict) -> dict:
+    """S3 trade fingerprint: m15 EMA slope, price vs EMA, ADX state."""
+    from indicators import calculate_ema, calculate_adx
+    from trade_dna import ema_slope, price_vs_ema, adx_state, _is_empty, _closes_from
+
+    out = {}
+    m15 = candles.get("m15")
+    if _is_empty(m15):
+        return out
+    closes_m15 = _closes_from(m15)
+    ema_m15    = calculate_ema(closes_m15, 20)
+    out["snap_trend_m15_ema_slope"]    = ema_slope(closes_m15, 20)
+    out["snap_trend_m15_price_vs_ema"] = price_vs_ema(float(closes_m15.iloc[-1]), float(ema_m15.iloc[-1]))
+    if hasattr(m15, "columns") and len(m15) >= 20:
+        adx_m15 = calculate_adx(m15)["adx"]
+        out["snap_trend_m15_adx_state"] = adx_state(adx_m15)
+    else:
+        out["snap_trend_m15_adx_state"] = ""
+    return out
+
+
+# ── S3 Pending-Signal Queue ───────────────────────────────── #
+
+def queue_pending(bot, c: dict) -> None:
+    """Queue an S3 LONG pullback on bot.pending_signals for the entry watcher."""
+    import time as _t
+    import state as st
+    import config_s3
+
+    symbol = c["symbol"]
+    s3_trigger = c["s3_trigger"]
+    s3_sl      = c["s3_sl"]
+    rr = round(config_s3.S3_TRAILING_TRIGGER_PCT * s3_trigger / (s3_trigger - s3_sl), 2) \
+         if s3_trigger and s3_sl and s3_trigger > s3_sl else None
+    bot.pending_signals[symbol] = {
+        "strategy":           "S3",
+        "side":               "LONG",
+        "trigger":            s3_trigger,
+        "s3_sl":              s3_sl,
+        "priority_rank":      c.get("priority_rank", 999),
+        "priority_score":     c.get("priority_score", 0.0),
+        "snap_adx":           round(c["s3_adx"], 1) if c.get("s3_adx") else None,
+        "snap_entry_trigger": round(s3_trigger, 8),
+        "snap_sl":            round(s3_sl, 8),
+        "snap_rr":            rr,
+        "snap_sentiment":     bot.sentiment.direction if bot.sentiment else "?",
+        "snap_sr_clearance_pct": c.get("s3_sr_resistance_pct"),
+        "expires":            _t.time() + 86400,
+    }
+    st.save_pending_signals(bot.pending_signals)
+    logger.info(
+        f"[S3][{symbol}] 🕐 PENDING LONG queued | "
+        f"trigger={s3_trigger:.5f} | SL={s3_sl:.5f}"
+    )
+    st.add_scan_log(
+        f"[S3][{symbol}] 🕐 PENDING LONG | trigger={s3_trigger:.5f}", "SIGNAL"
+    )
+
+
+# ── S3 Entry Watcher (pending tick) ───────────────────────── #
+
+def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
+                        paper_mode: bool | None = None) -> str | None:
+    """S3 pullback trigger + invalidation check. Return 'break' to stop outer loop."""
+    import state as st
+    import trader as tr
+    import config, config_s3
+
+    ps = st.get_pair_state(symbol)
+    if ps.get("s3_signal", "HOLD") not in ("LONG",):
+        logger.info(f"[S3][{symbol}] 🚫 Signal gone — cancelling pending")
+        st.add_scan_log(f"[S3][{symbol}] 🚫 Pending cancelled (signal gone)", "INFO")
+        bot.pending_signals.pop(symbol, None)
+        st.save_pending_signals(bot.pending_signals)
+        return None
+    try:
+        mark = tr.get_mark_price(symbol)
+    except Exception:
+        return None
+    s3_sl = sig["s3_sl"]
+    if mark < s3_sl:
+        logger.info(f"[S3][{symbol}] ❌ Invalidated — mark {mark:.5f} < SL {s3_sl:.5f}")
+        st.add_scan_log(f"[S3][{symbol}] ❌ Pending cancelled (price below SL)", "INFO")
+        bot.pending_signals.pop(symbol, None)
+        st.save_pending_signals(bot.pending_signals)
+        return None
+    s3_trigger = sig["trigger"]
+    in_window = s3_trigger <= mark <= s3_trigger * (1 + config_s3.S3_MAX_ENTRY_BUFFER)
+    if in_window:
+        with bot._trade_lock:
+            if symbol in bot.active_positions:
+                bot.pending_signals.pop(symbol, None)
+                st.save_pending_signals(bot.pending_signals)
+                return None
+            if len(bot.active_positions) >= config.MAX_CONCURRENT_TRADES:
+                return "break"
+            if st.is_pair_paused(symbol):
+                return None
+            bot._fire_s3(symbol, sig, mark, balance)
+        bot.pending_signals.pop(symbol, None)
+        st.save_pending_signals(bot.pending_signals)
+    return None
+
+
+# ── S3 Paper Trail Setup ──────────────────────────────────── #
+
+def compute_paper_trail_long(mark: float, sl_price: float, tp_price_abs: float = 0,
+                             take_profit_pct: float = 0.05) -> tuple[bool, float, float, float, bool]:
+    """Paper-trader LONG trail setup for S3. Returns (use_trailing, trail_trigger, trail_range, tp_price, breakeven_after_partial)."""
+    from config_s3 import S3_TRAILING_TRIGGER_PCT, S3_TRAILING_RANGE_PCT
+    trail_trigger = mark * (1 + S3_TRAILING_TRIGGER_PCT)
+    trail_range   = S3_TRAILING_RANGE_PCT
+    return True, trail_trigger, trail_range, trail_trigger, False

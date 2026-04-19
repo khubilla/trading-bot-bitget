@@ -213,14 +213,17 @@ def _df_to_candles(df) -> list[dict]:
     ]
 
 
-_STRATEGY_CANDLE_INTERVAL = {
-    "S1": config_s1.LTF_INTERVAL,    # "3m"
-    "S2": "1D",
-    "S3": config_s3.S3_LTF_INTERVAL, # "15m"
-    "S4": "1D",
-    "S5": config_s5.S5_LTF_INTERVAL, # "15m"
-    "S6": "1D",
-}
+def _snapshot_interval(strategy: str) -> str:
+    """Return the candle interval this strategy uses for event snapshots.
+
+    Each strategy module owns its own `SNAPSHOT_INTERVAL`; missing modules
+    fall back to "15m" so unknown strategies never break the snapshot path.
+    """
+    from importlib import import_module
+    try:
+        return import_module(f"strategies.{strategy.lower()}").SNAPSHOT_INTERVAL
+    except (ImportError, AttributeError):
+        return "15m"
 
 
 def _rebuild_stats_from_csv(csv_path: str):
@@ -401,7 +404,7 @@ class MTFBot:
                             "pnl_pct": partial_pct, "exit_reason": "PARTIAL_TP",
                         })
                         try:
-                            _si = _STRATEGY_CANDLE_INTERVAL.get(ap["strategy"], "15m")
+                            _si = _snapshot_interval(ap["strategy"])
                             _sdf = tr.get_candles(sym, _si, limit=100)
                             if not _sdf.empty:
                                 snapshot.save_snapshot(
@@ -448,7 +451,7 @@ class MTFBot:
                         "exit_price":  round(exit_p, 8) if exit_p else None,
                     })
                     try:
-                        _si = _STRATEGY_CANDLE_INTERVAL.get(strategy, "15m")
+                        _si = _snapshot_interval(strategy)
                         _sdf = tr.get_candles(sym, _si, limit=100)
                         if not _sdf.empty:
                             snapshot.save_snapshot(
@@ -829,7 +832,7 @@ class MTFBot:
                     logger.info(f"[{pc['strategy']}][{pc['symbol']}] 📊 Partial logged: PnL={pc['pnl']:+.4f} ({pc['pnl_pct']:+.1f}%)")
                     try:
                         _pc_tid = self.active_positions.get(pc["symbol"], {}).get("trade_id", "")
-                        _pc_int = _STRATEGY_CANDLE_INTERVAL.get(pc["strategy"], "15m")
+                        _pc_int = _snapshot_interval(pc["strategy"])
                         _pc_df  = tr.get_candles(pc["symbol"], _pc_int, limit=100)
                         if not _pc_df.empty:
                             snapshot.save_snapshot(
@@ -894,7 +897,7 @@ class MTFBot:
                                 "pnl_pct": partial_pct, "exit_reason": "PARTIAL_TP",
                             })
                             try:
-                                interval = _STRATEGY_CANDLE_INTERVAL.get(ap["strategy"], "15m")
+                                interval = _snapshot_interval(ap["strategy"])
                                 _snap_df = tr.get_candles(sym, interval, limit=100)
                                 if not _snap_df.empty:
                                     snapshot.save_snapshot(
@@ -1029,7 +1032,7 @@ class MTFBot:
                         "exit_price": _exit_price,
                     })
                     try:
-                        interval = _STRATEGY_CANDLE_INTERVAL.get(ap["strategy"], "15m")
+                        interval = _snapshot_interval(ap["strategy"])
                         _snap_df = tr.get_candles(sym, interval, limit=100)
                         if not _snap_df.empty:
                             snapshot.save_snapshot(
@@ -1107,7 +1110,7 @@ class MTFBot:
                         "exit_price":  _exit_price,
                     })
                     try:
-                        _interval = _STRATEGY_CANDLE_INTERVAL.get(_strategy, "15m")
+                        _interval = _snapshot_interval(_strategy)
                         _snap_df  = tr.get_candles(_sym, _interval, limit=100)
                         if not _snap_df.empty:
                             snapshot.save_snapshot(
@@ -1674,7 +1677,7 @@ class MTFBot:
                         logger.warning(f"[{ap['strategy']}][{sym}] ⚠️ Scale-in exits refresh error: {_ref_e}")
                 # Save scale-in snapshot
                 try:
-                    interval = _STRATEGY_CANDLE_INTERVAL.get(ap["strategy"], "15m")
+                    interval = _snapshot_interval(ap["strategy"])
                     _snap_df = tr.get_candles(sym, interval, limit=100)
                     if not _snap_df.empty:
                         snapshot.save_snapshot(
@@ -1904,284 +1907,30 @@ class MTFBot:
     def _queue_s5_pending(self, symbol: str, sig: str, trigger: float, sl: float,
                           tp: float, ob_low: float, ob_high: float, m15_df,
                           priority_rank: int = 999, priority_score: float = 0.0) -> None:
-        """Pre-validate an S5 PENDING signal (S/R + Claude) and add to pending_signals."""
-        side = "LONG" if sig == "PENDING_LONG" else "SHORT"
-        # Claude filter
-        if config.CLAUDE_FILTER_ENABLED:
-            _cd = claude_approve("S5", symbol, {
-                "OB zone":            f"{ob_low:.5f}–{ob_high:.5f}",
-                "Sentiment":           self.sentiment.direction if self.sentiment else "?",
-                "Entry trigger":       round(trigger, 5),
-                "SL":                  round(sl, 5),
-            })
-            if not _cd["approved"]:
-                logger.info(f"[S5][{symbol}] 🤖 PENDING rejected: {_cd['reason']}")
-                st.add_scan_log(f"[S5][{symbol}] 🤖 PENDING rejected: {_cd['reason']}", "WARN")
-                return
-        rr = round((tp - trigger) / (trigger - sl), 2) if side == "LONG" and tp > trigger > sl > 0 \
-             else round((trigger - tp) / (sl - trigger), 2) if 0 < tp < trigger < sl else None
-        self.pending_signals[symbol] = {
-            "strategy": "S5", "side": side,
-            "trigger": trigger, "sl": sl, "tp": tp,
-            "ob_low": ob_low, "ob_high": ob_high,
-            "rr": rr, "sr_clearance_pct": None,
-            "sentiment": self.sentiment.direction if self.sentiment else "?",
-            "expires": time.time() + 4 * 3600,
-            "priority_rank": priority_rank,
-            "priority_score": priority_score,
-            "order_id": None,   # filled in below
-            "qty_str": None,    # filled in below (needed by _handle_limit_filled)
-        }
-        # Place the GTC limit order immediately — SL preset so position is protected on fill
-        if not PAPER_MODE:
-            try:
-                balance  = tr.get_usdt_balance()
-                equity   = tr._get_total_equity() or balance
-                notional = equity * config_s5.S5_TRADE_SIZE_PCT * config_s5.S5_LEVERAGE
-                mark     = tr.get_mark_price(symbol)
-                # Validate against live mark — evaluate_s5 uses 15m close which may lag the live tick.
-                # Guard 1a: OB already invalidated (price broke through the OB entirely)
-                if side == "LONG" and mark < ob_low * (1 - config_s5.S5_OB_INVALIDATION_BUFFER_PCT):
-                    logger.warning(
-                        f"[S5][{symbol}] ⚠️ PENDING LONG skipped: mark {mark:.5f} already < "
-                        f"ob_low {ob_low:.5f} — OB invalidated"
-                    )
-                    self.pending_signals.pop(symbol, None)
-                    return
-                elif side == "SHORT" and mark > ob_high * (1 + config_s5.S5_MAX_ENTRY_BUFFER):
-                    logger.warning(
-                        f"[S5][{symbol}] ⚠️ PENDING SHORT skipped: mark {mark:.5f} already > "
-                        f"ob_high {ob_high:.5f} — OB invalidated"
-                    )
-                    self.pending_signals.pop(symbol, None)
-                    return
-                # Guard 1b: price must not have already blown through the trigger.
-                # A LONG trigger at ob_high should only be placed if mark is still BELOW the trigger
-                # (i.e. price hasn't yet reached the OB). If mark is already past trigger,
-                # the trigger would fire immediately at the wrong price or thrash near the level.
-                # Allow mark == trigger as valid edge case (order may fill immediately).
-                if side == "LONG" and mark > trigger:
-                    logger.warning(
-                        f"[S5][{symbol}] ⚠️ PENDING LONG skipped: mark {mark:.5f} already > "
-                        f"trigger {trigger:.5f} — price already above OB entry"
-                    )
-                    self.pending_signals.pop(symbol, None)
-                    return
-                elif side == "SHORT" and mark < trigger:
-                    logger.warning(
-                        f"[S5][{symbol}] ⚠️ PENDING SHORT skipped: mark {mark:.5f} already < "
-                        f"trigger {trigger:.5f} — price already below OB entry"
-                    )
-                    self.pending_signals.pop(symbol, None)
-                    return
-                # Guard 2: Bitget rejects trigger orders placed too far from current mark.
-                # For trigger orders: LONG trigger must be above mark, SHORT trigger below mark.
-                # But not TOO far (Bitget exchange limit ≈10-15%, we use 10% to be safe).
-                max_trigger_distance = 0.10  # 10% max distance from mark to trigger
-                if side == "LONG" and trigger > mark * (1 + max_trigger_distance):
-                    logger.warning(
-                        f"[S5][{symbol}] ⚠️ PENDING LONG skipped: trigger {trigger:.5f} is "
-                        f">{max_trigger_distance * 100:.0f}% above live mark {mark:.5f} "
-                        f"(Bitget exchange limit)"
-                    )
-                    self.pending_signals.pop(symbol, None)
-                    return
-                elif side == "SHORT" and trigger < mark * (1 - max_trigger_distance):
-                    logger.warning(
-                        f"[S5][{symbol}] ⚠️ PENDING SHORT skipped: trigger {trigger:.5f} is "
-                        f">{max_trigger_distance * 100:.0f}% below live mark {mark:.5f} "
-                        f"(Bitget exchange limit)"
-                    )
-                    self.pending_signals.pop(symbol, None)
-                    return
-                # NOTE: qty snapped at queue time, not fill time — acceptable for S5 (positions sized conservatively)
-                qty_str  = tr._round_qty(notional / mark, symbol)
-                if side == "LONG":
-                    order_id = tr.place_limit_long(symbol, trigger, sl, tp, qty_str)
-                else:
-                    order_id = tr.place_limit_short(symbol, trigger, sl, tp, qty_str)
-                self.pending_signals[symbol]["order_id"] = order_id
-                self.pending_signals[symbol]["qty_str"]  = qty_str
-                logger.info(
-                    f"[S5][{symbol}] 📋 Limit {side} placed @ {trigger:.5f} | "
-                    f"order_id={order_id} | SL={sl:.5f} | TP={tp:.5f}"
-                )
-            except Exception as e:
-                logger.error(f"[S5][{symbol}] ❌ Failed to place limit order: {e}")
-                self.pending_signals.pop(symbol, None)
-                return
-        else:
-            try:
-                mark = tr.get_mark_price(symbol)
-                # Paper mode: same guards as live mode
-                if side == "LONG" and mark < ob_low * (1 - config_s5.S5_OB_INVALIDATION_BUFFER_PCT):
-                    logger.warning(
-                        f"[S5][{symbol}] ⚠️ PENDING LONG skipped (paper): mark {mark:.5f} < ob_low {ob_low:.5f} — OB invalidated"
-                    )
-                    self.pending_signals.pop(symbol, None)
-                    return
-                elif side == "SHORT" and mark > ob_high * (1 + config_s5.S5_MAX_ENTRY_BUFFER):
-                    logger.warning(
-                        f"[S5][{symbol}] ⚠️ PENDING SHORT skipped (paper): mark {mark:.5f} > ob_high {ob_high:.5f} — OB invalidated"
-                    )
-                    self.pending_signals.pop(symbol, None)
-                    return
-                if side == "LONG" and mark > trigger:
-                    logger.warning(
-                        f"[S5][{symbol}] ⚠️ PENDING LONG skipped (paper): mark {mark:.5f} already > trigger {trigger:.5f}"
-                    )
-                    self.pending_signals.pop(symbol, None)
-                    return
-                elif side == "SHORT" and mark < trigger:
-                    logger.warning(
-                        f"[S5][{symbol}] ⚠️ PENDING SHORT skipped (paper): mark {mark:.5f} already < trigger {trigger:.5f}"
-                    )
-                    self.pending_signals.pop(symbol, None)
-                    return
-                # Guard 2: trigger too far from mark (Bitget exchange limit)
-                max_trigger_distance = 0.10
-                if side == "LONG" and trigger > mark * (1 + max_trigger_distance):
-                    logger.warning(
-                        f"[S5][{symbol}] ⚠️ PENDING LONG skipped (paper): trigger {trigger:.5f} > 10% above mark {mark:.5f}"
-                    )
-                    self.pending_signals.pop(symbol, None)
-                    return
-                elif side == "SHORT" and trigger < mark * (1 - max_trigger_distance):
-                    logger.warning(
-                        f"[S5][{symbol}] ⚠️ PENDING SHORT skipped (paper): trigger {trigger:.5f} > 10% below mark {mark:.5f}"
-                    )
-                    self.pending_signals.pop(symbol, None)
-                    return
-            except Exception:
-                pass
-            self.pending_signals[symbol]["order_id"] = "PAPER"
-        st.save_pending_signals(self.pending_signals)
-        logger.info(
-            f"[S5][{symbol}] 🕐 PENDING {side} queued | "
-            f"trigger={trigger:.5f} | SL={sl:.5f} | TP={tp:.5f} | R:R={rr}"
-        )
-        st.add_scan_log(
-            f"[S5][{symbol}] 🕐 PENDING {side} | trigger={trigger:.5f} | TP={tp:.5f}", "SIGNAL"
-        )
+        """Delegate to strategies.s5.queue_pending (late import to respect test patches)."""
+        from strategies.s5 import queue_pending
+        queue_pending(self, symbol, sig, trigger, sl, tp, ob_low, ob_high, m15_df,
+                      priority_rank, priority_score, paper_mode=PAPER_MODE)
 
     def _queue_s2_pending(self, c: dict) -> None:
-        """Queue an S2 LONG breakout for the entry watcher."""
-        symbol = c["symbol"]
-        self.pending_signals[symbol] = {
-            "strategy":           "S2",
-            "side":               "LONG",
-            "trigger":            c["s2_bh"],
-            "s2_bh":              c["s2_bh"],
-            "s2_bl":              c["s2_bl"],
-            "priority_rank":      c.get("priority_rank", 999),
-            "priority_score":     c.get("priority_score", 0.0),
-            "snap_daily_rsi":     round(c["s2_rsi"], 1),
-            "snap_box_range_pct": round((c["s2_bh"] - c["s2_bl"]) / c["s2_bl"] * 100, 3)
-                                  if c["s2_bh"] and c["s2_bl"] else None,
-            "snap_sentiment":     self.sentiment.direction if self.sentiment else "?",
-            "expires":            time.time() + 86400,  # 24h safety TTL — replaced by signal-check in Task 4
-        }
-        st.save_pending_signals(self.pending_signals)
-        logger.info(
-            f"[S2][{symbol}] 🕐 PENDING LONG queued | "
-            f"trigger={c['s2_bh']:.5f} | SL={c['s2_bl']:.5f}"
-        )
-        st.add_scan_log(
-            f"[S2][{symbol}] 🕐 PENDING LONG | trigger={c['s2_bh']:.5f}", "SIGNAL"
-        )
+        """Delegate to strategies.s2.queue_pending."""
+        from strategies.s2 import queue_pending
+        queue_pending(self, c)
 
     def _queue_s3_pending(self, c: dict) -> None:
-        """Queue an S3 LONG pullback for the entry watcher."""
-        symbol = c["symbol"]
-        s3_trigger = c["s3_trigger"]
-        s3_sl      = c["s3_sl"]
-        rr = round(config_s3.S3_TRAILING_TRIGGER_PCT * s3_trigger / (s3_trigger - s3_sl), 2) \
-             if s3_trigger and s3_sl and s3_trigger > s3_sl else None
-        self.pending_signals[symbol] = {
-            "strategy":           "S3",
-            "side":               "LONG",
-            "trigger":            s3_trigger,
-            "s3_sl":              s3_sl,
-            "priority_rank":      c.get("priority_rank", 999),
-            "priority_score":     c.get("priority_score", 0.0),
-            "snap_adx":           round(c["s3_adx"], 1) if c.get("s3_adx") else None,
-            "snap_entry_trigger": round(s3_trigger, 8),
-            "snap_sl":            round(s3_sl, 8),
-            "snap_rr":            rr,
-            "snap_sentiment":     self.sentiment.direction if self.sentiment else "?",
-            "snap_sr_clearance_pct": c.get("s3_sr_resistance_pct"),
-            "expires":            time.time() + 86400,  # 24h safety TTL — replaced by signal-check in Task 4
-        }
-        st.save_pending_signals(self.pending_signals)
-        logger.info(
-            f"[S3][{symbol}] 🕐 PENDING LONG queued | "
-            f"trigger={s3_trigger:.5f} | SL={s3_sl:.5f}"
-        )
-        st.add_scan_log(
-            f"[S3][{symbol}] 🕐 PENDING LONG | trigger={s3_trigger:.5f}", "SIGNAL"
-        )
+        """Delegate to strategies.s3.queue_pending."""
+        from strategies.s3 import queue_pending
+        queue_pending(self, c)
 
     def _queue_s4_pending(self, c: dict) -> None:
-        """Queue an S4 SHORT spike-reversal for the entry watcher."""
-        symbol = c["symbol"]
-        s4_trigger = c["s4_trigger"]
-        s4_sl      = c["s4_sl"]
-        prev_low_approx = s4_trigger / (1 - config_s4.S4_ENTRY_BUFFER)
-        self.pending_signals[symbol] = {
-            "strategy":             "S4",
-            "side":                 "SHORT",
-            "trigger":              s4_trigger,
-            "s4_sl":                s4_sl,
-            "prev_low":             prev_low_approx,
-            "priority_rank":        c.get("priority_rank", 999),
-            "priority_score":       c.get("priority_score", 0.0),
-            "snap_rsi":             round(c["s4_rsi"], 1),
-            "snap_rsi_peak":        round(c["s4_rsi_peak"], 1),
-            "snap_spike_body_pct":  round(c["s4_body_pct"] * 100, 1),
-            "snap_rsi_div":         c["s4_div"],
-            "snap_rsi_div_str":     c["s4_div_str"],
-            "snap_sentiment":       self.sentiment.direction if self.sentiment else "?",
-            "expires":              time.time() + 86400,  # 24h safety TTL — replaced by signal-check in Task 4
-        }
-        st.save_pending_signals(self.pending_signals)
-        logger.info(
-            f"[S4][{symbol}] 🕐 PENDING SHORT queued | "
-            f"trigger≤{s4_trigger:.5f} | SL={s4_sl:.5f}"
-        )
-        st.add_scan_log(
-            f"[S4][{symbol}] 🕐 PENDING SHORT | trigger≤{s4_trigger:.5f}", "SIGNAL"
-        )
+        """Delegate to strategies.s4.queue_pending."""
+        from strategies.s4 import queue_pending
+        queue_pending(self, c)
 
     def _queue_s6_pending(self, candidate: dict) -> None:
-        """Queue an S6 two-phase V-formation watcher into pending_signals."""
-        symbol = candidate["symbol"]
-        self.pending_signals[symbol] = {
-            "strategy":           "S6",
-            "side":               "SHORT",
-            "peak_level":         candidate["s6_peak_level"],
-            "sl":                 candidate["s6_sl"],
-            "drop_pct":           candidate["s6_drop_pct"],
-            "rsi_at_peak":        candidate["s6_rsi_at_peak"],
-            "fakeout_seen":       False,
-            "detected_at":        time.time(),
-            "snap_s6_peak":       round(candidate["s6_peak_level"], 8),
-            "snap_s6_drop_pct":   round(candidate["s6_drop_pct"] * 100, 2),
-            "snap_s6_rsi_at_peak": round(candidate["s6_rsi_at_peak"], 1),
-            "snap_sentiment":     self.sentiment.direction if self.sentiment else "?",
-            "priority_rank":      candidate.get("priority_rank", 999),
-            "priority_score":     candidate.get("priority_score", 0.0),
-            "expires":            time.time() + 30 * 86400,  # 30d TTL — matches old s6_watchers behaviour
-        }
-        st.patch_pair_state(symbol, {"s6_fakeout_seen": False})
-        st.save_pending_signals(self.pending_signals)
-        logger.info(
-            f"[S6][{symbol}] 🕐 V-formation watcher queued | "
-            f"peak={candidate['s6_peak_level']:.5f} | SL={candidate['s6_sl']:.5f}"
-        )
-        st.add_scan_log(
-            f"[S6][{symbol}] 🕐 V-formation watcher | peak={candidate['s6_peak_level']:.5f}",
-            "SIGNAL"
-        )
+        """Delegate to strategies.s6.queue_pending."""
+        from strategies.s6 import queue_pending
+        queue_pending(self, candidate)
 
     def _fire_s2(self, symbol: str, sig: dict, mark: float, balance: float) -> None:
         """Open S2 LONG at fire time. Runs S/R check against pair_states."""
@@ -2473,259 +2222,18 @@ class MTFBot:
 
                     strategy = sig.get("strategy")
 
-                    if strategy == "S5":
-                        # ── S5: order-fill polling path ──────────────── #
-                        # Cancel if scanner no longer sees a PENDING signal (e.g. BOS failed)
-                        ps = st.get_pair_state(symbol)
-                        if ps.get("s5_signal", "HOLD") != "PENDING":
-                            order_id = sig.get("order_id")
-                            # Check fill status BEFORE cancelling — if already filled, register the trade
-                            fill_info = None
-                            try:
-                                fill_info = tr.get_order_fill(symbol, order_id)
-                            except Exception as e:
-                                logger.warning(f"[S5][{symbol}] fill-check error: {e}")
-                            if fill_info and fill_info["status"] == "filled":
-                                logger.info(f"[S5][{symbol}] Order already filled despite signal gone — registering trade")
-                                with self._trade_lock:
-                                    if symbol not in self.active_positions and not st.is_pair_paused(symbol):
-                                        self._handle_limit_filled(symbol, sig, fill_info["fill_price"], balance)
-                                self.pending_signals.pop(symbol, None)
-                                st.save_pending_signals(self.pending_signals)
-                                continue
-                            try:
-                                tr.cancel_order(symbol, order_id)
-                            except Exception as e:
-                                logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
-                            logger.info(f"[S5][{symbol}] 🚫 Signal gone — limit cancelled")
-                            st.add_scan_log(f"[S5][{symbol}] 🚫 Signal gone — limit cancelled", "INFO")
-                            self.pending_signals.pop(symbol, None)
-                            continue
-                        order_id = sig.get("order_id")
+                    if strategy in ("S2", "S3", "S4", "S5", "S6"):
+                        # Delegate to the strategy module's handle_pending_tick.
+                        # Returns "break" to stop the outer for-loop (MAX_CONCURRENT_TRADES hit).
+                        from importlib import import_module
                         try:
-                            mark = tr.get_mark_price(symbol)
-                        except Exception:
-                            continue
-                        side = sig["side"]
-
-                        # Determine fill info (real vs paper)
-                        fill_info = None
-                        if PAPER_MODE and order_id == "PAPER":
-                            # Simulate fill by price comparison
-                            # LONG trigger fires when price RISES to trigger (mark >= trigger)
-                            # SHORT trigger fires when price FALLS to trigger (mark <= trigger)
-                            paper_triggered = (
-                                (side == "LONG"  and mark >= sig["trigger"]) or
-                                (side == "SHORT" and mark <= sig["trigger"])
-                            )
-                            if paper_triggered:
-                                fill_info = {"status": "filled", "fill_price": sig["trigger"]}
-                            else:
-                                fill_info = {"status": "live", "fill_price": 0.0}
-                        else:
-                            try:
-                                fill_info = tr.get_order_fill(symbol, order_id)
-                            except Exception as e:
-                                logger.warning(f"[S5][{symbol}] get_order_fill error: {e}")
-                                continue
-
-                        if fill_info["status"] == "filled":
-                            with self._trade_lock:
-                                if symbol in self.active_positions:
-                                    self.pending_signals.pop(symbol, None)
-                                    continue
-                                if st.is_pair_paused(symbol):
-                                    continue
-                                self._handle_limit_filled(symbol, sig, fill_info["fill_price"], balance)
-                            self.pending_signals.pop(symbol, None)
-                            st.save_pending_signals(self.pending_signals)
-
-                        elif (side == "LONG"  and
-                              mark < sig["ob_low"] * (1 - config_s5.S5_OB_INVALIDATION_BUFFER_PCT)):
-                            try:
-                                tr.cancel_order(symbol, order_id)
-                            except Exception as e:
-                                logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
-                            logger.info(
-                                f"[S5][{symbol}] ❌ Limit cancelled — OB invalidated (mark={mark:.5f})"
-                            )
-                            st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
-                            self._s5_ob_invalidated_at[symbol] = time.time()
-                            self.pending_signals.pop(symbol, None)
-
-                        elif (side == "SHORT" and
-                              mark > sig["ob_high"] * (1 + config_s5.S5_MAX_ENTRY_BUFFER)):
-                            try:
-                                tr.cancel_order(symbol, order_id)
-                            except Exception as e:
-                                logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
-                            logger.info(
-                                f"[S5][{symbol}] ❌ Limit cancelled — OB invalidated (mark={mark:.5f})"
-                            )
-                            st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
-                            self._s5_ob_invalidated_at[symbol] = time.time()
-                            self.pending_signals.pop(symbol, None)
-
-                        elif time.time() > sig["expires"]:
-                            try:
-                                tr.cancel_order(symbol, order_id)
-                            except Exception as e:
-                                logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
-                            logger.info(f"[S5][{symbol}] ⏰ Limit cancelled — expired")
-                            st.add_scan_log(f"[S5][{symbol}] ⏰ Limit expired — cancelled", "INFO")
-                            self.pending_signals.pop(symbol, None)
-
-                    elif strategy == "S2":
-                        # ── S2: breakout trigger + invalidation ───────── #
-                        ps = st.get_pair_state(symbol)
-                        if ps.get("s2_signal", "HOLD") not in ("LONG",):
-                            logger.info(f"[S2][{symbol}] 🚫 Signal gone — cancelling pending")
-                            st.add_scan_log(f"[S2][{symbol}] 🚫 Pending cancelled (signal gone)", "INFO")
-                            self.pending_signals.pop(symbol, None)
-                            st.save_pending_signals(self.pending_signals)
-                            continue
-                        try:
-                            mark = tr.get_mark_price(symbol)
-                        except Exception:
-                            continue
-                        s2_bh = sig["s2_bh"]
-                        s2_bl = sig["s2_bl"]
-                        if mark < s2_bl:
-                            logger.info(f"[S2][{symbol}] ❌ Invalidated — mark {mark:.5f} < box_low {s2_bl:.5f}")
-                            st.add_scan_log(f"[S2][{symbol}] ❌ Pending cancelled (price below box)", "INFO")
-                            self.pending_signals.pop(symbol, None)
-                            st.save_pending_signals(self.pending_signals)
-                            continue
-                        in_window = s2_bh <= mark <= s2_bh * (1 + config_s2.S2_MAX_ENTRY_BUFFER)
-                        if in_window:
-                            with self._trade_lock:
-                                if symbol in self.active_positions:
-                                    self.pending_signals.pop(symbol, None)
-                                    st.save_pending_signals(self.pending_signals)
-                                    continue
-                                if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
-                                    break
-                                if st.is_pair_paused(symbol):
-                                    continue
-                                self._fire_s2(symbol, sig, mark, balance)
-                            self.pending_signals.pop(symbol, None)
-                            st.save_pending_signals(self.pending_signals)
-
-                    elif strategy == "S3":
-                        # ── S3: pullback trigger + invalidation ───────── #
-                        ps = st.get_pair_state(symbol)
-                        if ps.get("s3_signal", "HOLD") not in ("LONG",):
-                            logger.info(f"[S3][{symbol}] 🚫 Signal gone — cancelling pending")
-                            st.add_scan_log(f"[S3][{symbol}] 🚫 Pending cancelled (signal gone)", "INFO")
-                            self.pending_signals.pop(symbol, None)
-                            st.save_pending_signals(self.pending_signals)
-                            continue
-                        try:
-                            mark = tr.get_mark_price(symbol)
-                        except Exception:
-                            continue
-                        s3_sl = sig["s3_sl"]
-                        if mark < s3_sl:
-                            logger.info(f"[S3][{symbol}] ❌ Invalidated — mark {mark:.5f} < SL {s3_sl:.5f}")
-                            st.add_scan_log(f"[S3][{symbol}] ❌ Pending cancelled (price below SL)", "INFO")
-                            self.pending_signals.pop(symbol, None)
-                            st.save_pending_signals(self.pending_signals)
-                            continue
-                        s3_trigger = sig["trigger"]
-                        in_window = s3_trigger <= mark <= s3_trigger * (1 + config_s3.S3_MAX_ENTRY_BUFFER)
-                        if in_window:
-                            with self._trade_lock:
-                                if symbol in self.active_positions:
-                                    self.pending_signals.pop(symbol, None)
-                                    st.save_pending_signals(self.pending_signals)
-                                    continue
-                                if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
-                                    break
-                                if st.is_pair_paused(symbol):
-                                    continue
-                                self._fire_s3(symbol, sig, mark, balance)
-                            self.pending_signals.pop(symbol, None)
-                            st.save_pending_signals(self.pending_signals)
-
-                    elif strategy == "S4":
-                        # ── S4: spike-reversal trigger + invalidation ─── #
-                        ps = st.get_pair_state(symbol)
-                        if ps.get("s4_signal", "HOLD") not in ("SHORT",):
-                            logger.info(f"[S4][{symbol}] 🚫 Signal gone — cancelling pending")
-                            st.add_scan_log(f"[S4][{symbol}] 🚫 Pending cancelled (signal gone)", "INFO")
-                            self.pending_signals.pop(symbol, None)
-                            st.save_pending_signals(self.pending_signals)
-                            continue
-                        try:
-                            mark = tr.get_mark_price(symbol)
-                        except Exception:
-                            continue
-                        s4_sl = sig["s4_sl"]
-                        if mark > s4_sl:
-                            logger.info(f"[S4][{symbol}] ❌ Invalidated — mark {mark:.5f} > SL {s4_sl:.5f}")
-                            st.add_scan_log(f"[S4][{symbol}] ❌ Pending cancelled (price above SL)", "INFO")
-                            self.pending_signals.pop(symbol, None)
-                            st.save_pending_signals(self.pending_signals)
-                            continue
-                        s4_trigger = sig["trigger"]
-                        prev_low   = sig["prev_low"]
-                        in_window  = (mark <= s4_trigger and
-                                      mark >= prev_low * (1 - config_s4.S4_MAX_ENTRY_BUFFER))
-                        if in_window:
-                            with self._trade_lock:
-                                if symbol in self.active_positions:
-                                    self.pending_signals.pop(symbol, None)
-                                    st.save_pending_signals(self.pending_signals)
-                                    continue
-                                if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
-                                    break
-                                if st.is_pair_paused(symbol):
-                                    continue
-                                self._fire_s4(symbol, sig, mark, balance)
-                            self.pending_signals.pop(symbol, None)
-                            st.save_pending_signals(self.pending_signals)
-
-                    elif strategy == "S6":
-                        # ── S6: two-phase V-formation ─────────────────── #
-                        if self.sentiment and self.sentiment.direction == "BULLISH":
-                            logger.info(f"[S6][{symbol}] 🚫 Cancelled — sentiment BULLISH")
-                            st.add_scan_log(f"[S6][{symbol}] 🚫 Cancelled (BULLISH)", "WARN")
-                            self.pending_signals.pop(symbol, None)
-                            st.save_pending_signals(self.pending_signals)
-                            continue
-                        ps = st.get_pair_state(symbol)
-                        if ps.get("s6_signal", "HOLD") not in ("PENDING_SHORT",):
-                            logger.info(f"[S6][{symbol}] 🚫 Signal gone — cancelling watcher")
-                            self.pending_signals.pop(symbol, None)
-                            st.save_pending_signals(self.pending_signals)
-                            continue
-                        try:
-                            mark = tr.get_mark_price(symbol)
-                        except Exception:
-                            continue
-                        peak = sig["peak_level"]
-                        if not sig.get("fakeout_seen"):
-                            if mark > peak:
-                                sig["fakeout_seen"] = True
-                                st.patch_pair_state(symbol, {"s6_fakeout_seen": True})
-                                st.save_pending_signals(self.pending_signals)
-                                logger.info(f"[S6][{symbol}] 🚀 Phase 1 — fakeout above peak {peak:.5f}")
-                                st.add_scan_log(f"[S6][{symbol}] Phase 1 fakeout above {peak:.5f}", "INFO")
-                        else:
-                            if mark < peak:
-                                with self._trade_lock:
-                                    if symbol in self.active_positions:
-                                        self.pending_signals.pop(symbol, None)
-                                        st.save_pending_signals(self.pending_signals)
-                                        continue
-                                    if len(self.active_positions) >= config.MAX_CONCURRENT_TRADES:
-                                        break
-                                    if st.is_pair_paused(symbol):
-                                        continue
-                                    self._fire_s6(symbol, sig, mark, balance)
-                                self.pending_signals.pop(symbol, None)
-                                st.save_pending_signals(self.pending_signals)
-
+                            mod = import_module(f"strategies.{strategy.lower()}")
+                            result = mod.handle_pending_tick(self, symbol, sig, balance,
+                                                             paper_mode=PAPER_MODE)
+                            if result == "break":
+                                break
+                        except Exception as e:
+                            logger.error(f"[{strategy}][{symbol}] pending tick error: {e}")
                     else:
                         # ── Unknown strategy: expire stale signals ──── #
                         if time.time() > sig.get("expires", 0):

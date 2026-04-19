@@ -24,6 +24,7 @@ from typing import Literal
 
 import pandas as pd
 
+from config_s5 import S5_LTF_INTERVAL
 from indicators import calculate_ema
 from tools import (
     find_bearish_ob,
@@ -32,6 +33,9 @@ from tools import (
     find_swing_high_target,
     find_swing_low_target,
 )
+
+# Default candle interval for S5 event snapshots.
+SNAPSHOT_INTERVAL = S5_LTF_INTERVAL  # "15m"
 
 logger = logging.getLogger(__name__)
 Signal = Literal["LONG", "SHORT", "HOLD", "PENDING_LONG", "PENDING_SHORT"]
@@ -422,3 +426,329 @@ def maybe_trail_sl(symbol: str, ap: dict, tr_mod, st_mod) -> None:
                         logger.info(f"[S5][{symbol}] 📍 Swing trail: SL → {swing_sl:.5f} (swing high after ref low {ref:.5f})")
     except Exception as e:
         logger.error(f"S5 swing trail error [{symbol}]: {e}")
+
+
+# ── S5 DNA Snapshot Fields ────────────────────────────────── #
+
+def dna_fields(candles: dict) -> dict:
+    """S5 trade fingerprint: daily/H1/m15 EMA slope and price vs EMA."""
+    from indicators import calculate_ema
+    from trade_dna import ema_slope, price_vs_ema, _is_empty, _closes_from
+
+    out = {}
+    daily = candles.get("daily")
+    h1    = candles.get("h1")
+    m15   = candles.get("m15")
+    if not _is_empty(daily):
+        closes_d = _closes_from(daily)
+        ema_d    = calculate_ema(closes_d, 20)
+        out["snap_trend_daily_ema_slope"]    = ema_slope(closes_d, 20)
+        out["snap_trend_daily_price_vs_ema"] = price_vs_ema(float(closes_d.iloc[-1]), float(ema_d.iloc[-1]))
+    if not _is_empty(h1):
+        closes_h = _closes_from(h1)
+        ema_h    = calculate_ema(closes_h, 20)
+        out["snap_trend_h1_ema_slope"]    = ema_slope(closes_h, 20)
+        out["snap_trend_h1_price_vs_ema"] = price_vs_ema(float(closes_h.iloc[-1]), float(ema_h.iloc[-1]))
+    if not _is_empty(m15):
+        closes_m15 = _closes_from(m15)
+        ema_m15    = calculate_ema(closes_m15, 20)
+        out["snap_trend_m15_ema_slope"]    = ema_slope(closes_m15, 20)
+        out["snap_trend_m15_price_vs_ema"] = price_vs_ema(float(closes_m15.iloc[-1]), float(ema_m15.iloc[-1]))
+    return out
+
+
+# ── S5 Pending-Signal Queue ───────────────────────────────── #
+
+def queue_pending(bot, symbol: str, sig: str, trigger: float, sl: float,
+                  tp: float, ob_low: float, ob_high: float, m15_df,
+                  priority_rank: int = 999, priority_score: float = 0.0,
+                  paper_mode: bool | None = None) -> None:
+    """Pre-validate an S5 PENDING signal (Claude filter + pre-flight guards) and place limit order."""
+    import time as _t
+    import state as st
+    import config
+    import config_s5
+    import trader as tr
+    from claude_filter import claude_approve
+
+    side = "LONG" if sig == "PENDING_LONG" else "SHORT"
+    if config.CLAUDE_FILTER_ENABLED:
+        _cd = claude_approve("S5", symbol, {
+            "OB zone":            f"{ob_low:.5f}–{ob_high:.5f}",
+            "Sentiment":           bot.sentiment.direction if bot.sentiment else "?",
+            "Entry trigger":       round(trigger, 5),
+            "SL":                  round(sl, 5),
+        })
+        if not _cd["approved"]:
+            logger.info(f"[S5][{symbol}] 🤖 PENDING rejected: {_cd['reason']}")
+            st.add_scan_log(f"[S5][{symbol}] 🤖 PENDING rejected: {_cd['reason']}", "WARN")
+            return
+    rr = round((tp - trigger) / (trigger - sl), 2) if side == "LONG" and tp > trigger > sl > 0 \
+         else round((trigger - tp) / (sl - trigger), 2) if 0 < tp < trigger < sl else None
+    bot.pending_signals[symbol] = {
+        "strategy": "S5", "side": side,
+        "trigger": trigger, "sl": sl, "tp": tp,
+        "ob_low": ob_low, "ob_high": ob_high,
+        "rr": rr, "sr_clearance_pct": None,
+        "sentiment": bot.sentiment.direction if bot.sentiment else "?",
+        "expires": _t.time() + 4 * 3600,
+        "priority_rank": priority_rank,
+        "priority_score": priority_score,
+        "order_id": None,
+        "qty_str": None,
+    }
+    # Caller (bot.py) passes its module-level PAPER_MODE. Fall back to looking it
+    # up on the bot module if not provided (e.g. external callers).
+    if paper_mode is None:
+        import bot as _bot
+        paper_mode = getattr(_bot, "PAPER_MODE", False)
+    if not paper_mode:
+        try:
+            balance  = tr.get_usdt_balance()
+            equity   = tr._get_total_equity() or balance
+            notional = equity * config_s5.S5_TRADE_SIZE_PCT * config_s5.S5_LEVERAGE
+            mark     = tr.get_mark_price(symbol)
+            if side == "LONG" and mark < ob_low * (1 - config_s5.S5_OB_INVALIDATION_BUFFER_PCT):
+                logger.warning(
+                    f"[S5][{symbol}] ⚠️ PENDING LONG skipped: mark {mark:.5f} already < "
+                    f"ob_low {ob_low:.5f} — OB invalidated"
+                )
+                bot.pending_signals.pop(symbol, None)
+                return
+            elif side == "SHORT" and mark > ob_high * (1 + config_s5.S5_MAX_ENTRY_BUFFER):
+                logger.warning(
+                    f"[S5][{symbol}] ⚠️ PENDING SHORT skipped: mark {mark:.5f} already > "
+                    f"ob_high {ob_high:.5f} — OB invalidated"
+                )
+                bot.pending_signals.pop(symbol, None)
+                return
+            if side == "LONG" and mark > trigger:
+                logger.warning(
+                    f"[S5][{symbol}] ⚠️ PENDING LONG skipped: mark {mark:.5f} already > "
+                    f"trigger {trigger:.5f} — price already above OB entry"
+                )
+                bot.pending_signals.pop(symbol, None)
+                return
+            elif side == "SHORT" and mark < trigger:
+                logger.warning(
+                    f"[S5][{symbol}] ⚠️ PENDING SHORT skipped: mark {mark:.5f} already < "
+                    f"trigger {trigger:.5f} — price already below OB entry"
+                )
+                bot.pending_signals.pop(symbol, None)
+                return
+            max_trigger_distance = 0.10
+            if side == "LONG" and trigger > mark * (1 + max_trigger_distance):
+                logger.warning(
+                    f"[S5][{symbol}] ⚠️ PENDING LONG skipped: trigger {trigger:.5f} is "
+                    f">{max_trigger_distance * 100:.0f}% above live mark {mark:.5f} "
+                    f"(Bitget exchange limit)"
+                )
+                bot.pending_signals.pop(symbol, None)
+                return
+            elif side == "SHORT" and trigger < mark * (1 - max_trigger_distance):
+                logger.warning(
+                    f"[S5][{symbol}] ⚠️ PENDING SHORT skipped: trigger {trigger:.5f} is "
+                    f">{max_trigger_distance * 100:.0f}% below live mark {mark:.5f} "
+                    f"(Bitget exchange limit)"
+                )
+                bot.pending_signals.pop(symbol, None)
+                return
+            qty_str  = tr._round_qty(notional / mark, symbol)
+            if side == "LONG":
+                order_id = tr.place_limit_long(symbol, trigger, sl, tp, qty_str)
+            else:
+                order_id = tr.place_limit_short(symbol, trigger, sl, tp, qty_str)
+            bot.pending_signals[symbol]["order_id"] = order_id
+            bot.pending_signals[symbol]["qty_str"]  = qty_str
+            logger.info(
+                f"[S5][{symbol}] 📋 Limit {side} placed @ {trigger:.5f} | "
+                f"order_id={order_id} | SL={sl:.5f} | TP={tp:.5f}"
+            )
+        except Exception as e:
+            logger.error(f"[S5][{symbol}] ❌ Failed to place limit order: {e}")
+            bot.pending_signals.pop(symbol, None)
+            return
+    else:
+        try:
+            mark = tr.get_mark_price(symbol)
+            if side == "LONG" and mark < ob_low * (1 - config_s5.S5_OB_INVALIDATION_BUFFER_PCT):
+                logger.warning(
+                    f"[S5][{symbol}] ⚠️ PENDING LONG skipped (paper): mark {mark:.5f} < ob_low {ob_low:.5f} — OB invalidated"
+                )
+                bot.pending_signals.pop(symbol, None)
+                return
+            elif side == "SHORT" and mark > ob_high * (1 + config_s5.S5_MAX_ENTRY_BUFFER):
+                logger.warning(
+                    f"[S5][{symbol}] ⚠️ PENDING SHORT skipped (paper): mark {mark:.5f} > ob_high {ob_high:.5f} — OB invalidated"
+                )
+                bot.pending_signals.pop(symbol, None)
+                return
+            if side == "LONG" and mark > trigger:
+                logger.warning(
+                    f"[S5][{symbol}] ⚠️ PENDING LONG skipped (paper): mark {mark:.5f} already > trigger {trigger:.5f}"
+                )
+                bot.pending_signals.pop(symbol, None)
+                return
+            elif side == "SHORT" and mark < trigger:
+                logger.warning(
+                    f"[S5][{symbol}] ⚠️ PENDING SHORT skipped (paper): mark {mark:.5f} already < trigger {trigger:.5f}"
+                )
+                bot.pending_signals.pop(symbol, None)
+                return
+            max_trigger_distance = 0.10
+            if side == "LONG" and trigger > mark * (1 + max_trigger_distance):
+                logger.warning(
+                    f"[S5][{symbol}] ⚠️ PENDING LONG skipped (paper): trigger {trigger:.5f} > 10% above mark {mark:.5f}"
+                )
+                bot.pending_signals.pop(symbol, None)
+                return
+            elif side == "SHORT" and trigger < mark * (1 - max_trigger_distance):
+                logger.warning(
+                    f"[S5][{symbol}] ⚠️ PENDING SHORT skipped (paper): trigger {trigger:.5f} > 10% below mark {mark:.5f}"
+                )
+                bot.pending_signals.pop(symbol, None)
+                return
+        except Exception:
+            pass
+        bot.pending_signals[symbol]["order_id"] = "PAPER"
+    st.save_pending_signals(bot.pending_signals)
+    logger.info(
+        f"[S5][{symbol}] 🕐 PENDING {side} queued | "
+        f"trigger={trigger:.5f} | SL={sl:.5f} | TP={tp:.5f} | R:R={rr}"
+    )
+    st.add_scan_log(
+        f"[S5][{symbol}] 🕐 PENDING {side} | trigger={trigger:.5f} | TP={tp:.5f}", "SIGNAL"
+    )
+
+
+# ── S5 Entry Watcher (pending tick) ───────────────────────── #
+
+def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
+                        paper_mode: bool | None = None) -> str | None:
+    """S5 order-fill polling + OB invalidation + expiry. Return 'break' unused (always None)."""
+    import time as _t
+    import state as st
+    import trader as tr
+    import config_s5
+
+    # Cancel if scanner no longer sees a PENDING signal (e.g. BOS failed)
+    ps = st.get_pair_state(symbol)
+    if ps.get("s5_signal", "HOLD") != "PENDING":
+        order_id = sig.get("order_id")
+        fill_info = None
+        try:
+            fill_info = tr.get_order_fill(symbol, order_id)
+        except Exception as e:
+            logger.warning(f"[S5][{symbol}] fill-check error: {e}")
+        if fill_info and fill_info["status"] == "filled":
+            logger.info(f"[S5][{symbol}] Order already filled despite signal gone — registering trade")
+            with bot._trade_lock:
+                if symbol not in bot.active_positions and not st.is_pair_paused(symbol):
+                    bot._handle_limit_filled(symbol, sig, fill_info["fill_price"], balance)
+            bot.pending_signals.pop(symbol, None)
+            st.save_pending_signals(bot.pending_signals)
+            return None
+        try:
+            tr.cancel_order(symbol, order_id)
+        except Exception as e:
+            logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
+        logger.info(f"[S5][{symbol}] 🚫 Signal gone — limit cancelled")
+        st.add_scan_log(f"[S5][{symbol}] 🚫 Signal gone — limit cancelled", "INFO")
+        bot.pending_signals.pop(symbol, None)
+        return None
+
+    order_id = sig.get("order_id")
+    try:
+        mark = tr.get_mark_price(symbol)
+    except Exception:
+        return None
+    side = sig["side"]
+
+    if paper_mode is None:
+        import bot as _bot
+        paper_mode = getattr(_bot, "PAPER_MODE", False)
+
+    fill_info = None
+    if paper_mode and order_id == "PAPER":
+        paper_triggered = (
+            (side == "LONG"  and mark >= sig["trigger"]) or
+            (side == "SHORT" and mark <= sig["trigger"])
+        )
+        if paper_triggered:
+            fill_info = {"status": "filled", "fill_price": sig["trigger"]}
+        else:
+            fill_info = {"status": "live", "fill_price": 0.0}
+    else:
+        try:
+            fill_info = tr.get_order_fill(symbol, order_id)
+        except Exception as e:
+            logger.warning(f"[S5][{symbol}] get_order_fill error: {e}")
+            return None
+
+    if fill_info["status"] == "filled":
+        with bot._trade_lock:
+            if symbol in bot.active_positions:
+                bot.pending_signals.pop(symbol, None)
+                return None
+            if st.is_pair_paused(symbol):
+                return None
+            bot._handle_limit_filled(symbol, sig, fill_info["fill_price"], balance)
+        bot.pending_signals.pop(symbol, None)
+        st.save_pending_signals(bot.pending_signals)
+
+    elif (side == "LONG"  and
+          mark < sig["ob_low"] * (1 - config_s5.S5_OB_INVALIDATION_BUFFER_PCT)):
+        try:
+            tr.cancel_order(symbol, order_id)
+        except Exception as e:
+            logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
+        logger.info(f"[S5][{symbol}] ❌ Limit cancelled — OB invalidated (mark={mark:.5f})")
+        st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
+        bot._s5_ob_invalidated_at[symbol] = _t.time()
+        bot.pending_signals.pop(symbol, None)
+
+    elif (side == "SHORT" and
+          mark > sig["ob_high"] * (1 + config_s5.S5_MAX_ENTRY_BUFFER)):
+        try:
+            tr.cancel_order(symbol, order_id)
+        except Exception as e:
+            logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
+        logger.info(f"[S5][{symbol}] ❌ Limit cancelled — OB invalidated (mark={mark:.5f})")
+        st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
+        bot._s5_ob_invalidated_at[symbol] = _t.time()
+        bot.pending_signals.pop(symbol, None)
+
+    elif _t.time() > sig["expires"]:
+        try:
+            tr.cancel_order(symbol, order_id)
+        except Exception as e:
+            logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
+        logger.info(f"[S5][{symbol}] ⏰ Limit cancelled — expired")
+        st.add_scan_log(f"[S5][{symbol}] ⏰ Limit expired — cancelled", "INFO")
+        bot.pending_signals.pop(symbol, None)
+
+    return None
+
+
+# ── S5 Paper Trail Setup ──────────────────────────────────── #
+
+def compute_paper_trail_long(mark: float, sl_price: float, tp_price_abs: float = 0,
+                             take_profit_pct: float = 0.05) -> tuple[bool, float, float, float, bool]:
+    """Paper-trader LONG trail setup for S5 (1:1 R:R, breakeven after partial)."""
+    from config_s5 import S5_TRAIL_RANGE_PCT
+    one_r         = mark - sl_price
+    trail_trigger = mark + one_r
+    trail_range   = S5_TRAIL_RANGE_PCT
+    tp_price      = tp_price_abs if tp_price_abs > mark else trail_trigger
+    return True, trail_trigger, trail_range, tp_price, True
+
+
+def compute_paper_trail_short(mark: float, sl_price: float, tp_price_abs: float = 0,
+                              take_profit_pct: float = 0.05) -> tuple[bool, float, float, float, bool]:
+    """Paper-trader SHORT trail setup for S5 (1:1 R:R, breakeven after partial)."""
+    from config_s5 import S5_TRAIL_RANGE_PCT
+    one_r         = sl_price - mark
+    trail_trigger = mark - one_r
+    trail_range   = S5_TRAIL_RANGE_PCT
+    tp_price      = tp_price_abs if 0 < tp_price_abs < mark else trail_trigger
+    return True, trail_trigger, trail_range, tp_price, True

@@ -23,6 +23,9 @@ from tools import body_pct
 logger = logging.getLogger(__name__)
 Signal = Literal["LONG", "SHORT", "HOLD", "PENDING_LONG", "PENDING_SHORT"]
 
+# Default candle interval for S4 event snapshots.
+SNAPSHOT_INTERVAL = "1D"
+
 
 def evaluate_s4(
     symbol: str,
@@ -200,3 +203,125 @@ def maybe_trail_sl(symbol: str, ap: dict, tr_mod, st_mod, partial_done: bool) ->
                     logger.info(f"[S4][{symbol}] 📍 Swing trail: SL → {swing_sl:.5f} (daily swing high after ref low {ref:.5f})")
     except Exception as e:
         logger.error(f"S4 swing trail error [{symbol}]: {e}")
+
+
+# ── S4 DNA Snapshot Fields ────────────────────────────────── #
+
+def dna_fields(candles: dict) -> dict:
+    """S4 trade fingerprint: daily EMA/RSI, optional H1 EMA."""
+    from indicators import calculate_ema, calculate_rsi
+    from trade_dna import ema_slope, price_vs_ema, rsi_bucket, _is_empty, _closes_from
+
+    out = {}
+    daily = candles.get("daily")
+    h1    = candles.get("h1")
+    if _is_empty(daily):
+        return out
+    closes_d = _closes_from(daily)
+    ema_d    = calculate_ema(closes_d, 20)
+    rsi_d    = calculate_rsi(closes_d)
+    out["snap_trend_daily_ema_slope"]    = ema_slope(closes_d, 20)
+    out["snap_trend_daily_price_vs_ema"] = price_vs_ema(float(closes_d.iloc[-1]), float(ema_d.iloc[-1]))
+    out["snap_trend_daily_rsi_bucket"]   = rsi_bucket(float(rsi_d.iloc[-1]))
+    if not _is_empty(h1):
+        closes_h = _closes_from(h1)
+        ema_h    = calculate_ema(closes_h, 20)
+        out["snap_trend_h1_ema_slope"]    = ema_slope(closes_h, 20)
+        out["snap_trend_h1_price_vs_ema"] = price_vs_ema(float(closes_h.iloc[-1]), float(ema_h.iloc[-1]))
+    return out
+
+
+# ── S4 Pending-Signal Queue ───────────────────────────────── #
+
+def queue_pending(bot, c: dict) -> None:
+    """Queue an S4 SHORT spike-reversal on bot.pending_signals for the entry watcher."""
+    import time as _t
+    import state as st
+    import config_s4
+
+    symbol = c["symbol"]
+    s4_trigger = c["s4_trigger"]
+    s4_sl      = c["s4_sl"]
+    prev_low_approx = s4_trigger / (1 - config_s4.S4_ENTRY_BUFFER)
+    bot.pending_signals[symbol] = {
+        "strategy":             "S4",
+        "side":                 "SHORT",
+        "trigger":              s4_trigger,
+        "s4_sl":                s4_sl,
+        "prev_low":             prev_low_approx,
+        "priority_rank":        c.get("priority_rank", 999),
+        "priority_score":       c.get("priority_score", 0.0),
+        "snap_rsi":             round(c["s4_rsi"], 1),
+        "snap_rsi_peak":        round(c["s4_rsi_peak"], 1),
+        "snap_spike_body_pct":  round(c["s4_body_pct"] * 100, 1),
+        "snap_rsi_div":         c["s4_div"],
+        "snap_rsi_div_str":     c["s4_div_str"],
+        "snap_sentiment":       bot.sentiment.direction if bot.sentiment else "?",
+        "expires":              _t.time() + 86400,
+    }
+    st.save_pending_signals(bot.pending_signals)
+    logger.info(
+        f"[S4][{symbol}] 🕐 PENDING SHORT queued | "
+        f"trigger≤{s4_trigger:.5f} | SL={s4_sl:.5f}"
+    )
+    st.add_scan_log(
+        f"[S4][{symbol}] 🕐 PENDING SHORT | trigger≤{s4_trigger:.5f}", "SIGNAL"
+    )
+
+
+# ── S4 Entry Watcher (pending tick) ───────────────────────── #
+
+def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
+                        paper_mode: bool | None = None) -> str | None:
+    """S4 spike-reversal trigger + invalidation check. Return 'break' to stop outer loop."""
+    import state as st
+    import trader as tr
+    import config, config_s4
+
+    ps = st.get_pair_state(symbol)
+    if ps.get("s4_signal", "HOLD") not in ("SHORT",):
+        logger.info(f"[S4][{symbol}] 🚫 Signal gone — cancelling pending")
+        st.add_scan_log(f"[S4][{symbol}] 🚫 Pending cancelled (signal gone)", "INFO")
+        bot.pending_signals.pop(symbol, None)
+        st.save_pending_signals(bot.pending_signals)
+        return None
+    try:
+        mark = tr.get_mark_price(symbol)
+    except Exception:
+        return None
+    s4_sl = sig["s4_sl"]
+    if mark > s4_sl:
+        logger.info(f"[S4][{symbol}] ❌ Invalidated — mark {mark:.5f} > SL {s4_sl:.5f}")
+        st.add_scan_log(f"[S4][{symbol}] ❌ Pending cancelled (price above SL)", "INFO")
+        bot.pending_signals.pop(symbol, None)
+        st.save_pending_signals(bot.pending_signals)
+        return None
+    s4_trigger = sig["trigger"]
+    prev_low   = sig["prev_low"]
+    in_window  = (mark <= s4_trigger and
+                  mark >= prev_low * (1 - config_s4.S4_MAX_ENTRY_BUFFER))
+    if in_window:
+        with bot._trade_lock:
+            if symbol in bot.active_positions:
+                bot.pending_signals.pop(symbol, None)
+                st.save_pending_signals(bot.pending_signals)
+                return None
+            if len(bot.active_positions) >= config.MAX_CONCURRENT_TRADES:
+                return "break"
+            if st.is_pair_paused(symbol):
+                return None
+            bot._fire_s4(symbol, sig, mark, balance)
+        bot.pending_signals.pop(symbol, None)
+        st.save_pending_signals(bot.pending_signals)
+    return None
+
+
+# ── S4 Paper Trail Setup ──────────────────────────────────── #
+
+def compute_paper_trail_short(mark: float, sl_price: float, tp_price_abs: float = 0,
+                              take_profit_pct: float = 0.05) -> tuple[bool, float, float, float, bool]:
+    """Paper-trader SHORT trail setup for S4. Returns (use_trailing, trail_trigger, trail_range, tp_price, breakeven_after_partial)."""
+    from config_s4 import S4_TRAILING_TRIGGER_PCT, S4_TRAILING_RANGE_PCT
+    trail_trigger = mark * (1 - S4_TRAILING_TRIGGER_PCT)
+    trail_range   = S4_TRAILING_RANGE_PCT
+    return True, trail_trigger, trail_range, trail_trigger, False

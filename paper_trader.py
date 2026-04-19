@@ -152,29 +152,13 @@ def open_long(
     trail_trigger = None
     trail_range   = None
     tp_price      = mark * (1 + take_profit_pct)
-
-    if strategy == "S2":
-        from config_s2 import S2_TRAILING_TRIGGER_PCT, S2_TRAILING_RANGE_PCT
-        trail_trigger = mark * (1 + S2_TRAILING_TRIGGER_PCT)
-        trail_range   = S2_TRAILING_RANGE_PCT
-        tp_price      = trail_trigger
-        use_trailing  = True
-    elif strategy == "S3":
-        from config_s3 import S3_TRAILING_TRIGGER_PCT, S3_TRAILING_RANGE_PCT
-        trail_trigger = mark * (1 + S3_TRAILING_TRIGGER_PCT)
-        trail_range   = S3_TRAILING_RANGE_PCT
-        tp_price      = trail_trigger
-        use_trailing  = True
-
     breakeven_after_partial = False
-    if strategy == "S5":
-        from config_s5 import S5_TRAIL_RANGE_PCT
-        one_r         = mark - sl_price          # risk distance
-        trail_trigger = mark + one_r             # 1:1 R:R level
-        trail_range   = S5_TRAIL_RANGE_PCT       # tight trailing after partial
-        tp_price      = tp_price_abs if tp_price_abs > mark else trail_trigger
-        use_trailing  = True
-        breakeven_after_partial = True
+
+    if strategy in ("S2", "S3", "S5"):
+        from importlib import import_module
+        mod = import_module(f"strategies.{strategy.lower()}")
+        use_trailing, trail_trigger, trail_range, tp_price, breakeven_after_partial = \
+            mod.compute_paper_trail_long(mark, sl_price, tp_price_abs, take_profit_pct)
 
     state["balance"] -= margin
     state["positions"][symbol] = {
@@ -238,23 +222,13 @@ def open_short(
     trail_trigger = None
     trail_range   = None
     tp_price      = mark * (1 - take_profit_pct)
-
-    if strategy == "S4":
-        from config_s4 import S4_TRAILING_TRIGGER_PCT, S4_TRAILING_RANGE_PCT
-        trail_trigger = mark * (1 - S4_TRAILING_TRIGGER_PCT)  # price target for partial TP
-        trail_range   = S4_TRAILING_RANGE_PCT                  # callback % for trailing stop
-        tp_price      = trail_trigger
-        use_trailing  = True
-
     breakeven_after_partial = False
-    if strategy == "S5":
-        from config_s5 import S5_TRAIL_RANGE_PCT
-        one_r         = sl_price - mark             # risk distance
-        trail_trigger = mark - one_r                # 1:1 R:R level (below entry)
-        trail_range   = S5_TRAIL_RANGE_PCT
-        tp_price      = tp_price_abs if 0 < tp_price_abs < mark else trail_trigger
-        use_trailing  = True
-        breakeven_after_partial = True
+
+    if strategy in ("S4", "S5"):
+        from importlib import import_module
+        mod = import_module(f"strategies.{strategy.lower()}")
+        use_trailing, trail_trigger, trail_range, tp_price, breakeven_after_partial = \
+            mod.compute_paper_trail_short(mark, sl_price, tp_price_abs, take_profit_pct)
 
     state["balance"] -= margin
     state["positions"][symbol] = {

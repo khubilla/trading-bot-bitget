@@ -21,7 +21,11 @@ from config_s1 import (
     RSI_PERIOD, RSI_LONG_THRESH, RSI_SHORT_THRESH,
     CONSOLIDATION_CANDLES, CONSOLIDATION_RANGE_PCT,
     BREAKOUT_BUFFER_PCT,
+    LTF_INTERVAL,
 )
+
+# Default candle interval for S1 event snapshots (open/partial/close/scale_in).
+SNAPSHOT_INTERVAL = LTF_INTERVAL  # "3m"
 from indicators import calculate_adx, calculate_ema, calculate_rsi
 from tools import check_htf
 
@@ -328,3 +332,40 @@ def maybe_trail_sl(symbol: str, ap: dict, tr_mod, st_mod) -> None:
                         logger.info(f"[S1][{symbol}] 📍 Swing trail: SL → {swing_sl:.5f} (3m swing high after ref low {ref:.5f})")
     except Exception as e:
         logger.error(f"S1 swing trail error [{symbol}]: {e}")
+
+
+# ── S1 DNA Snapshot Fields ────────────────────────────────── #
+
+def dna_fields(candles: dict) -> dict:
+    """S1 trade fingerprint: daily EMA slope / price vs EMA / ADX state, H1 EMA, 3m EMA."""
+    from indicators import calculate_ema, calculate_adx
+    from trade_dna import ema_slope, price_vs_ema, adx_state, _is_empty, _closes_from
+
+    out = {}
+    daily = candles.get("daily")
+    h1    = candles.get("h1")
+    m3    = candles.get("m3")
+
+    if not _is_empty(daily):
+        closes_d = _closes_from(daily)
+        ema_d    = calculate_ema(closes_d, 20)
+        out["snap_trend_daily_ema_slope"]    = ema_slope(closes_d, 20)
+        out["snap_trend_daily_price_vs_ema"] = price_vs_ema(float(closes_d.iloc[-1]), float(ema_d.iloc[-1]))
+        if hasattr(daily, "columns") and len(daily) >= 20:
+            adx_d = calculate_adx(daily)["adx"]
+            out["snap_trend_daily_adx_state"] = adx_state(adx_d)
+        else:
+            out["snap_trend_daily_adx_state"] = ""
+
+    if not _is_empty(h1):
+        closes_h = _closes_from(h1)
+        ema_h    = calculate_ema(closes_h, 20)
+        out["snap_trend_h1_ema_slope"]    = ema_slope(closes_h, 20)
+        out["snap_trend_h1_price_vs_ema"] = price_vs_ema(float(closes_h.iloc[-1]), float(ema_h.iloc[-1]))
+
+    if not _is_empty(m3):
+        closes_m3 = _closes_from(m3)
+        ema_m3    = calculate_ema(closes_m3, 20)
+        out["snap_trend_m3_price_vs_ema"] = price_vs_ema(float(closes_m3.iloc[-1]), float(ema_m3.iloc[-1]))
+
+    return out

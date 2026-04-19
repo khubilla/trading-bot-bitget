@@ -338,7 +338,7 @@ def test_startup_reconcile_partial_saves_snapshot(tmp_path, monkeypatch):
     strategy = "S3"
     exit_p = 17.332
 
-    _si = bot._STRATEGY_CANDLE_INTERVAL.get(strategy, "15m")
+    _si = bot._snapshot_interval(strategy)
     _sdf = bot.tr.get_candles(sym, _si, limit=100)
     snapshot.save_snapshot(
         trade_id=trade_id, event="partial",

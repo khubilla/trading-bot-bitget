@@ -284,11 +284,13 @@ def _place_exits(symbol: str, hold_side: str, qty_str: str,
                  partial_trig: float, tp_target: float,
                  trail_range_pct: float) -> bool:
     """
-    S5 SMC exits (3 legs):
-      1. SL (loss_plan) — full position at OB outer edge
-      2. Partial TP (profit_plan, 50%) — at 1:1 R:R level
-      3. Hard TP (profit_plan, 50%) — at structural swing target
+    S5 SMC exits (2 TP legs only - SL already attached via preset in market order):
+      1. Partial TP (profit_plan, 50%) — at 1:1 R:R level
+      2. Hard TP (profit_plan, 50%) — at structural swing target
          Falls back to trailing stop if tp_target == 0
+
+    Note: SL is NOT placed here - it's already attached to the market entry order
+    via presetStopLossPrice, so position is protected from the moment it opens.
     """
     import time as _t
     import trader
@@ -299,8 +301,9 @@ def _place_exits(symbol: str, hold_side: str, qty_str: str,
 
     for attempt in range(3):
         try:
-            bg.place_pos_sl_only(symbol, hold_side, sl_trig, sl_exec)
-            _t.sleep(0.5)
+            # SL is already attached via preset - SKIP line that was: bg.place_pos_sl_only(...)
+            logger.info(f"[{symbol}] S5 exits: SL already set via preset (trigger={sl_trig:.5f} exec={sl_exec:.5f}), placing TPs only")
+
             bg.place_profit_plan(symbol, hold_side, half_qty, partial_trig)
             _t.sleep(0.5)
             if tp_target > 0:

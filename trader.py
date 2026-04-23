@@ -340,14 +340,26 @@ def open_long(
     notional = equity * trade_size_pct * leverage
     qty      = _round_qty(notional / mark, symbol)
 
+    # Compute SL before order placement for atomic preset attachment
+    # Uses sl_floor (structural SL from strategy) if provided, otherwise percentage-based
+    if sl_floor > 0:
+        sl_trig_preset = float(_round_price(sl_floor, symbol))
+    else:
+        sl_trig_preset = float(_round_price(mark * (1 - stop_loss_pct), symbol))
+    sl_exec_preset = float(_round_price(sl_trig_preset * 0.995, symbol))
+
     set_leverage(symbol, leverage)
 
-    bc.post("/api/v2/mix/order/place-order", {
+    order_payload = {
         "symbol": symbol, "productType": PRODUCT_TYPE,
         "marginMode": "isolated", "marginCoin": MARGIN_COIN,
         "size": qty, "side": "buy", "tradeSide": "open",
         "orderType": "market", "force": "ioc",
-    })
+        "presetStopLossPrice": str(sl_trig_preset),
+        "presetStopLossExecutePrice": str(sl_exec_preset),
+    }
+    logger.info(f"[{symbol}] 📤 Market BUY: qty={qty} @ mark≈{mark:.5f} | preset SL={sl_trig_preset:.5f} exec={sl_exec_preset:.5f}")
+    bc.post("/api/v2/mix/order/place-order", order_payload)
 
     _t.sleep(2.0)
 
@@ -436,12 +448,16 @@ def open_short(
 
     set_leverage(symbol, leverage)
 
-    bc.post("/api/v2/mix/order/place-order", {
+    order_payload = {
         "symbol": symbol, "productType": PRODUCT_TYPE,
         "marginMode": "isolated", "marginCoin": MARGIN_COIN,
         "size": qty, "side": "sell", "tradeSide": "open",
         "orderType": "market", "force": "ioc",
-    })
+        "presetStopLossPrice": str(sl_trig),
+        "presetStopLossExecutePrice": str(sl_exec),
+    }
+    logger.info(f"[{symbol}] 📤 Market SELL: qty={qty} @ mark≈{mark:.5f} | preset SL={sl_trig:.5f} exec={sl_exec:.5f}")
+    bc.post("/api/v2/mix/order/place-order", order_payload)
 
     _t.sleep(2.0)
 

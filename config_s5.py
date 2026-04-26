@@ -40,7 +40,7 @@ S5_CHOCH_LOOKBACK  = 20     # candles to scan for OB touch (was ChoCH lookback �
 # S5_ENTRY_BUFFER_PCT removed — entry is at ob_high exactly (limit order)
 S5_MAX_ENTRY_BUFFER = 0.04   # HOLD if price already >4% above ob_high at signal time
 S5_SL_BUFFER_PCT    = 0.01  # 1% beyond OB outer edge for SL
-S5_OB_INVALIDATION_BUFFER_PCT = 0.001  # cancel limit if mark crosses ob_low by >0.1%
+S5_OB_INVALIDATION_BUFFER_PCT = 0.001  # cancel limit if 15m candle CLOSES through ob_low/ob_high by >0.1%
 
 # ── Take Profit (structural) ───────────────────────────────── #
 S5_SWING_LOOKBACK   = 50     # 15m candles to scan for the structural TP swing target

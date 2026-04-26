@@ -726,29 +726,44 @@ def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
         bot.pending_signals.pop(symbol, None)
         st.save_pending_signals(bot.pending_signals)
 
-    elif (side == "LONG"  and
-          mark < sig["ob_low"] * (1 - config_s5.S5_OB_INVALIDATION_BUFFER_PCT)):
+    # ── OB Invalidation: 15m candle close (not instant mark price) ──── #
+    # Check if last COMPLETED 15m candle closed through the OB boundary.
+    # This filters out wicks/noise while staying responsive (max 15 min delay).
+    else:
         try:
-            tr.cancel_order(symbol, order_id)
-        except Exception as e:
-            logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
-        logger.info(f"[S5][{symbol}] ❌ Limit cancelled — OB invalidated (mark={mark:.5f})")
-        st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
-        mark_ob_invalidated(bot, symbol)
-        bot.pending_signals.pop(symbol, None)
+            m15_df = tr.get_candles(symbol, config_s5.S5_LTF_INTERVAL, limit=3)
+            if len(m15_df) >= 2:
+                last_closed_candle = m15_df.iloc[-2]  # Last completed 15m candle
+                last_close = float(last_closed_candle["close"])
 
-    elif (side == "SHORT" and
-          mark > sig["ob_high"] * (1 + config_s5.S5_MAX_ENTRY_BUFFER)):
-        try:
-            tr.cancel_order(symbol, order_id)
-        except Exception as e:
-            logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
-        logger.info(f"[S5][{symbol}] ❌ Limit cancelled — OB invalidated (mark={mark:.5f})")
-        st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
-        mark_ob_invalidated(bot, symbol)
-        bot.pending_signals.pop(symbol, None)
+                invalidated = False
+                if side == "LONG" and last_close < sig["ob_low"] * (1 - config_s5.S5_OB_INVALIDATION_BUFFER_PCT):
+                    invalidated = True
+                    logger.info(
+                        f"[S5][{symbol}] ❌ Limit cancelled — OB invalidated "
+                        f"(15m close {last_close:.5f} < ob_low {sig['ob_low']:.5f})"
+                    )
+                elif side == "SHORT" and last_close > sig["ob_high"] * (1 + config_s5.S5_OB_INVALIDATION_BUFFER_PCT):
+                    invalidated = True
+                    logger.info(
+                        f"[S5][{symbol}] ❌ Limit cancelled — OB invalidated "
+                        f"(15m close {last_close:.5f} > ob_high {sig['ob_high']:.5f})"
+                    )
 
-    elif _t.time() > sig["expires"]:
+                if invalidated:
+                    try:
+                        tr.cancel_order(symbol, order_id)
+                    except Exception as e:
+                        logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
+                    st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
+                    mark_ob_invalidated(bot, symbol)
+                    bot.pending_signals.pop(symbol, None)
+                    return None
+        except Exception as e:
+            logger.debug(f"[S5][{symbol}] OB invalidation check error: {e}")
+
+    # ── Expiry Check ──── #
+    if _t.time() > sig["expires"]:
         try:
             tr.cancel_order(symbol, order_id)
         except Exception as e:

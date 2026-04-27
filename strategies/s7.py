@@ -308,3 +308,126 @@ def maybe_trail_sl(symbol: str, ap: dict, tr_mod, st_mod, partial_done: bool) ->
                     logger.info(f"[S7][{symbol}] 📍 Swing trail: SL → {swing_sl:.5f} (daily swing high after ref low {ref:.5f})")
     except Exception as e:
         logger.error(f"S7 swing trail error [{symbol}]: {e}")
+
+
+# ── S7 Pending-Signal Queue ───────────────────────────────── #
+
+def queue_pending(bot, c: dict) -> None:
+    """Queue an S7 SHORT spike-reversal pending signal for the entry watcher."""
+    import time as _t
+    import state as st
+    import config_s7
+
+    symbol      = c["symbol"]
+    s7_trigger  = c["s7_trigger"]
+    s7_sl       = c["s7_sl"]
+    box_top     = c["s7_box_top"]
+    box_low     = c["s7_box_low"]
+    bot.pending_signals[symbol] = {
+        "strategy":             "S7",
+        "side":                 "SHORT",
+        "trigger":              s7_trigger,
+        "s7_sl":                s7_sl,
+        "box_low":              box_low,
+        "box_top":              box_top,
+        "priority_rank":        c.get("priority_rank", 999),
+        "priority_score":       c.get("priority_score", 0.0),
+        "snap_rsi":             round(c["s7_rsi"], 1),
+        "snap_rsi_peak":        round(c["s7_rsi_peak"], 1),
+        "snap_spike_body_pct":  round(c["s7_body_pct"] * 100, 1),
+        "snap_rsi_div":         c["s7_div"],
+        "snap_rsi_div_str":     c["s7_div_str"],
+        "snap_box_top":         box_top,
+        "snap_box_low_initial": box_low,
+        "snap_sentiment":       bot.sentiment.direction if bot.sentiment else "?",
+        "expires":              _t.time() + 86400,
+    }
+    st.save_pending_signals(bot.pending_signals)
+    logger.info(
+        f"[S7][{symbol}] 🕐 PENDING SHORT queued | trigger≤{s7_trigger:.5f} | "
+        f"box top={box_top:.5f} low={box_low:.5f} | SL={s7_sl:.5f}"
+    )
+    st.add_scan_log(
+        f"[S7][{symbol}] 🕐 PENDING SHORT | trigger≤{s7_trigger:.5f}", "SIGNAL"
+    )
+
+
+# ── S7 Entry Watcher (pending tick) ───────────────────────── #
+
+def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
+                        paper_mode: bool | None = None) -> str | None:
+    """
+    S7 entry-watcher tick. Returns 'break' to stop outer loop (concurrency cap),
+    None otherwise. Fires SHORT only on a confirmed 1H *close* below box_low.
+    """
+    import state as st
+    import trader as tr
+    import config, config_s7
+
+    ps = st.get_pair_state(symbol)
+    if ps.get("s7_signal", "HOLD") not in ("SHORT",):
+        logger.info(f"[S7][{symbol}] 🚫 Signal gone — cancelling pending")
+        st.add_scan_log(f"[S7][{symbol}] 🚫 Pending cancelled (signal gone)", "INFO")
+        bot.pending_signals.pop(symbol, None)
+        st.save_pending_signals(bot.pending_signals)
+        return None
+
+    # Re-run Darvas detector on fresh 1H candles
+    try:
+        h1_df = tr.get_candles(symbol, "1H", limit=48)
+    except Exception:
+        return None
+    today_slice = today_h1_slice(h1_df)
+    locked, box_top, box_low, _, _, _ = detect_darvas_box(
+        today_slice, confirm=config_s7.S7_BOX_CONFIRM_COUNT
+    )
+    if not locked:
+        return None  # still pending; do not cancel
+
+    # Update pending fields if box has expanded (wick-and-reclaim)
+    if box_low != sig["box_low"] or box_top != sig.get("box_top"):
+        sig["box_low"] = box_low
+        sig["box_top"] = box_top
+        sig["trigger"] = box_low * (1 - config_s7.S7_ENTRY_BUFFER)
+        st.save_pending_signals(bot.pending_signals)
+
+    try:
+        mark = tr.get_mark_price(symbol)
+    except Exception:
+        return None
+
+    # SL invalidation
+    if mark > sig["s7_sl"]:
+        logger.info(f"[S7][{symbol}] ❌ Invalidated — mark {mark:.5f} > SL {sig['s7_sl']:.5f}")
+        st.add_scan_log(f"[S7][{symbol}] ❌ Pending cancelled (price above SL)", "INFO")
+        bot.pending_signals.pop(symbol, None)
+        st.save_pending_signals(bot.pending_signals)
+        return None
+
+    # Confirmed-close trigger: latest CLOSED 1H must close below box_low
+    if len(h1_df) < 2:
+        return None
+    last_closed_close = float(h1_df.iloc[-2]["close"])
+    if last_closed_close >= box_low:
+        return None  # not yet broken on close
+
+    # Stale-entry guard
+    s7_trigger = sig["trigger"]
+    in_window  = (mark <= s7_trigger and
+                  mark >= box_low * (1 - config_s7.S7_MAX_ENTRY_BUFFER))
+    if not in_window:
+        return None  # don't chase
+
+    with bot._trade_lock:
+        if symbol in bot.active_positions:
+            bot.pending_signals.pop(symbol, None)
+            st.save_pending_signals(bot.pending_signals)
+            return None
+        if len(bot.active_positions) >= config.MAX_CONCURRENT_TRADES:
+            return "break"
+        if st.is_pair_paused(symbol):
+            return None
+        bot._fire_s7(symbol, sig, mark, balance)
+    bot.pending_signals.pop(symbol, None)
+    st.save_pending_signals(bot.pending_signals)
+    return None

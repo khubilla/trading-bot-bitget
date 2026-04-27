@@ -39,5 +39,53 @@ def detect_darvas_box(
     h1_slice: pd.DataFrame,
     confirm: int = 2,
 ) -> tuple[bool, float, float, int, int, str]:
-    """Stub — implemented in Task 3."""
-    raise NotImplementedError("detect_darvas_box implemented in Task 3")
+    """
+    Walk the 1H slice forward and lock a top-box high then a low-box low using
+    classic Darvas mechanics: each new lower-low / higher-high resets the
+    confirmation counter; the box locks once `confirm` consecutive candles
+    hold above/below the establishing candle.
+
+    Returns (locked, top_high, low_low, top_idx, low_idx, reason).
+    """
+    min_needed = 2 * confirm + 2
+    if len(h1_slice) < min_needed:
+        return (False, 0.0, 0.0, -1, -1,
+                f"Need ≥ {min_needed} 1H candles since UTC midnight (have {len(h1_slice)})")
+
+    rows = list(h1_slice.itertuples())
+
+    # --- top-box pass ---
+    top_high, top_idx, conf, top_locked = float("-inf"), -1, 0, False
+    for i, row in enumerate(rows):
+        if row.high > top_high:
+            top_high, top_idx, conf = float(row.high), i, 0
+        else:
+            conf += 1
+            if conf >= confirm:
+                top_locked = True
+                break
+    if not top_locked:
+        return (False, top_high, 0.0, top_idx, -1,
+                "Top box not yet confirmed (running high still pushing)")
+
+    # --- low-box pass over rows after top_idx ---
+    low_low, low_off, conf, low_locked = float("+inf"), -1, 0, False
+    for j, row in enumerate(rows[top_idx + 1:]):
+        if row.low < low_low:
+            low_low, low_off, conf = float(row.low), j, 0
+        else:
+            conf += 1
+            if conf >= confirm:
+                low_locked = True
+                break
+    if not low_locked:
+        return (False, top_high, low_low, top_idx, -1,
+                "Low box not yet confirmed (running low still falling)")
+
+    if low_low >= top_high:
+        return (False, top_high, low_low, top_idx, top_idx + 1 + low_off,
+                f"Sanity: low_low {low_low} >= top_high {top_high}")
+
+    low_idx = top_idx + 1 + low_off
+    return (True, top_high, low_low, top_idx, low_idx,
+            f"Darvas box ✅ top={top_high} low={low_low}")

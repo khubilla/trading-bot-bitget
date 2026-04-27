@@ -252,3 +252,59 @@ def recompute_scale_in_sl_trigger(ap: dict, new_avg: float) -> tuple[float, floa
     new_sl   = new_avg * (1 + 0.50 / config_s7.S7_LEVERAGE)
     new_trig = new_avg * (1 - config_s7.S7_TRAILING_TRIGGER_PCT)
     return new_sl, new_trig
+
+
+# ── S7 Exit Placement ─────────────────────────────────────── #
+
+def compute_and_place_short_exits(symbol: str, qty_str: str, fill: float,
+                                  sl_trig: float, sl_exec: float) -> tuple[bool, float, float]:
+    """
+    Compute S7 short-side trail level and place the 3-leg exits
+    (SL + 50% partial at trail_trigger + trailing stop on remainder).
+    Returns (ok, sl_trig, trail_trig).
+    """
+    import trader
+    from strategies.s4 import _place_partial_trail_exits
+    from config_s7 import S7_TRAILING_TRIGGER_PCT, S7_TRAILING_RANGE_PCT
+
+    trail_trig = float(trader._round_price(fill * (1 - S7_TRAILING_TRIGGER_PCT), symbol))
+    ok = _place_partial_trail_exits(symbol, "short", qty_str, sl_trig, sl_exec,
+                                    trail_trig, S7_TRAILING_RANGE_PCT)
+    return ok, sl_trig, trail_trig
+
+
+# ── S7 Swing Trail ────────────────────────────────────────── #
+
+def maybe_trail_sl(symbol: str, ap: dict, tr_mod, st_mod, partial_done: bool) -> None:
+    """
+    Structural swing trail for S7 SHORT: after partial fires, pull SL down to the
+    nearest daily swing-high above entry. Mirrors strategies.s4.maybe_trail_sl.
+    """
+    import config_s7
+    from tools import find_swing_low_target, find_swing_high_after_ref
+
+    if not config_s7.S7_USE_SWING_TRAIL:
+        return
+    if ap.get("side") != "SHORT" or not partial_done:
+        return
+    try:
+        lb    = config_s7.S7_SWING_LOOKBACK
+        cs_df = tr_mod.get_candles(symbol, "1D", limit=lb + 5)
+        mark  = tr_mod.get_mark_price(symbol)
+        if cs_df.empty or len(cs_df) < 3:
+            return
+        ref = ap.get("swing_trail_ref")
+        if ref is None:
+            ap["swing_trail_ref"] = find_swing_low_target(cs_df, mark, lookback=lb)
+            return
+        if mark <= ref:
+            raw = find_swing_high_after_ref(cs_df, mark, ref, lookback=lb)
+            if raw:
+                swing_sl = raw * (1 + config_s7.S7_ENTRY_BUFFER)
+                if swing_sl < ap.get("sl", float("inf")) and tr_mod.update_position_sl(symbol, swing_sl, hold_side="short"):
+                    ap["sl"] = swing_sl
+                    st_mod.update_open_trade_sl(symbol, swing_sl)
+                    ap["swing_trail_ref"] = find_swing_low_target(cs_df, mark, lookback=lb)
+                    logger.info(f"[S7][{symbol}] 📍 Swing trail: SL → {swing_sl:.5f} (daily swing high after ref low {ref:.5f})")
+    except Exception as e:
+        logger.error(f"S7 swing trail error [{symbol}]: {e}")

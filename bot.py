@@ -19,6 +19,7 @@ import config_s3
 import config_s4
 import config_s5
 import config_s6
+import config_s7
 import state as st
 from scanner import get_qualified_pairs_and_sentiment
 from strategies.s1 import evaluate_s1, detect_consolidation, check_daily_trend, check_exit
@@ -27,6 +28,7 @@ from strategies.s3 import evaluate_s3
 from strategies.s4 import evaluate_s4
 from strategies.s5 import evaluate_s5
 from strategies.s6 import evaluate_s6
+from strategies.s7 import evaluate_s7
 from indicators import calculate_rsi
 from tools import (
     check_htf,
@@ -281,7 +283,7 @@ class MTFBot:
         st.set_status("RUNNING")
         # Rebuild win/loss stats from CSV so header survives restarts
         _rebuild_stats_from_csv(config.TRADE_LOG)
-        st.add_scan_log("Bot initialised (S1 + S2 + S3 + S4 + S5 + S6)", "INFO")
+        st.add_scan_log("Bot initialised (S1 + S2 + S3 + S4 + S5 + S6 + S7)", "INFO")
 
         logger.info("🤖 Bitget USDT-Futures MTF Bot — Strategy 1 + 2")
         logger.info(f"   Mode         : {'DEMO' if config.DEMO_MODE else '⚡ LIVE'}")
@@ -352,7 +354,7 @@ class MTFBot:
             #      (covers manually-added rows that never went through bot code)
             if not PAPER_MODE:
                 for sym, ap in list(self.active_positions.items()):
-                    if ap.get("strategy") not in ("S1", "S2", "S3", "S4", "S5", "S6"):
+                    if ap.get("strategy") not in ("S1", "S2", "S3", "S4", "S5", "S6", "S7"):
                         continue
                     if ap.get("partial_logged"):
                         continue
@@ -866,7 +868,7 @@ class MTFBot:
                     )
 
                     # Track initial qty and detect live partial close (S1-S6)
-                    if not PAPER_MODE and ap.get("strategy") in ("S1", "S2", "S3", "S4", "S5", "S6"):
+                    if not PAPER_MODE and ap.get("strategy") in ("S1", "S2", "S3", "S4", "S5", "S6", "S7"):
                         if "initial_qty" not in ap:
                             ap["initial_qty"] = float(pos["qty"])
                             st.update_position_memory(sym, initial_qty=float(pos["qty"]))

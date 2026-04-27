@@ -186,3 +186,69 @@ def evaluate_s7(
         f"S7 ✅ spike={best_body*100:.0f}% | RSI peak={rsi_peak:.1f}{div_note} | "
         f"Darvas top={box_top:.5f} low={box_low:.5f}"
     )
+
+
+# ── S7 DNA Snapshot Fields ────────────────────────────────── #
+
+def dna_fields(candles: dict) -> dict:
+    """S7 trade fingerprint: daily EMA/RSI, optional H1 EMA. Mirrors S4."""
+    from indicators import calculate_ema, calculate_rsi
+    from trade_dna import ema_slope, price_vs_ema, rsi_bucket, _is_empty, _closes_from
+
+    out = {}
+    daily = candles.get("daily")
+    h1    = candles.get("h1")
+    if _is_empty(daily):
+        return out
+    closes_d = _closes_from(daily)
+    ema_d    = calculate_ema(closes_d, 20)
+    rsi_d    = calculate_rsi(closes_d)
+    out["snap_trend_daily_ema_slope"]    = ema_slope(closes_d, 20)
+    out["snap_trend_daily_price_vs_ema"] = price_vs_ema(float(closes_d.iloc[-1]), float(ema_d.iloc[-1]))
+    out["snap_trend_daily_rsi_bucket"]   = rsi_bucket(float(rsi_d.iloc[-1]))
+    if not _is_empty(h1):
+        closes_h = _closes_from(h1)
+        ema_h    = calculate_ema(closes_h, 20)
+        out["snap_trend_h1_ema_slope"]    = ema_slope(closes_h, 20)
+        out["snap_trend_h1_price_vs_ema"] = price_vs_ema(float(closes_h.iloc[-1]), float(ema_h.iloc[-1]))
+    return out
+
+
+# ── S7 Paper Trail Setup ──────────────────────────────────── #
+
+def compute_paper_trail_short(mark: float, sl_price: float, tp_price_abs: float = 0,
+                              take_profit_pct: float = 0.05) -> tuple[bool, float, float, float, bool]:
+    """Paper-trader SHORT trail setup for S7. Returns (use_trailing, trail_trigger, trail_range, tp_price, breakeven_after_partial)."""
+    from config_s7 import S7_TRAILING_TRIGGER_PCT, S7_TRAILING_RANGE_PCT
+    trail_trigger = mark * (1 - S7_TRAILING_TRIGGER_PCT)
+    trail_range   = S7_TRAILING_RANGE_PCT
+    return True, trail_trigger, trail_range, trail_trigger, False
+
+
+# ── S7 Scale-In Helpers ───────────────────────────────────── #
+
+def scale_in_specs() -> dict:
+    """Per-strategy scale-in orchestration constants for S7 (SHORT)."""
+    import config_s7
+    return {
+        "direction": "BEARISH",
+        "hold_side": "short",
+        "leverage":  config_s7.S7_LEVERAGE,
+    }
+
+
+def is_scale_in_window(ap: dict, mark_now: float) -> bool:
+    """True when price is retesting the S7 box-low breakdown level."""
+    import config_s7
+    bl = ap["s7_box_low"]
+    return (bl * (1 - config_s7.S7_MAX_ENTRY_BUFFER)
+            <= mark_now
+            <= bl * (1 - config_s7.S7_ENTRY_BUFFER))
+
+
+def recompute_scale_in_sl_trigger(ap: dict, new_avg: float) -> tuple[float, float]:
+    """S7 post-scale-in: SL at new_avg*(1+0.50/LEVERAGE), trail at new_avg*(1-TRIG_PCT)."""
+    import config_s7
+    new_sl   = new_avg * (1 + 0.50 / config_s7.S7_LEVERAGE)
+    new_trig = new_avg * (1 - config_s7.S7_TRAILING_TRIGGER_PCT)
+    return new_sl, new_trig

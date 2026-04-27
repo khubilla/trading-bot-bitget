@@ -89,3 +89,100 @@ def detect_darvas_box(
     low_idx = top_idx + 1 + low_off
     return (True, top_high, low_low, top_idx, low_idx,
             f"Darvas box ✅ top={top_high} low={low_low}")
+
+
+def evaluate_s7(
+    symbol: str,
+    daily_df: pd.DataFrame,
+    h1_df: pd.DataFrame | None = None,
+) -> tuple[Signal, float, float, float, float, float, bool, str, str]:
+    """
+    Strategy 7 — post-pump 1H Darvas breakdown short.
+
+    Returns (signal, daily_rsi, box_top, box_low, body_pct, rsi_peak,
+             rsi_div, rsi_div_str, reason).
+    """
+    from indicators import calculate_rsi
+    from tools import body_pct as _body_pct
+    from config_s7 import (
+        S7_ENABLED, S7_BIG_CANDLE_BODY_PCT, S7_BIG_CANDLE_LOOKBACK,
+        S7_RSI_PEAK_THRESH, S7_RSI_PEAK_LOOKBACK, S7_RSI_DIV_MIN_DROP,
+        S7_RSI_STILL_HOT_THRESH, S7_BOX_CONFIRM_COUNT,
+    )
+
+    if not S7_ENABLED:
+        return "HOLD", 50.0, 0.0, 0.0, 0.0, 0.0, False, "", "S7 disabled"
+
+    rsi_period = 14
+    min_candles = rsi_period + S7_BIG_CANDLE_LOOKBACK + 2
+    if len(daily_df) < min_candles:
+        return "HOLD", 50.0, 0.0, 0.0, 0.0, 0.0, False, "", "Not enough daily candles"
+
+    closes    = daily_df["close"].astype(float)
+    rsi_ser   = calculate_rsi(closes, rsi_period)
+    daily_rsi = float(rsi_ser.iloc[-1])
+
+    # --- spike detection ---
+    lookback = daily_df.iloc[-(S7_BIG_CANDLE_LOOKBACK + 1):-1]
+    spike_found, best_body, spike_high = False, 0.0, 0.0
+    for _, row in lookback.iterrows():
+        bp = _body_pct(row)
+        if bp >= S7_BIG_CANDLE_BODY_PCT:
+            spike_found = True
+            if bp > best_body:
+                best_body = bp
+        if spike_found:
+            spike_high = max(spike_high, float(row["high"]))
+    if not spike_found:
+        return "HOLD", daily_rsi, 0.0, 0.0, 0.0, 0.0, False, "", (
+            f"No spike candle ≥{S7_BIG_CANDLE_BODY_PCT*100:.0f}% body in last {S7_BIG_CANDLE_LOOKBACK}d"
+        )
+
+    # --- RSI peak gate ---
+    rsi_window = rsi_ser.iloc[-S7_RSI_PEAK_LOOKBACK - 1:-1]
+    rsi_peak   = float(rsi_window.max())
+    if rsi_peak < S7_RSI_PEAK_THRESH:
+        return "HOLD", daily_rsi, 0.0, 0.0, best_body, rsi_peak, False, "", (
+            f"Spike ✅ body={best_body*100:.0f}% | RSI peak={rsi_peak:.1f} < {S7_RSI_PEAK_THRESH}"
+        )
+
+    # --- RSI still hot ---
+    prev_rsi = float(rsi_ser.iloc[-2])
+    if prev_rsi < S7_RSI_STILL_HOT_THRESH:
+        return "HOLD", daily_rsi, 0.0, 0.0, best_body, rsi_peak, False, "", (
+            f"Spike ✅ RSI peak={rsi_peak:.1f} | prev RSI={prev_rsi:.1f} < {S7_RSI_STILL_HOT_THRESH} (faded)"
+        )
+
+    # --- RSI divergence (informational) ---
+    rsi_div, rsi_div_str, div_note = False, "", ""
+    if len(rsi_window) >= 4:
+        mid      = len(rsi_window) // 2
+        first_h  = float(rsi_window.iloc[:mid].max())
+        second_h = float(rsi_window.iloc[mid:].max())
+        rsi_div_str = f"{first_h:.1f}→{second_h:.1f}"
+        if first_h > 0 and (first_h - second_h) >= S7_RSI_DIV_MIN_DROP:
+            rsi_div, div_note = True, f" | RSI div ✅ ({rsi_div_str})"
+        else:
+            div_note = f" | RSI div ❌ ({rsi_div_str})"
+
+    # --- 1H Darvas detector ---
+    if h1_df is None or h1_df.empty:
+        return "HOLD", daily_rsi, 0.0, 0.0, best_body, rsi_peak, rsi_div, rsi_div_str, (
+            f"S7 daily ✅ spike={best_body*100:.0f}% | RSI peak={rsi_peak:.1f}{div_note} | 1H Darvas ❌ no H1 data"
+        )
+    today_slice = today_h1_slice(h1_df)
+    locked, box_top, box_low, _, _, det_reason = detect_darvas_box(today_slice, confirm=S7_BOX_CONFIRM_COUNT)
+    if not locked:
+        return "HOLD", daily_rsi, 0.0, 0.0, best_body, rsi_peak, rsi_div, rsi_div_str, (
+            f"S7 daily ✅ spike={best_body*100:.0f}% | RSI peak={rsi_peak:.1f}{div_note} | 1H Darvas ❌ {det_reason}"
+        )
+
+    logger.info(
+        f"[S7][{symbol}] ✅ SHORT setup | spike={best_body*100:.0f}% | "
+        f"RSI peak={rsi_peak:.1f} now={daily_rsi:.1f}{div_note} | "
+        f"Darvas top={box_top:.5f} low={box_low:.5f}"
+    )
+    return "SHORT", daily_rsi, box_top, box_low, best_body, rsi_peak, rsi_div, rsi_div_str, (
+        f"S7 ✅ spike={best_body*100:.0f}% | RSI peak={rsi_peak:.1f}{div_note} | "
+        f"Darvas top={box_top:.5f} low={box_low:.5f}"
+    )

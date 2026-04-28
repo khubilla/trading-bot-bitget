@@ -1305,6 +1305,22 @@ class MTFBot:
             if s4_trigger > 0:
                 s4_1h_low_ok = s4_trigger <= s4_1h_low
 
+        # ── Strategy 7 (post-pump 1H Darvas breakdown short) ─────── #
+        s7_sig, s7_rsi, s7_box_top, s7_box_low, s7_body_pct, s7_rsi_peak, s7_div, s7_div_str, s7_reason = (
+            "HOLD", 50.0, 0.0, 0.0, 0.0, 0.0, False, "", ""
+        )
+        if config_s7.S7_ENABLED and self.sentiment.direction == "BEARISH":
+            _h1_df_s7 = tr.get_candles(symbol, "1H", limit=48)
+            s7_sig, s7_rsi, s7_box_top, s7_box_low, s7_body_pct, s7_rsi_peak, s7_div, s7_div_str, s7_reason = (
+                evaluate_s7(symbol, daily_df, _h1_df_s7)
+            )
+            logger.info(f"[S7][{symbol}] {s7_reason}")
+
+        s7_sr_sup_pct = None
+        if s7_sig == "SHORT" and s7_box_low > 0:
+            _s7_base = find_spike_base(daily_df, price_ceiling=close)
+            s7_sr_sup_pct = round((close - _s7_base) / close * 100, 1) if _s7_base else None
+
         # ── Strategy 6 ───────────────────────────────────────────── #
         s6_sig, s6_peak_level, s6_sl, s6_drop_pct, s6_rsi_at_peak, s6_reason = "HOLD", 0.0, 0.0, 0.0, 0.0, ""
         if config_s6.S6_ENABLED:
@@ -1334,7 +1350,7 @@ class MTFBot:
 
         st.update_pair_state(symbol, {
             "rsi": rsi_val, "htf_bull": htf_bull, "htf_bear": htf_bear,
-            "signal": s1_sig if s1_sig != "HOLD" else (s2_sig if s2_sig != "HOLD" else (s3_sig if s3_sig != "HOLD" else (s4_sig if s4_sig != "HOLD" else ("PENDING" if s5_sig.startswith("PENDING") else (s6_sig if s6_sig != "HOLD" else s5_sig))))),
+            "signal": s1_sig if s1_sig != "HOLD" else (s2_sig if s2_sig != "HOLD" else (s3_sig if s3_sig != "HOLD" else (s4_sig if s4_sig != "HOLD" else (s7_sig if s7_sig != "HOLD" else ("PENDING" if s5_sig.startswith("PENDING") else (s6_sig if s6_sig != "HOLD" else s5_sig)))))),
             "s1_signal": s1_sig,
             "s2_signal": s2_sig,
             "price": close,
@@ -1365,7 +1381,7 @@ class MTFBot:
             "s5_sr_pct":  s5_sr_pct,
             "rsi_ok": rsi_ok,
             "adx": round(adx_val, 1), "trend_ok": trend_ok,
-            "strategy": "S1" if s1_sig != "HOLD" else ("S2" if s2_sig != "HOLD" else ("S3" if s3_sig != "HOLD" else ("S4" if s4_sig != "HOLD" else ("S6" if s6_sig not in ("HOLD", "") else ("S5" if s5_sig not in ("HOLD", "") else "S1"))))),
+            "strategy": "S1" if s1_sig != "HOLD" else ("S2" if s2_sig != "HOLD" else ("S3" if s3_sig != "HOLD" else ("S4" if s4_sig != "HOLD" else ("S7" if s7_sig != "HOLD" else ("S6" if s6_sig not in ("HOLD", "") else ("S5" if s5_sig not in ("HOLD", "") else "S1")))))),
             "s2_daily_rsi": s2_rsi,
             "s2_big_candle": s2_rsi > 0 and ("big_candle" in s2_reason or "Big candle" in s2_reason or s2_bh > 0),
             "s2_coiling":    s2_bl > 0 and s2_bh > 0 and s2_sig == "HOLD",
@@ -1378,6 +1394,16 @@ class MTFBot:
             "s3_sr_resistance_price": s3_sr_resistance_price if s3_trigger > 0 else None,
             "sr_support_pct":       sr_sup_pct,
             "s4_sr_support_pct":    s4_sr_sup_pct,
+            "s7_reason":          s7_reason,
+            "s7_signal":          s7_sig,
+            "s7_box_top":         s7_box_top if s7_box_top > 0 else None,
+            "s7_box_low":         s7_box_low if s7_box_low > 0 else None,
+            "s7_rsi":             round(s7_rsi, 1) if s7_rsi else None,
+            "s7_rsi_peak":        round(s7_rsi_peak, 1) if s7_rsi_peak else None,
+            "s7_body_pct":        round(s7_body_pct, 4) if s7_body_pct else None,
+            "s7_div":             s7_div,
+            "s7_div_str":         s7_div_str,
+            "s7_sr_support_pct":  s7_sr_sup_pct,
             # Reset S5 priority rank each cycle — patched in by _execute_best_s5_candidate
             "s5_priority_rank":  None,
             "s5_priority_score": None,

@@ -1237,7 +1237,7 @@ class MTFBot:
 
         # ── Strategy 2 (evaluate BEFORE update_pair_state) ───────── #
         s2_sig, s2_rsi, s2_bh, s2_bl, s2_reason = "HOLD", 50.0, 0.0, 0.0, ""
-        if self.sentiment.direction != "BEARISH":
+        if self.sentiment.direction == "BULLISH":
             s2_sig, s2_rsi, s2_bh, s2_bl, s2_reason = evaluate_s2(symbol, daily_df)
             logger.info(f"[S2][{symbol}] daily_RSI={s2_rsi:.1f} | {s2_reason}")
 

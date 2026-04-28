@@ -2312,6 +2312,7 @@ class MTFBot:
                     # Already in a trade — clear the pending signal
                     if symbol in self.active_positions:
                         self.pending_signals.pop(symbol, None)
+                        st.save_pending_signals(self.pending_signals)
                         continue
 
                     strategy = sig.get("strategy")
@@ -2391,6 +2392,9 @@ class MTFBot:
 
     def _handle_limit_filled(self, symbol: str, sig: dict, fill_price: float, balance: float) -> None:
         """Called when a GTC limit order fills. Sets up exits and logs the trade."""
+        if fill_price <= 0:
+            logger.warning(f"[S5][{symbol}] invalid fill_price={fill_price}; skipping fill handling until confirmed")
+            return
         side     = sig["side"]
         sl_price = sig["sl"]
         tp_price = sig["tp"]

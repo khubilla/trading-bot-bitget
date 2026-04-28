@@ -700,10 +700,20 @@ class IGBot:
             logger.warning(f"[{name}] Candle fetch returned empty — skipping tick")
             return
 
-        # 6. Derive allowed_direction from daily EMA
+        # 6. Derive allowed_direction from daily EMA waterfall (must match strategy.py logic)
         ema_fast = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_fast"]).iloc[-1])
+        ema_med  = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_med"]).iloc[-1])
         ema_slow = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_slow"]).iloc[-1])
-        allowed_direction = "BULLISH" if ema_fast > ema_slow else "BEARISH"
+
+        ema_bull = ema_fast > ema_med > ema_slow
+        ema_bear = ema_slow > ema_med > ema_fast
+
+        if ema_bull:
+            allowed_direction = "BULLISH"
+        elif ema_bear:
+            allowed_direction = "BEARISH"
+        else:
+            allowed_direction = "BULLISH" if ema_fast > ema_slow else "BEARISH"
 
         # 7. Evaluate S5
         epic = instrument["epic"]
@@ -885,21 +895,34 @@ class IGBot:
                 m15_df   = self._get_candles("15m", instrument["m15_limit"])
                 if not (daily_df.empty or htf_df.empty or m15_df.empty):
                     ema_fast = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_fast"]).iloc[-1])
+                    ema_med  = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_med"]).iloc[-1])
                     ema_slow = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_slow"]).iloc[-1])
-                    allowed_direction = "BULLISH" if ema_fast > ema_slow else "BEARISH"
+                    ema_bull = ema_fast > ema_med > ema_slow
+                    ema_bear = ema_slow > ema_med > ema_fast
+                    if ema_bull:
+                        allowed_direction = "BULLISH"
+                    elif ema_bear:
+                        allowed_direction = "BEARISH"
+                    else:
+                        allowed_direction = "BULLISH" if ema_fast > ema_slow else "BEARISH"
                     sig, *_ = evaluate_s5(instrument["epic"], daily_df, htf_df, m15_df, allowed_direction, cfg=instrument)
                     expected = "PENDING_LONG" if side == "LONG" else "PENDING_SHORT"
                     if sig != expected:
                         cancel_reason = f"HTF conditions no longer valid (sig={sig})"
 
             if cancel_reason:
+                cancel_success = False
                 try:
                     ig.cancel_working_order(deal_id)
+                    cancel_success = True
                 except Exception as e:
                     logger.warning(f"[{name}] [S5] cancel_working_order error: {e}")
-                logger.info(f"[{name}] [S5] 🚫 {cancel_reason} — cancelled {deal_id}")
-                self._pending_orders[name] = None
-                self._save_state()
+                if cancel_success:
+                    logger.info(f"[{name}] [S5] 🚫 {cancel_reason} — cancelled {deal_id}")
+                    self._pending_orders[name] = None
+                    self._save_state()
+                else:
+                    logger.warning(f"[{name}] [S5] cancel unconfirmed — keeping pending for retry")
             return True  # still pending (or just cleared)
 
         elif status == "deleted":

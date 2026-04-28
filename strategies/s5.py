@@ -670,21 +670,46 @@ def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
             fill_info = tr.get_order_fill(symbol, order_id)
         except Exception as e:
             logger.warning(f"[S5][{symbol}] fill-check error: {e}")
+            # get_order_fill 404 — check if position already exists (race condition)
+            try:
+                positions = tr.get_all_open_positions()
+                if symbol in positions:
+                    pos = positions[symbol]
+                    expected_qty = float(sig.get("qty_str", 0))
+                    actual_qty = pos["qty"]
+                    if abs(actual_qty - expected_qty) < 0.01:
+                        logger.warning(
+                            f"[S5][{symbol}] Fill-check failed but position exists! "
+                            f"qty={actual_qty} entry={pos['entry_price']:.5f} — recovering"
+                        )
+                        fill_info = {"status": "filled", "fill_price": pos["entry_price"]}
+            except Exception as pos_err:
+                logger.warning(f"[S5][{symbol}] Position check error: {pos_err}")
         if fill_info and fill_info["status"] == "filled":
-            logger.info(f"[S5][{symbol}] Order already filled despite signal gone — registering trade")
+            logger.info(
+                f"[S5][{symbol}] ✅ Order filled despite signal gone "
+                f"@ {fill_info['fill_price']:.5f} — registering trade"
+            )
             with bot._trade_lock:
                 if symbol not in bot.active_positions and not st.is_pair_paused(symbol):
                     bot._handle_limit_filled(symbol, sig, fill_info["fill_price"], balance)
             bot.pending_signals.pop(symbol, None)
             st.save_pending_signals(bot.pending_signals)
             return None
+        # Only cancel if fill-check failed AND no position exists
+        cancel_success = False
         try:
             tr.cancel_order(symbol, order_id)
+            cancel_success = True
         except Exception as e:
             logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
-        logger.info(f"[S5][{symbol}] 🚫 Signal gone — limit cancelled")
-        st.add_scan_log(f"[S5][{symbol}] 🚫 Signal gone — limit cancelled", "INFO")
-        bot.pending_signals.pop(symbol, None)
+        if cancel_success:
+            logger.info(f"[S5][{symbol}] 🚫 Signal gone — limit cancelled")
+            st.add_scan_log(f"[S5][{symbol}] 🚫 Signal gone — limit cancelled", "INFO")
+            bot.pending_signals.pop(symbol, None)
+            st.save_pending_signals(bot.pending_signals)
+        else:
+            logger.warning(f"[S5][{symbol}] Signal gone but cancel unconfirmed — keeping pending for retry")
         return None
 
     order_id = sig.get("order_id")
@@ -713,16 +738,48 @@ def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
             fill_info = tr.get_order_fill(symbol, order_id)
         except Exception as e:
             logger.warning(f"[S5][{symbol}] get_order_fill error: {e}")
-            return None
+            # 404 / network error — check if position already exists before giving up
+            try:
+                positions = tr.get_all_open_positions()
+                if symbol in positions:
+                    pos = positions[symbol]
+                    expected_qty = float(sig.get("qty_str", 0))
+                    actual_qty = pos["qty"]
+                    if abs(actual_qty - expected_qty) < 0.01 and pos["entry_price"] > 0:
+                        fill_info = {"status": "filled", "fill_price": pos["entry_price"]}
+                        logger.warning(
+                            f"[S5][{symbol}] fill status unavailable but position exists — recovering fill"
+                        )
+                    else:
+                        return None
+                else:
+                    return None
+            except Exception as pos_err:
+                logger.warning(f"[S5][{symbol}] position recovery after fill-check error failed: {pos_err}")
+                return None
 
     if fill_info["status"] == "filled":
+        fill_price = float(fill_info.get("fill_price") or 0.0)
+        if fill_price <= 0:
+            try:
+                positions = tr.get_all_open_positions()
+                if symbol in positions:
+                    fill_price = float(positions[symbol].get("entry_price") or 0.0)
+            except Exception as pos_err:
+                logger.warning(f"[S5][{symbol}] fill-price recovery failed: {pos_err}")
+        if fill_price <= 0:
+            logger.warning(
+                f"[S5][{symbol}] filled status received with invalid fill_price={fill_price}; will retry"
+            )
+            return None
         with bot._trade_lock:
             if symbol in bot.active_positions:
                 bot.pending_signals.pop(symbol, None)
+                st.save_pending_signals(bot.pending_signals)
                 return None
             if st.is_pair_paused(symbol):
                 return None
-            bot._handle_limit_filled(symbol, sig, fill_info["fill_price"], balance)
+            bot._handle_limit_filled(symbol, sig, fill_price, balance)
         bot.pending_signals.pop(symbol, None)
         st.save_pending_signals(bot.pending_signals)
 
@@ -751,13 +808,37 @@ def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
                     )
 
                 if invalidated:
+                    cancel_success = False
                     try:
                         tr.cancel_order(symbol, order_id)
+                        cancel_success = True
                     except Exception as e:
                         logger.warning(f"[S5][{symbol}] cancel_order error: {e}")
-                    st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
-                    mark_ob_invalidated(bot, symbol)
-                    bot.pending_signals.pop(symbol, None)
+                        # Cancel failed — check if position exists (race: order filled at cancellation moment)
+                        try:
+                            positions = tr.get_all_open_positions()
+                            if symbol in positions:
+                                pos = positions[symbol]
+                                expected_qty = float(sig.get("qty_str", 0))
+                                actual_qty = pos["qty"]
+                                if abs(actual_qty - expected_qty) < 0.01:
+                                    logger.warning(
+                                        f"[S5][{symbol}] Cancel failed but position exists! "
+                                        f"qty={actual_qty} entry={pos['entry_price']:.5f} — recovering"
+                                    )
+                                    with bot._trade_lock:
+                                        if symbol not in bot.active_positions and not st.is_pair_paused(symbol):
+                                            bot._handle_limit_filled(symbol, sig, pos["entry_price"], balance)
+                                    bot.pending_signals.pop(symbol, None)
+                                    st.save_pending_signals(bot.pending_signals)
+                                    return None
+                        except Exception as pos_err:
+                            logger.warning(f"[S5][{symbol}] Position check after cancel error: {pos_err}")
+                    if cancel_success:
+                        st.add_scan_log(f"[S5][{symbol}] ❌ OB invalidated — limit cancelled", "INFO")
+                        mark_ob_invalidated(bot, symbol)
+                        bot.pending_signals.pop(symbol, None)
+                        st.save_pending_signals(bot.pending_signals)
                     return None
         except Exception as e:
             logger.debug(f"[S5][{symbol}] OB invalidation check error: {e}")
@@ -771,6 +852,7 @@ def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
         logger.info(f"[S5][{symbol}] ⏰ Limit cancelled — expired")
         st.add_scan_log(f"[S5][{symbol}] ⏰ Limit expired — cancelled", "INFO")
         bot.pending_signals.pop(symbol, None)
+        st.save_pending_signals(bot.pending_signals)
 
     return None
 

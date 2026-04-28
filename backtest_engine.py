@@ -344,6 +344,7 @@ class MockTrader:
                    take_profit_pct: float = 0.10,
                    use_s1_exits: bool = False, use_s4_exits: bool = False,
                    use_s5_exits: bool = False, use_s6_exits: bool = False,
+                   use_s7_exits: bool = False,
                    tp_price_abs: float = 0) -> dict:
         mark = self.get_mark_price(symbol)
         # SL
@@ -372,11 +373,14 @@ class MockTrader:
         elif use_s6_exits:
             tp_trig  = mark * (1 - _cfg("config_s6", "S6_TRAILING_TRIGGER_PCT", 0.10))
             trail_pct = _cfg("config_s6", "S6_TRAIL_RANGE_PCT", 10.0)
+        elif use_s7_exits:
+            tp_trig   = mark * (1 - _cfg("config_s7", "S7_TRAILING_TRIGGER_PCT", 0.10))
+            trail_pct = _cfg("config_s7", "S7_TRAILING_RANGE_PCT", 10.0)
         else:
             tp_trig  = tp_price_abs if 0 < tp_price_abs < mark else mark * (1 - take_profit_pct)
             trail_pct = 10.0
 
-        needs_scale_in = use_s4_exits or use_s6_exits
+        needs_scale_in = use_s4_exits or use_s6_exits or use_s7_exits
         size_mult = 0.5 if needs_scale_in else 1.0
         return self._open_position(symbol, "SHORT", sl, tp_trig, trail_pct,
                                    leverage, trade_size_pct, size_mult, needs_scale_in)
@@ -752,7 +756,7 @@ class BacktestEngine:
         self.parquet  = parquet
         self.balance  = balance
         self.days     = days
-        self.enabled  = enabled_strategies or {"S1", "S2", "S3", "S4", "S5", "S6"}
+        self.enabled  = enabled_strategies or {"S1", "S2", "S3", "S4", "S5", "S6", "S7"}
         self._trades: list[dict] = []
 
     def _patch_modules(self, mock_trader: MockTrader,
@@ -770,7 +774,7 @@ class BacktestEngine:
         import importlib.util as _ilu
         _root = Path(__file__).parent
         for _mod_name in ["config", "config_s1", "config_s2", "config_s3",
-                          "config_s4", "config_s5", "config_s6"]:
+                          "config_s4", "config_s5", "config_s6", "config_s7"]:
             try:
                 _existing = sys.modules.get(_mod_name)
                 # If missing or a types.ModuleType stub (no __file__), reload from disk
@@ -1030,7 +1034,7 @@ def _build_report(trades: list[dict], run_time: str, balance_start: float,
         )
 
     by_strategy = {}
-    for s in ["S1", "S2", "S3", "S4", "S5", "S6"]:
+    for s in ["S1", "S2", "S3", "S4", "S5", "S6", "S7"]:
         by_strategy[s] = stats([t for t in trades if t["strategy"] == s])
     overall = stats(trades)
 
@@ -1097,7 +1101,7 @@ def main():
     if only_flags:
         enabled = {f"S{f[1]}" for f in only_flags}
     else:
-        enabled = {"S1", "S2", "S3", "S4", "S5", "S6"}
+        enabled = {"S1", "S2", "S3", "S4", "S5", "S6", "S7"}
 
     # Build symbol universe
     if args.symbols:

@@ -305,7 +305,7 @@ def get_state():
         # Inject live enabled/disabled flags from config so the dashboard can
         # hide tabs for strategies that are turned off.
         try:
-            import config_s1, config_s2, config_s3, config_s4, config_s5, config_s6
+            import config_s1, config_s2, config_s3, config_s4, config_s5, config_s6, config_s7
             state["strategy_enabled"] = {
                 "S1": bool(config_s1.S1_ENABLED),
                 "S2": bool(config_s2.S2_ENABLED),
@@ -313,6 +313,7 @@ def get_state():
                 "S4": bool(config_s4.S4_ENABLED),
                 "S5": bool(config_s5.S5_ENABLED),
                 "S6": bool(config_s6.S6_ENABLED),
+                "S7": bool(config_s7.S7_ENABLED),
             }
         except Exception:
             pass

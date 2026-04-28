@@ -1177,6 +1177,7 @@
         <button class="strat-tab"        id="tab-s2" onclick="switchTab('s2')">S2 — Coil</button>
         <button class="strat-tab"        id="tab-s3" onclick="switchTab('s3')">S3 — Pullback</button>
         <button class="strat-tab"        id="tab-s4" onclick="switchTab('s4')">S4 — Short</button>
+        <button class="strat-tab"        id="tab-s7" onclick="switchTab('s7')">S7 — Darvas</button>
         <button class="strat-tab"        id="tab-s5" onclick="switchTab('s5')">S5 — SMC OB</button>
         <button class="strat-tab"        id="tab-s6" onclick="switchTab('s6')">S6 — V-Sweep</button>
       </div>
@@ -1451,6 +1452,7 @@
       <div class="stab"        data-s="S2">S2</div>
       <div class="stab"        data-s="S3">S3</div>
       <div class="stab"        data-s="S4">S4</div>
+      <div class="stab"        data-s="S7">S7</div>
       <div class="stab"        data-s="S5">S5</div>
       <div class="stab"        data-s="S6">S6</div>
     </div>
@@ -1460,6 +1462,7 @@
       <div class="strategy-panel"        data-s="S2"></div>
       <div class="strategy-panel"        data-s="S3"></div>
       <div class="strategy-panel"        data-s="S4"></div>
+      <div class="strategy-panel"        data-s="S7"></div>
       <div class="strategy-panel"        data-s="S5"></div>
       <div class="strategy-panel"        data-s="S6"></div>
     </div>
@@ -1534,7 +1537,7 @@ const Analytics = (() => {
 
   function renderAll() {
     if (!state.data) return;
-    for (const s of ['S1','S2','S3','S4','S5','S6']) {
+    for (const s of ['S1','S2','S3','S4','S5','S6','S7']) {
       renderStrategy(s, state.data.strategies[s]);
     }
   }
@@ -1736,6 +1739,7 @@ const STRATEGY_SNAP_COLS = {
   S4: ['snap_rsi_peak','snap_spike_body_pct','snap_rsi_div','snap_rsi_div_str'],
   S5: ['snap_s5_ob_low','snap_s5_ob_high','snap_s5_tp'],
   S6: ['snap_s6_peak','snap_s6_drop_pct','snap_s6_rsi_at_peak'],
+  S7: ['snap_rsi_peak','snap_spike_body_pct','snap_rsi_div','snap_box_top','snap_box_low_initial'],
 };
 const SHARED_SNAP_COLS = ['snap_sr_clearance_pct'];
 
@@ -1944,7 +1948,7 @@ function render(s) {
 
   // ── Hide tabs for disabled strategies
   if (s.strategy_enabled) {
-    ['S1','S2','S3','S4','S5','S6'].forEach(k => {
+    ['S1','S2','S3','S4','S5','S6','S7'].forEach(k => {
       const tab = $('tab-' + k.toLowerCase());
       if (tab) tab.style.display = s.strategy_enabled[k] ? '' : 'none';
     });
@@ -2806,7 +2810,7 @@ function isoToUnix(iso) {
 
 function openTradeChart(trade) {
   if (!trade || !trade.entry || !trade.open_at) return;
-  const tabMap = { S1: 's1', S2: 's2', S3: 's3', S4: 's4', S5: 's5', S6: 's6' };
+  const tabMap = { S1: 's1', S2: 's2', S3: 's3', S4: 's4', S5: 's5', S6: 's6', S7: 's7' };
   chartActiveTab  = tabMap[trade.strategy] || 's1';
   currentInterval = trade.interval || '15m';
   window._tradeOverlay = {
@@ -2906,6 +2910,15 @@ function signalScore(sym, ps, tab) {
     const fakeout  = ps.s6_fakeout_seen;
     const pending  = sig === 'PENDING_SHORT';
     return (pending ? 10 : 0) + (pending && fakeout ? 5 : 0);
+  }
+  if (tab === 's7') {
+    const reason  = ps.s7_reason || '';
+    const sig     = ps.s7_signal || 'HOLD';
+    const spike   = reason.includes('spike') && !reason.includes('No spike');
+    const rsiHot  = reason.includes('RSI peak') || sig === 'SHORT';
+    const boxOk   = reason.includes('Darvas box ✅') || sig === 'SHORT';
+    const srClear = ps.s7_sr_support_pct != null && ps.s7_sr_support_pct >= 15;
+    return (spike ? 1 : 0) + (spike && rsiHot ? 1 : 0) + (spike && rsiHot && boxOk ? 2 : 0) + (srClear ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
   }
   return 0;
 }
@@ -3116,6 +3129,64 @@ function s4CardHTML(sym, ps) {
     </div>`;
 }
 
+function s7CardHTML(sym, ps) {
+  const sig      = ps.s7_signal || 'HOLD';
+  const reason   = ps.s7_reason || '—';
+  const symShort = sym.replace('USDT', '');
+  const cardClass = sig === 'SHORT' ? 'signal-short' : '';
+  const spikeOk  = reason.includes('spike') && !reason.includes('No spike');
+  const rsiHot   = reason.includes('RSI peak') || sig === 'SHORT';
+  const div_ok   = reason.includes('RSI div ✅') || sig === 'SHORT';
+  const boxOk    = reason.includes('Darvas box ✅') || sig === 'SHORT';
+  const spikeClass = spikeOk ? 'pass' : 'fail';
+  const rsiClass   = !spikeOk ? 'muted' : rsiHot ? 'pass' : 'fail';
+  const divClass   = !spikeOk || !rsiHot ? 'muted' : div_ok ? 'pass' : 'warn';
+  const boxClass   = !spikeOk || !rsiHot ? 'muted' : boxOk ? 'pass' : 'fail';
+  const srPct      = ps.s7_sr_support_pct;
+  const srClass    = srPct == null ? 'muted' : srPct >= 15 ? 'pass' : srPct >= 10 ? 'warn' : 'fail';
+  const srLabel    = srPct == null ? '—' : `${srPct.toFixed(1)}% away`;
+  const boxLow     = ps.s7_box_low;
+  const boxTop     = ps.s7_box_top;
+  const boxLabel   = boxLow ? `low=${boxLow.toFixed(4)} top=${boxTop ? boxTop.toFixed(4) : '?'}` : '—';
+  const reasonClass = sig !== 'HOLD' ? 'signal' : rsiHot ? 'active' : spikeOk ? 'active' : '';
+  const age = ps.updated_at ? (() => {
+    const sec = Math.floor((Date.now() - new Date(ps.updated_at).getTime()) / 1000);
+    if (sec < 60) return sec + 's ago';
+    if (sec < 3600) return Math.floor(sec/60) + 'm ago';
+    return Math.floor(sec/3600) + 'h ago';
+  })() : 'not scanned';
+  return `
+    <div class="pair-card ${cardClass}" data-symbol="${sym}">
+      <div class="pair-top">
+        <div class="pair-name" title="${sym}">${symShort}</div>
+        <span class="pair-sig-badge ${sig}">${sig}</span>
+      </div>
+      <div class="pair-checks">
+        <div class="pair-check">
+          <span class="check-label">Spike ≥20%</span>
+          <span class="check-val ${spikeClass}">${spikeOk ? 'Found ✓' : 'Not found'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">RSI > 75</span>
+          <span class="check-val ${rsiClass}">${!spikeOk ? '—' : rsiHot ? 'Peaked ✓' : 'Not overbought'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">RSI Div</span>
+          <span class="check-val ${divClass}">${!spikeOk || !rsiHot ? '—' : div_ok ? 'Detected ✓' : 'Not detected'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">1H Darvas Box</span>
+          <span class="check-val ${boxClass}">${!spikeOk || !rsiHot ? '—' : boxOk ? boxLabel : 'Not locked'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">Support</span>
+          <span class="check-val ${srClass}">${srLabel}</span>
+        </div>
+      </div>
+      <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0,60)} · ${age}</div>
+    </div>`;
+}
+
 function s5CardHTML(sym, ps) {
   const sig      = ps.s5_signal || 'HOLD';
   const reason   = ps.s5_reason || '—';
@@ -3278,6 +3349,8 @@ function renderPairGrid(s) {
     html = pairs.map(sym => s6CardHTML(sym, pairStates[sym] || {})).join('');
   } else if (activeTab === 's5') {
     html = pairs.map(sym => s5CardHTML(sym, pairStates[sym] || {})).join('');
+  } else if (activeTab === 's7') {
+    html = pairs.map(sym => s7CardHTML(sym, pairStates[sym] || {})).join('');
   } else if (activeTab === 's4') {
     html = pairs.map(sym => s4CardHTML(sym, pairStates[sym] || {})).join('');
   } else if (activeTab === 's3') {

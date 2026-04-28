@@ -1471,6 +1471,20 @@ class MTFBot:
                 "s4_reason": s4_reason, "daily_df": daily_df,
             })
 
+        # ── Collect S7 candidate ──────────────────────────────────── #
+        if s7_sig == "SHORT" and s7_box_low > 0:
+            s7_trigger = s7_box_low * (1 - config_s7.S7_ENTRY_BUFFER)
+            s7_sl      = s7_trigger * (1 + 0.50 / config_s7.S7_LEVERAGE)
+            self.candidates.append({
+                "strategy": "S7", "symbol": symbol, "sig": "SHORT",
+                "rr": None, "sr_pct": s7_sr_sup_pct,
+                "s7_trigger": s7_trigger, "s7_sl": s7_sl,
+                "s7_box_top": s7_box_top, "s7_box_low": s7_box_low,
+                "s7_rsi": s7_rsi, "s7_rsi_peak": s7_rsi_peak,
+                "s7_body_pct": s7_body_pct, "s7_div": s7_div, "s7_div_str": s7_div_str,
+                "s7_reason": s7_reason, "daily_df": daily_df,
+            })
+
         # ── Collect S6 candidate ──────────────────────────────────── #
         if s6_sig == "PENDING_SHORT" and s6_peak_level > 0:
             self.candidates.append({

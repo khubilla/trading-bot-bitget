@@ -451,3 +451,44 @@ def test_execute_best_candidate_queues_s6(monkeypatch):
     b.candidates = [dict(_make_s6_candidate(), sig="PENDING_SHORT")]
     b._execute_best_candidate("BEARISH", 1000.0)
     assert "BNBUSDT" in queued
+
+
+def _make_s7_candidate():
+    return {
+        "symbol": "SOLUSDT", "strategy": "S7", "sig": "SHORT",
+        "s7_trigger": 95.0, "s7_sl": 100.0,
+        "s7_box_top": 100.0, "s7_box_low": 95.5,
+        "s7_rsi": 45.0, "s7_rsi_peak": 82.0,
+        "s7_body_pct": 0.62, "s7_div": True, "s7_div_str": "RSI divergence",
+        "daily_df": None,
+        "priority_rank": 3, "priority_score": 21.0,
+        "rr": 2.0, "sr_pct": 6.0,
+    }
+
+
+def test_queue_s7_pending_stores_payload(monkeypatch):
+    """queue_pending from strategies.s7 stores the correct fields."""
+    b = _make_bot(monkeypatch)
+    b.sentiment = type("S", (), {"direction": "BEARISH"})()
+    monkeypatch.setattr(bot.st, "save_pending_signals", lambda *a, **kw: None)
+    from strategies.s7 import queue_pending as _queue_s7
+    _queue_s7(b, _make_s7_candidate())
+    assert "SOLUSDT" in b.pending_signals
+    sig = b.pending_signals["SOLUSDT"]
+    assert sig["strategy"] == "S7"
+    assert sig["side"] == "SHORT"
+    assert sig["trigger"] == 95.0
+    assert sig["s7_sl"] == 100.0
+    assert sig["box_low"] == 95.5
+    assert sig["box_top"] == 100.0
+
+
+def test_execute_best_candidate_queues_s7(monkeypatch):
+    """S7 SHORT candidate is queued via strategies.s7.queue_pending."""
+    b = _make_full_bot(monkeypatch)
+    b.sentiment = type("S", (), {"direction": "BEARISH"})()
+    queued = []
+    monkeypatch.setattr("strategies.s7.queue_pending", lambda bot_inst, c: queued.append(c["symbol"]))
+    b.candidates = [dict(_make_s7_candidate(), sig="SHORT")]
+    b._execute_best_candidate("BEARISH", 1000.0)
+    assert "SOLUSDT" in queued

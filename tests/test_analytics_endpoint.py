@@ -55,7 +55,7 @@ def test_analytics_endpoint_returns_shape(client_with_csv):
     data = r.json()
     assert "strategies" in data
     assert set(data["strategies"].keys()) == {
-        "S1", "S2", "S3", "S4", "S5", "S6"
+        "S1", "S2", "S3", "S4", "S5", "S6", "S7"
     }
     s3 = data["strategies"]["S3"]
     assert s3["summary"]["count"] == 1

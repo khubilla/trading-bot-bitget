@@ -19,6 +19,7 @@ import config_s3
 import config_s4
 import config_s5
 import config_s6
+import config_s7
 
 # ── Config ────────────────────────────────────────────────────────── #
 
@@ -77,6 +78,16 @@ CURRENT_PARAMS = {
         "S6_MIN_RECOVERY_RATIO", "S6_SPIKE_LOOKBACK",
         "S6_SL_PCT", "S6_TRAILING_TRIGGER_PCT", "S6_TRAIL_RANGE_PCT",
     ),
+    "S7": _cfg(config_s7,
+        "S7_RSI_PEAK_THRESH", "S7_RSI_STILL_HOT_THRESH",
+        "S7_RSI_DIV_MIN_DROP", "S7_RSI_PEAK_LOOKBACK",
+        "S7_BIG_CANDLE_BODY_PCT", "S7_BIG_CANDLE_LOOKBACK",
+        "S7_ENTRY_BUFFER", "S7_MAX_ENTRY_BUFFER",
+        "S7_MIN_SR_CLEARANCE",
+        "S7_BOX_CONFIRM_COUNT",
+        "S7_TRAILING_TRIGGER_PCT", "S7_TRAILING_RANGE_PCT",
+        "S7_USE_SWING_TRAIL", "S7_SWING_LOOKBACK",
+    ),
 }
 
 # Columns to include in the table sent to Claude, per strategy
@@ -98,6 +109,10 @@ STRATEGY_COLUMNS = {
     "S6": ["result", "pnl_pct", "exit_reason",
            "snap_s6_peak", "snap_s6_drop_pct", "snap_s6_rsi_at_peak",
            "snap_sentiment"],
+    "S7": ["result", "pnl_pct", "exit_reason",
+           "snap_rsi", "snap_rsi_peak", "snap_spike_body_pct",
+           "snap_rsi_div", "snap_box_top", "snap_box_low_initial",
+           "snap_sentiment", "snap_sl", "snap_sr_clearance_pct"],
 }
 
 # ── Trade loader ──────────────────────────────────────────────────── #

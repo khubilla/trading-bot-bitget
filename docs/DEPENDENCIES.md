@@ -28,7 +28,7 @@
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     BITGET BOT (bot.py)                     │
-│  Crypto USDT-margined futures · S1-S6 strategies           │
+│  Crypto USDT-margined futures · S1-S7 strategies           │
 │  Output: state.json, trades.csv (or _paper variants)       │
 └─────────────────────────────────────────────────────────────┘
                               ↓
@@ -41,6 +41,7 @@
                     │  strategies/s4.py   ← Bitget only   │
                     │  strategies/s5.py   ← BOTH bots     │
                     │  strategies/s6.py   ← Bitget only   │
+                    │  strategies/s7.py   ← Bitget only   │
                     │  config_s5.py       ← Bitget only   │
                     │  paper_trader.py    ← SHARED        │
                     └─────────────────────────────────────┘
@@ -69,6 +70,7 @@
 - `strategies/s3.py` — evaluate_s3
 - `strategies/s4.py` — evaluate_s4
 - `strategies/s6.py` — evaluate_s6
+- `strategies/s7.py` — evaluate_s7 (Darvas box detector, queue_pending, handle_pending_tick, exits)
 
 **Separation rules:**
 - Each strategy file owns its own entry/exit logic. Strategies do NOT import from each other.
@@ -99,7 +101,7 @@ The old monolithic `strategy.py` has been split into:
 
 - `indicators.py` — pure indicators (EMA, RSI, ADX, stoch, MACD). No config deps.
 - `tools.py` — generic structure/pattern helpers (swing targets, order blocks, FVG, support/resistance, HTF check, candle geometry `body_pct`/`upper_wick`/`body_size`). No config deps.
-- `strategies/s1.py`..`strategies/s6.py` — one file per strategy. Each file owns its entry/exit rules and imports only from `indicators.py`, `tools.py`, and its own `config_sN.py`. Strategies do NOT import from each other.
+- `strategies/s1.py`..`strategies/s7.py` — one file per strategy. Each file owns its entry/exit rules and imports only from `indicators.py`, `tools.py`, and its own `config_sN.py`. Strategies do NOT import from each other. (Exception: `strategies/s7.py` imports `_place_partial_trail_exits` from `strategies/s4.py` to reuse the shared exit primitive.)
 
 **Shared by both Bitget and IG:**
 - `indicators.py`, `tools.py`, `strategies/s5.py`
@@ -224,6 +226,27 @@ def evaluate_s6(
 **Breaking changes:**
 - Changing return value count/order → bot.py unpacking fails
 - ig_bot.py does NOT call evaluate_s6; no IG impact
+
+---
+
+#### evaluate_s7()
+
+**Signature:**
+```python
+def evaluate_s7(
+    symbol: str,
+    daily_df: pd.DataFrame,
+    h1_df: pd.DataFrame,
+) -> tuple[str, float, float, float, float, float, bool, str, str]:
+    # Returns: (signal, daily_rsi, box_top, box_low, body_pct, rsi_peak, rsi_div, rsi_div_str, reason)
+```
+
+**Callers:**
+- `bot.py` — `s7_sig, s7_rsi, s7_box_top, s7_box_low, s7_body_pct, s7_rsi_peak, s7_rsi_div, s7_rsi_div_str, s7_reason = evaluate_s7(symbol, daily_df, _h1_df_s7)` where `_h1_df_s7 = tr.get_candles(symbol, "1H", limit=48)` is fetched separately (NOT from `htf_df` which only has 15 candles)
+
+**Breaking changes:**
+- Changing return value count/order → bot.py unpacking fails
+- ig_bot.py does NOT call evaluate_s7; no IG impact
 
 ---
 
@@ -408,13 +431,25 @@ Each key is a symbol (e.g., "BTCUSDT"). Value is a dict with 44 fields:
   "s6_sl": float | None,      # Stop loss: peak_level * (1 + S6_SL_PCT)
   "s6_fakeout_seen": bool | None, # True once mark_price > peak_level (phase 1 gate)
 
+  # S7 fields
+  "s7_signal": str,           # "SHORT" | "HOLD"
+  "s7_reason": str,
+  "s7_box_top": float | None,   # Locked Darvas top-box high
+  "s7_box_low": float | None,   # Locked Darvas low-box low
+  "s7_rsi": float | None,       # Current daily RSI
+  "s7_rsi_peak": float | None,  # Highest RSI in lookback window
+  "s7_body_pct": float | None,  # Best spike body pct found
+  "s7_div": bool | None,        # RSI bearish divergence detected
+  "s7_div_str": str,            # Divergence summary e.g. "82.3→74.1"
+  "s7_sr_clearance_pct": float | None, # Spike base clearance %
+
   # Shared S/R fields
   "sr_resistance_pct": float | None,
   "sr_support_pct": float | None,
 
   # Metadata
-  "signal": str,              # Aggregate signal (first non-HOLD from S1-S6)
-  "strategy": str,            # "S1" | "S2" | "S3" | "S4" | "S5" | "S6"
+  "signal": str,              # Aggregate signal (first non-HOLD from S1-S7)
+  "strategy": str,            # "S1" | "S2" | "S3" | "S4" | "S5" | "S6" | "S7"
   "updated_at": str,          # ISO timestamp
 }
 ```
@@ -505,6 +540,7 @@ result,pnl,pnl_pct,exit_reason,exit_price
 - **S4 snapshot:** snap_rsi_peak, snap_spike_body_pct, snap_rsi_div, snap_rsi_div_str
 - **S5 snapshot:** snap_s5_ob_low, snap_s5_ob_high, snap_s5_tp
 - **S6 snapshot:** snap_s6_peak, snap_s6_drop_pct, snap_s6_rsi_at_peak
+- **S7 snapshot:** snap_box_top, snap_box_low_initial (box levels at entry time; same snap_rsi_peak, snap_spike_body_pct, snap_rsi_div, snap_rsi_div_str columns as S4)
 - **S/R snapshot:** snap_sr_clearance_pct
 - **Close data:** result, pnl, pnl_pct, exit_reason, exit_price
 
@@ -1013,6 +1049,7 @@ Each strategy lives in `strategies/sN.py` and owns:
 | S4 | `strategies/s4.py` | `evaluate_s4` | — | `compute_and_place_short_exits` | `_place_partial_trail_exits` | `maybe_trail_sl` (SHORT) |
 | S5 | `strategies/s5.py` | `evaluate_s5` | `compute_and_place_long_exits` | `compute_and_place_short_exits` | `_place_exits` | `maybe_trail_sl` |
 | S6 | `strategies/s6.py` | `evaluate_s6` | — | `compute_and_place_short_exits` | `_place_partial_trail_exits` | — |
+| S7 | `strategies/s7.py` | `evaluate_s7` | — | `compute_and_place_short_exits` | `_place_partial_trail_exits` (from s4) | `maybe_trail_sl` (SHORT) |
 
 ### 7.2 `compute_and_place_*_exits(symbol, qty_str, fill, ...) → (ok, sl_trig, trail_trig)`
 
@@ -1097,7 +1134,7 @@ python recover.py [--dry-run] [--symbols SYM1 SYM2 ...]
 
 ### 9.1 Analytics tab (`/api/analytics`)
 
-**Purpose:** Per-strategy trade history analytics (Bitget bot, strategies S1–S6).
+**Purpose:** Per-strategy trade history analytics (Bitget bot, strategies S1–S7).
 
 **Write chain:** none — read-only feature.
 
@@ -1116,7 +1153,7 @@ python recover.py [--dry-run] [--symbols SYM1 SYM2 ...]
   "strategies": {
     "S1": {"trades": [...], "series": {"cum_pnl": [...], "bars": [...]},
             "summary": {"count": ..., "wins": ..., "win_rate": ..., ...}},
-    "S2": {...}, ..., "S6": {...}
+    "S2": {...}, ..., "S7": {...}
   }
 }
 ```
@@ -1127,7 +1164,7 @@ python recover.py [--dry-run] [--symbols SYM1 SYM2 ...]
    `STRATEGY_SNAP_COLS` no longer matches → per-strategy snap columns disappear from the table.
    Fix: keep the two lists in sync.
 
-2. **Adding a new strategy (e.g. S7)** → analytics silently drops its trades (not in `STRATEGIES`).
+2. **Adding a new strategy (e.g. S8)** → analytics silently drops its trades (not in `STRATEGIES`). Fix: add to `STRATEGIES` tuple in `analytics.py` and add to `STRATEGY_SNAP_FIELDS` dict.
    Fix: add to `analytics.STRATEGIES` and `STRATEGY_SNAP_FIELDS`; add a strategy tab in `dashboard.html`.
 
 3. **Changing `trades.csv` column names** → `analytics.load_closed_trades` reads by name;
@@ -1490,3 +1527,4 @@ head -1 ig_trades.csv
 - 2026-04-03: S6 V-Formation Liquidity Sweep Short — added evaluate_s6() to Section 2.1 (Bitget-only, 6-tuple return); added S6 fields to Section 4.1 pair_states (s6_signal, s6_reason, s6_peak_level, s6_sl, s6_fakeout_seen); updated trades.csv to 41 columns (+snap_s6_peak, snap_s6_drop_pct, snap_s6_rsi_at_peak); updated Section 1 architecture diagram and signal/strategy fields to include S6.
 - 2026-04-10: Liquidity filter — added Section 5.5 (Bitget scanner/liquidity config params). New params LIQUIDITY_CHECK_ENABLED and MIN_OB_DEPTH_USDT in config.py; new private function _filter_by_liquidity() in scanner.py called as last funnel step in get_qualified_pairs_and_sentiment(). Bitget-only; IG unaffected. No state.json, CSV, or return-value changes.
 - 2026-04-11: S2/S4/S6 scale-in SL fix — _do_scale_in (bot.py) now always re-places SL unconditionally for all three strategies after scale-in. S2: max(box_low*0.999, new_avg*(1-S2_STOP_LOSS_PCT)). S4: new_avg*(1+0.50/S4_LEVERAGE). S6: new_avg*(1+S6_SL_PCT/S6_LEVERAGE). Removed stale comment claiming S4 SL is structural. partial TP (profit_plan) and trailing (moving_plan) were already correct via refresh_plan_exits().
+- 2026-04-28: S7 Post-Pump 1H Darvas Breakdown Short — added strategies/s7.py (evaluate_s7 9-tuple return, detect_darvas_box walking algorithm, queue_pending, handle_pending_tick); added config_s7.py; added S7 fields to Section 4.1 pair_states (s7_signal, s7_reason, s7_box_top, s7_box_low, s7_rsi, s7_rsi_peak, s7_body_pct, s7_div, s7_div_str, s7_sr_clearance_pct); updated Section 2.1 strategies diagram and function list; added evaluate_s7() signature to Section 2.1; updated trades.csv snap fields (snap_box_top, snap_box_low_initial added); updated Section 7.1 strategy table; updated analytics.py STRATEGIES tuple to include S7; updated optimize.py CURRENT_PARAMS and STRATEGY_COLUMNS for S7; added S7 display panel to dashboard.html; ig_bot.py unaffected (S7 is Bitget-only).

@@ -13,7 +13,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Union
 
-STRATEGIES = ("S1", "S2", "S3", "S4", "S5", "S6")
+STRATEGIES = ("S1", "S2", "S3", "S4", "S5", "S6", "S7")
 
 STRATEGY_SNAP_FIELDS = {
     "S1": ("snap_rsi", "snap_adx", "snap_htf", "snap_coil",

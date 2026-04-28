@@ -925,7 +925,7 @@ class MTFBot:
                     elif _strat == "S3":
                         from strategies.s3 import maybe_trail_sl as _trail_s3
                         _trail_s3(sym, ap, tr, st)
-                    elif _strat in ("S2", "S4"):
+                    elif _strat in ("S2", "S4", "S7"):
                         _partial_done = (
                             tr.is_partial_closed(sym) if PAPER_MODE
                             else ap.get("partial_logged", False)
@@ -933,6 +933,9 @@ class MTFBot:
                         if _strat == "S2":
                             from strategies.s2 import maybe_trail_sl as _trail_s2
                             _trail_s2(sym, ap, tr, st, _partial_done)
+                        elif _strat == "S7":
+                            from strategies.s7 import maybe_trail_sl as _trail_s7
+                            _trail_s7(sym, ap, tr, st, _partial_done)
                         else:
                             from strategies.s4 import maybe_trail_sl as _trail_s4
                             _trail_s4(sym, ap, tr, st, _partial_done)
@@ -1584,6 +1587,12 @@ class MTFBot:
                     min_bal = 5.0 / (config_s4.S4_TRADE_SIZE_PCT * config_s4.S4_LEVERAGE)
                     if balance >= min_bal:
                         self._queue_s4_pending(candidate)
+            elif strategy == "S7":
+                if sym not in self.pending_signals:
+                    min_bal = 5.0 / (config_s7.S7_TRADE_SIZE_PCT * config_s7.S7_LEVERAGE)
+                    if balance >= min_bal:
+                        from strategies.s7 import queue_pending as _queue_s7
+                        _queue_s7(self, candidate)
             elif strategy == "S5":
                 with self._trade_lock:
                     if sym in self.active_positions:
@@ -2144,6 +2153,82 @@ class MTFBot:
             "trade_id": trade["trade_id"],
         }
 
+    def _fire_s7(self, symbol: str, sig: dict, mark: float, balance: float) -> None:
+        """Open S7 SHORT at fire time. Runs S/R check against pair_states."""
+        ps = st.get_pair_state(symbol)
+        sr_support_pct = ps.get("s7_sr_support_pct")
+        if sr_support_pct is not None and sr_support_pct < config_s7.S7_MIN_SR_CLEARANCE * 100:
+            logger.info(
+                f"[S7][{symbol}] ⏸️ Fire skipped — support clearance {sr_support_pct:.1f}% too small"
+            )
+            st.add_scan_log(
+                f"[S7][{symbol}] ⛔ Fire: support too close ({sr_support_pct:.1f}%)", "WARN"
+            )
+            self.pending_signals.pop(symbol, None)
+            st.save_pending_signals(self.pending_signals)
+            return
+        if config.CLAUDE_FILTER_ENABLED:
+            _sr_str = f"{sr_support_pct:.1f}%" if sr_support_pct else "none found"
+            _cd = claude_approve("S7", symbol, {
+                "RSI peak": sig.get("snap_rsi_peak", "?"),
+                "RSI divergence": str(sig.get("snap_rsi_div", "?")),
+                "S/R clearance (spike base)": _sr_str,
+                "Sentiment": sig.get("snap_sentiment", "?"),
+                "Box top": round(sig.get("box_top", 0), 5),
+                "Box low": round(sig.get("box_low", 0), 5),
+                "Entry": round(mark, 5), "SL": round(sig["s7_sl"], 5),
+            })
+            if not _cd["approved"]:
+                logger.info(f"[S7][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
+                st.add_scan_log(f"[S7][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
+                self.pending_signals.pop(symbol, None)
+                st.save_pending_signals(self.pending_signals)
+                return
+        s7_sl_actual = mark * (1 + 0.50 / config_s7.S7_LEVERAGE)
+        st.add_scan_log(
+            f"[S7][{symbol}] 🔴 SHORT fired @ {mark:.5f} | entry≤{sig['trigger']:.5f} | "
+            f"box low={sig.get('box_low', 0):.5f}", "SIGNAL"
+        )
+        trade = tr.open_short(
+            symbol, sl_floor=s7_sl_actual, leverage=config_s7.S7_LEVERAGE,
+            trade_size_pct=config_s7.S7_TRADE_SIZE_PCT * 0.5, strategy="S7",
+        )
+        trade["strategy"]              = "S7"
+        trade["snap_rsi"]              = sig.get("snap_rsi")
+        trade["snap_rsi_peak"]         = sig.get("snap_rsi_peak")
+        trade["snap_spike_body_pct"]   = sig.get("snap_spike_body_pct")
+        trade["snap_rsi_div"]          = sig.get("snap_rsi_div")
+        trade["snap_rsi_div_str"]      = sig.get("snap_rsi_div_str")
+        trade["snap_box_top"]          = sig.get("snap_box_top")
+        trade["snap_box_low_initial"]  = sig.get("snap_box_low_initial")
+        trade["snap_sl"]               = round(s7_sl_actual, 8)
+        trade["snap_sentiment"]        = sig.get("snap_sentiment")
+        trade["snap_sr_clearance_pct"] = sr_support_pct
+        trade["trade_id"] = uuid.uuid4().hex[:8]
+        trade.update(dna_snapshot("S7", symbol, {
+            "daily": sig.get("daily_df"),
+        }))
+        _log_trade("S7_SHORT", trade)
+        st.add_open_trade(trade)
+        try:
+            snapshot.save_snapshot(
+                trade_id=trade["trade_id"], event="open",
+                symbol=symbol, interval="1D", candles=[],
+                event_price=float(trade.get("entry", 0)),
+            )
+        except Exception as e:
+            logger.warning(f"[S7][{symbol}] snapshot save failed: {e}")
+        if PAPER_MODE: tr.tag_strategy(symbol, "S7")
+        self.active_positions[symbol] = {
+            "side": "SHORT", "strategy": "S7",
+            "box_high": sig["s7_sl"], "box_low": sig["trigger"],
+            "scale_in_pending": True, "scale_in_after": time.time() + 3600,
+            "scale_in_trade_size_pct": config_s7.S7_TRADE_SIZE_PCT,
+            "s7_box_low": sig["box_low"],
+            "s7_box_top": sig.get("box_top", 0),
+            "trade_id": trade["trade_id"],
+        }
+
     def _fire_s6(self, symbol: str, sig: dict, mark: float, balance: float) -> None:
         """Open S6 SHORT after two-phase fakeout confirmed. Initial entry at 50% size; scale-in queued 1h later."""
         sl_price = mark * (1 + config_s6.S6_SL_PCT / config_s6.S6_LEVERAGE)
@@ -2231,7 +2316,7 @@ class MTFBot:
 
                     strategy = sig.get("strategy")
 
-                    if strategy in ("S2", "S3", "S4", "S5", "S6"):
+                    if strategy in ("S2", "S3", "S4", "S5", "S6", "S7"):
                         # Delegate to the strategy module's handle_pending_tick.
                         # Returns "break" to stop the outer for-loop (MAX_CONCURRENT_TRADES hit).
                         from importlib import import_module

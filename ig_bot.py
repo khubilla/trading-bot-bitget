@@ -627,9 +627,12 @@ class IGBot:
                 logger.info("Stream token expired — refreshing session")
                 ig._refresh_session()
                 creds = ig.get_stream_credentials()
+                # Filter to only epics with streaming enabled
+                all_epics = [i["epic"] for i in config_ig.INSTRUMENTS]
+                streamable_epics = [e for e in all_epics if ig.is_streaming_available(e)]
                 ig_stream.stop()
                 ig_stream.start(
-                    epics          = [i["epic"] for i in config_ig.INSTRUMENTS],
+                    epics          = streamable_epics,
                     account_id     = creds["account_id"],
                     cst            = creds["cst"],
                     xst            = creds["xst"],
@@ -673,8 +676,12 @@ class IGBot:
         if not _in_trading_window_for(instrument, now):
             logger.debug(f"[{name}] Outside trading window ({now.strftime('%H:%M')} ET)")
             return
-        if now.weekday() >= 5:
-            logger.info(f"[{name}] Weekend — no new entries")
+        # Weekend check: Saturday all day, Sunday before 6 PM ET (markets open Sunday 6 PM)
+        if now.weekday() == 5:  # Saturday
+            logger.info(f"[{name}] Weekend (Saturday) — no new entries")
+            return
+        if now.weekday() == 6 and now.hour < 18:  # Sunday before 6 PM ET
+            logger.info(f"[{name}] Weekend (Sunday before 6 PM ET) — no new entries")
             return
 
         # 4. Already in a trade
@@ -1301,8 +1308,20 @@ if __name__ == "__main__":
         # Start Lightstreamer streaming (live mode only)
         try:
             creds = ig.get_stream_credentials()
+            # Filter to only epics with streaming enabled
+            all_epics = [i["epic"] for i in config_ig.INSTRUMENTS]
+            streamable_epics = [e for e in all_epics if ig.is_streaming_available(e)]
+
+            if streamable_epics:
+                logger.info(f"Streaming enabled for: {streamable_epics}")
+                if len(streamable_epics) < len(all_epics):
+                    non_streamable = [e for e in all_epics if e not in streamable_epics]
+                    logger.info(f"Using REST polling for: {non_streamable}")
+            else:
+                logger.warning("No instruments have streaming enabled — using REST polling for all")
+
             ig_stream.start(
-                epics          = [i["epic"] for i in config_ig.INSTRUMENTS],
+                epics          = streamable_epics,
                 account_id     = creds["account_id"],
                 cst            = creds["cst"],
                 xst            = creds["xst"],

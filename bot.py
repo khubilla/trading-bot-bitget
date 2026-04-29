@@ -39,6 +39,38 @@ from claude_filter import claude_approve
 from trade_dna import snapshot as dna_snapshot
 import snapshot
 
+def get_position_size_multiplier() -> float:
+    """
+    Calculate position size multiplier based on time of day and day of week.
+    Returns multiplier to apply to TRADE_SIZE_PCT (e.g., 2.0 for 2x size, 0.5 for 50% size).
+
+    Based on trade analysis:
+    - European Main (16:00-19:00 PH): 59.1% WR, +593% P&L → 2x size
+    - Tuesday: 27.8% WR, 5 catastrophic losses → 0.5x size
+    """
+    now = datetime.now()
+    current_hour = now.hour
+    current_weekday = now.weekday()  # Monday=0, Sunday=6
+
+    # Tuesday reduction (if enabled)
+    if hasattr(config, 'REDUCE_TUESDAY_SIZE') and config.REDUCE_TUESDAY_SIZE:
+        if current_weekday == 1:  # Tuesday
+            return config.TUESDAY_SIZE_MULTIPLIER if hasattr(config, 'TUESDAY_SIZE_MULTIPLIER') else 0.5
+
+    # Enhanced trading windows (check for time-based multipliers)
+    if hasattr(config, 'ENHANCED_TRADING_WINDOWS') and config.ENHANCED_TRADING_WINDOWS:
+        for start_hour, end_hour, multiplier in config.ENHANCED_TRADING_WINDOWS:
+            if start_hour <= end_hour:
+                # Normal range (e.g., 16 to 19)
+                if start_hour <= current_hour < end_hour:
+                    return multiplier
+            else:
+                # Crosses midnight (e.g., 22 to 2)
+                if current_hour >= start_hour or current_hour < end_hour:
+                    return multiplier
+
+    return 1.0  # Default multiplier
+
 def _check_disclaimer():
     agreed = Path(__file__).parent / ".disclaimer_agreed"
     if agreed.exists():
@@ -762,16 +794,39 @@ class MTFBot:
 
     def _tick(self):
         now = time.time()
+        now_time = datetime.now()
 
-        if config.NON_TRADING_HOURS_FROM is not None and config.NON_TRADING_HOURS_TO is not None:
-            now_time = datetime.now()
-        
-            # Monday=0, Sunday=6. Weekends are 5 and 6.
+        # Check Saturday blackout (based on trade analysis: 25% win rate, -242% P&L)
+        if hasattr(config, 'DISABLE_SATURDAY_TRADING') and config.DISABLE_SATURDAY_TRADING:
+            if now_time.weekday() == 5:  # Saturday
+                st.add_scan_log("Saturday trading disabled — skipping scan", "INFO")
+                return
+
+        # Check non-trading hour windows (supports multiple blackout periods)
+        if hasattr(config, 'NON_TRADING_HOURS') and config.NON_TRADING_HOURS:
+            is_weekend = now_time.weekday() >= 5
+            current_hour = now_time.hour
+
+            for start_hour, end_hour in config.NON_TRADING_HOURS:
+                # Handle ranges that cross midnight (e.g., 22 to 1)
+                if start_hour <= end_hour:
+                    # Normal range (e.g., 8 to 11)
+                    is_in_blackout = start_hour <= current_hour < end_hour
+                else:
+                    # Crosses midnight (e.g., 22 to 1 means 22-23 or 0-0)
+                    is_in_blackout = current_hour >= start_hour or current_hour < end_hour
+
+                if is_in_blackout:
+                    # Allow Monday early hours if it was part of Sunday night restriction
+                    is_monday_early = now_time.weekday() == 0 and current_hour < end_hour and start_hour > end_hour
+
+                    if not is_weekend and not is_monday_early:
+                        st.add_scan_log(f"Non-trading hours ({start_hour:02d}:00-{end_hour:02d}:00 PH) — skipping scan", "INFO")
+                        return
+        # Backward compatibility: check old config format
+        elif hasattr(config, 'NON_TRADING_HOURS_FROM') and config.NON_TRADING_HOURS_FROM is not None:
             is_weekend = now_time.weekday() >= 5
             is_monday_early = now_time.weekday() == 0 and now_time.hour < config.NON_TRADING_HOURS_TO
-            
-            # Range crosses midnight: 
-            # True if hour is 22 (10PM), 23 (11PM), or 0 (12AM)
             is_restricted_time = now_time.hour >= config.NON_TRADING_HOURS_FROM or now_time.hour < config.NON_TRADING_HOURS_TO
 
             if is_restricted_time and not is_weekend and not is_monday_early:
@@ -1734,18 +1789,24 @@ class MTFBot:
                        c["s1_bl"] * (1 - config_s1.S1_SL_BUFFER_PCT))
         sl_short = min(mark_now * (1 + config_s1.STOP_LOSS_PCT),
                        c["s1_bh"] * (1 + config_s1.S1_SL_BUFFER_PCT))
+
+        # Apply dynamic position sizing based on time/day
+        size_multiplier = get_position_size_multiplier()
+        adjusted_size = config_s1.TRADE_SIZE_PCT * size_multiplier
+
+        size_note = f" ({size_multiplier}x)" if size_multiplier != 1.0 else ""
         st.add_scan_log(
             f"[S1][{symbol}] {'🟢' if s1_sig == 'LONG' else '🔴'} {s1_sig} | "
-            f"RSI={c['rsi_val']:.1f} ADX={c['adx_val']:.1f} | rank=#{c['priority_rank']}",
+            f"RSI={c['rsi_val']:.1f} ADX={c['adx_val']:.1f} | rank=#{c['priority_rank']}{size_note}",
             "SIGNAL"
         )
         if s1_sig == "LONG":
             trade = tr.open_long(symbol, sl_floor=sl_long, leverage=lev,
-                                 trade_size_pct=config_s1.TRADE_SIZE_PCT,
+                                 trade_size_pct=adjusted_size,
                                  strategy="S1")
         else:
             trade = tr.open_short(symbol, sl_floor=sl_short, leverage=lev,
-                                  trade_size_pct=config_s1.TRADE_SIZE_PCT,
+                                  trade_size_pct=adjusted_size,
                                   strategy="S1")
         trade["strategy"] = "S1"
         trade["snap_rsi"]           = round(c["rsi_val"], 1)
@@ -1810,12 +1871,15 @@ class MTFBot:
                     logger.info(f"[S5][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
                     st.add_scan_log(f"[S5][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
                     return False
-            st.add_scan_log(f"[S5][{symbol}] 🟢 LONG | {s5_reason}", "SIGNAL")
+            size_multiplier = get_position_size_multiplier()
+            adjusted_size = config_s5.S5_TRADE_SIZE_PCT * size_multiplier
+            size_note = f" ({size_multiplier}x)" if size_multiplier != 1.0 else ""
+            st.add_scan_log(f"[S5][{symbol}] 🟢 LONG | {s5_reason}{size_note}", "SIGNAL")
             trade = tr.open_long(
                 symbol,
                 sl_floor       = s5_sl,
                 leverage       = config_s5.S5_LEVERAGE,
-                trade_size_pct = config_s5.S5_TRADE_SIZE_PCT,
+                trade_size_pct = adjusted_size,
                 strategy       = "S5",
                 tp_price_abs   = s5_tp,
             )
@@ -1872,16 +1936,19 @@ class MTFBot:
                     logger.info(f"[S5][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
                     st.add_scan_log(f"[S5][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
                     return False
+            size_multiplier = get_position_size_multiplier()
+            adjusted_size = config_s5.S5_TRADE_SIZE_PCT * size_multiplier
+            size_note = f" ({size_multiplier}x)" if size_multiplier != 1.0 else ""
             st.add_scan_log(
                 f"[S5][{symbol}] 🔴 SHORT | OB {s5_ob_low:.5f}–{s5_ob_high:.5f} | "
-                f"entry≤{s5_trigger:.5f} triggered @ {mark_now:.5f}",
+                f"entry≤{s5_trigger:.5f} triggered @ {mark_now:.5f}{size_note}",
                 "SIGNAL"
             )
             trade = tr.open_short(
                 symbol,
                 sl_floor       = s5_sl,
                 leverage       = config_s5.S5_LEVERAGE,
-                trade_size_pct = config_s5.S5_TRADE_SIZE_PCT,
+                trade_size_pct = adjusted_size,
                 strategy       = "S5",
                 tp_price_abs   = s5_tp,
             )
@@ -1981,10 +2048,13 @@ class MTFBot:
                 self.pending_signals.pop(symbol, None)
                 st.save_pending_signals(self.pending_signals)
                 return
-        st.add_scan_log(f"[S2][{symbol}] 🟢 LONG fired @ {mark:.5f}", "SIGNAL")
+        size_multiplier = get_position_size_multiplier()
+        adjusted_size = config_s2.S2_TRADE_SIZE_PCT * 0.5 * size_multiplier
+        size_note = f" ({size_multiplier}x)" if size_multiplier != 1.0 else ""
+        st.add_scan_log(f"[S2][{symbol}] 🟢 LONG fired @ {mark:.5f}{size_note}", "SIGNAL")
         trade = tr.open_long(
             symbol, box_low=sig["s2_bl"], leverage=config_s2.S2_LEVERAGE,
-            trade_size_pct=config_s2.S2_TRADE_SIZE_PCT * 0.5,
+            trade_size_pct=adjusted_size,
             take_profit_pct=config_s2.S2_TAKE_PROFIT_PCT,
             stop_loss_pct=config_s2.S2_STOP_LOSS_PCT,
             strategy       = "S2",
@@ -2014,7 +2084,7 @@ class MTFBot:
             "side": "LONG", "strategy": "S2",
             "box_high": sig["s2_bh"], "box_low": sig["s2_bl"],
             "scale_in_pending": True, "scale_in_after": time.time() + 3600,
-            "scale_in_trade_size_pct": config_s2.S2_TRADE_SIZE_PCT,
+            "scale_in_trade_size_pct": config_s2.S2_TRADE_SIZE_PCT * size_multiplier,  # Use same multiplier as initial entry
             "trade_id": trade["trade_id"],
         }
 
@@ -2049,10 +2119,13 @@ class MTFBot:
                 self.pending_signals.pop(symbol, None)
                 st.save_pending_signals(self.pending_signals)
                 return
-        st.add_scan_log(f"[S3][{symbol}] 🟢 LONG fired @ {mark:.5f}", "SIGNAL")
+        size_multiplier = get_position_size_multiplier()
+        adjusted_size = config_s3.S3_TRADE_SIZE_PCT * size_multiplier
+        size_note = f" ({size_multiplier}x)" if size_multiplier != 1.0 else ""
+        st.add_scan_log(f"[S3][{symbol}] 🟢 LONG fired @ {mark:.5f}{size_note}", "SIGNAL")
         trade = tr.open_long(
             symbol, sl_floor=sig["s3_sl"], leverage=config_s3.S3_LEVERAGE,
-            trade_size_pct=config_s3.S3_TRADE_SIZE_PCT, strategy       = "S3",
+            trade_size_pct=adjusted_size, strategy       = "S3",
         )
         trade["strategy"]              = "S3"
         trade["snap_adx"]              = sig.get("snap_adx")
@@ -2112,12 +2185,15 @@ class MTFBot:
                 st.save_pending_signals(self.pending_signals)
                 return
         s4_sl_actual = mark * (1 + 0.50 / config_s4.S4_LEVERAGE)
+        size_multiplier = get_position_size_multiplier()
+        adjusted_size = config_s4.S4_TRADE_SIZE_PCT * 0.5 * size_multiplier
+        size_note = f" ({size_multiplier}x)" if size_multiplier != 1.0 else ""
         st.add_scan_log(
-            f"[S4][{symbol}] 🔴 SHORT fired @ {mark:.5f} | entry≤{sig['trigger']:.5f}", "SIGNAL"
+            f"[S4][{symbol}] 🔴 SHORT fired @ {mark:.5f} | entry≤{sig['trigger']:.5f}{size_note}", "SIGNAL"
         )
         trade = tr.open_short(
             symbol, sl_floor=s4_sl_actual, leverage=config_s4.S4_LEVERAGE,
-            trade_size_pct=config_s4.S4_TRADE_SIZE_PCT * 0.5, strategy       = "S4",
+            trade_size_pct=adjusted_size, strategy       = "S4",
         )
         trade["strategy"]              = "S4"
         trade["snap_rsi"]              = sig.get("snap_rsi")
@@ -2148,7 +2224,7 @@ class MTFBot:
             "side": "SHORT", "strategy": "S4",
             "box_high": sig["s4_sl"], "box_low": sig["trigger"],
             "scale_in_pending": True, "scale_in_after": time.time() + 3600,
-            "scale_in_trade_size_pct": config_s4.S4_TRADE_SIZE_PCT,
+            "scale_in_trade_size_pct": config_s4.S4_TRADE_SIZE_PCT * size_multiplier,  # Use same multiplier as initial entry
             "s4_prev_low": sig["prev_low"],
             "trade_id": trade["trade_id"],
         }
@@ -2185,13 +2261,16 @@ class MTFBot:
                 st.save_pending_signals(self.pending_signals)
                 return
         s7_sl_actual = mark * (1 + 0.50 / config_s7.S7_LEVERAGE)
+        size_multiplier = get_position_size_multiplier()
+        adjusted_size = config_s7.S7_TRADE_SIZE_PCT * 0.5 * size_multiplier
+        size_note = f" ({size_multiplier}x)" if size_multiplier != 1.0 else ""
         st.add_scan_log(
             f"[S7][{symbol}] 🔴 SHORT fired @ {mark:.5f} | entry≤{sig['trigger']:.5f} | "
-            f"box low={sig.get('box_low', 0):.5f}", "SIGNAL"
+            f"box low={sig.get('box_low', 0):.5f}{size_note}", "SIGNAL"
         )
         trade = tr.open_short(
             symbol, sl_floor=s7_sl_actual, leverage=config_s7.S7_LEVERAGE,
-            trade_size_pct=config_s7.S7_TRADE_SIZE_PCT * 0.5, strategy="S7",
+            trade_size_pct=adjusted_size, strategy="S7",
         )
         trade["strategy"]              = "S7"
         trade["snap_rsi"]              = sig.get("snap_rsi")
@@ -2223,7 +2302,7 @@ class MTFBot:
             "side": "SHORT", "strategy": "S7",
             "box_high": sig["s7_sl"], "box_low": sig["trigger"],
             "scale_in_pending": True, "scale_in_after": time.time() + 3600,
-            "scale_in_trade_size_pct": config_s7.S7_TRADE_SIZE_PCT,
+            "scale_in_trade_size_pct": config_s7.S7_TRADE_SIZE_PCT * size_multiplier,
             "s7_box_low": sig["box_low"],
             "s7_box_top": sig.get("box_top", 0),
             "trade_id": trade["trade_id"],
@@ -2232,13 +2311,16 @@ class MTFBot:
     def _fire_s6(self, symbol: str, sig: dict, mark: float, balance: float) -> None:
         """Open S6 SHORT after two-phase fakeout confirmed. Initial entry at 50% size; scale-in queued 1h later."""
         sl_price = mark * (1 + config_s6.S6_SL_PCT / config_s6.S6_LEVERAGE)
+        size_multiplier = get_position_size_multiplier()
+        adjusted_size = config_s6.S6_TRADE_SIZE_PCT * 0.5 * size_multiplier
+        size_note = f" ({size_multiplier}x)" if size_multiplier != 1.0 else ""
         st.add_scan_log(
             f"[S6][{symbol}] 🔴 SHORT | peak={sig['peak_level']:.5f} | "
-            f"fakeout confirmed → entry @ {mark:.5f}", "SIGNAL"
+            f"fakeout confirmed → entry @ {mark:.5f}{size_note}", "SIGNAL"
         )
         trade = tr.open_short(
             symbol, sl_floor=sl_price, leverage=config_s6.S6_LEVERAGE,
-            trade_size_pct=config_s6.S6_TRADE_SIZE_PCT * 0.5, strategy       = "S6",
+            trade_size_pct=adjusted_size, strategy       = "S6",
         )
         trade["strategy"]              = "S6"
         trade["snap_s6_peak"]          = sig.get("snap_s6_peak")
@@ -2265,7 +2347,7 @@ class MTFBot:
             "side": "SHORT", "strategy": "S6",
             "box_high": sl_price, "box_low": sig["peak_level"],
             "scale_in_pending": True, "scale_in_after": time.time() + 3600,
-            "scale_in_trade_size_pct": config_s6.S6_TRADE_SIZE_PCT,
+            "scale_in_trade_size_pct": config_s6.S6_TRADE_SIZE_PCT * size_multiplier,  # Use same multiplier as initial entry
             "trade_id": trade["trade_id"],
         }
 

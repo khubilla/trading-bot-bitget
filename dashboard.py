@@ -26,7 +26,7 @@ _DATA_DIR  = _Path(_os.environ.get("DATA_DIR", "."))
 STATE_FILE     = str(_DATA_DIR / ("state_paper.json" if PAPER_MODE else "state.json"))
 IG_STATE_FILE  = str(_DATA_DIR / "ig_state.json")
 IG_TRADES_FILE = str(_DATA_DIR / "ig_trades.csv")
-PORT       = int(_os.environ.get("PORT", 8081 if PAPER_MODE else 8080))
+PORT       = int(_os.environ.get("PORT", 8081 if PAPER_MODE else 9090))
 app = FastAPI(title="MTF Bot Dashboard" + (" [PAPER]" if PAPER_MODE else ""))
 
 limiter = Limiter(key_func=get_remote_address)

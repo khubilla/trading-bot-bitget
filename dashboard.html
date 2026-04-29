@@ -2885,7 +2885,7 @@ function signalScore(sym, ps, tab) {
     const reason  = ps.s4_reason || '';
     const sig     = ps.s4_signal || 'HOLD';
     const spike   = reason.includes('spike') && !reason.includes('No spike');
-    const rsiHot  = reason.includes('RSI peaked') || sig === 'SHORT';
+    const rsiHot  = reason.includes('RSI peak') || sig === 'SHORT';
     const div     = reason.includes('RSI div') || sig === 'SHORT';
     const srClear = ps.s4_sr_support_pct != null && ps.s4_sr_support_pct >= 15;
     const htfLow  = ps.s4_1h_low_ok === true;
@@ -3082,7 +3082,7 @@ function s4CardHTML(sym, ps) {
   const htfLow   = ps.s4_1h_low;
   const htfLowClass = htfLowOk == null ? 'muted' : htfLowOk ? 'pass' : 'fail';
   const htfLowLabel = htfLowOk == null ? '—' : htfLowOk ? `≤ ${htfLow != null ? htfLow.toFixed(4) : '?'} ✓` : `> ${htfLow != null ? htfLow.toFixed(4) : '?'} ✗`;
-  const rsiHot   = reason.includes('RSI peaked') || sig === 'SHORT';
+  const rsiHot   = reason.includes('RSI peak') || sig === 'SHORT';
   const div_ok   = reason.includes('RSI div ✅') || sig === 'SHORT';
   const spikeClass= spikeOk ? 'pass' : 'fail';
   const rsiClass  = !spikeOk ? 'muted' : rsiHot ? 'pass' : 'fail';

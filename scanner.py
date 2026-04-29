@@ -102,10 +102,10 @@ def get_qualified_pairs_and_sentiment() -> tuple[list[str], SentimentResult]:
         except (ValueError, TypeError):
             continue
 
-        if vol_usdt < MIN_VOLUME_USDT:
+        if vol_usdt != 0 and vol_usdt < MIN_VOLUME_USDT:
             continue
 
-        if lastPr > MAX_PRICE_USDT:
+        if MAX_PRICE_USDT != 0 and lastPr > MAX_PRICE_USDT:
             continue
 
         qualified.append(symbol)

@@ -15,7 +15,7 @@ LTF_INTERVAL   = "3m"     # 3-minute chart
 DAILY_INTERVAL = "1D"     # Daily chart for trend filter
 
 # ── Daily Trend Filter ───────────────────────────────────── #
-ADX_TREND_THRESHOLD = 25   # ADX above this = trending (allow trades)
+ADX_TREND_THRESHOLD = 35   # ADX above this = trending (allow trades)
 DAILY_EMA_FAST      = 10
 DAILY_EMA_SLOW      = 20
 DAILY_RSI_LONG_THRESH = 70

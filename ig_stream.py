@@ -47,7 +47,11 @@ def start(
     ls_endpoint:   str,
     trade_callback=None,
 ) -> None:
-    """Connect to Lightstreamer and set up MARKET (+ optionally TRADE) subscriptions."""
+    """Connect to Lightstreamer and set up MARKET (+ optionally TRADE) subscriptions.
+
+    Only subscribes to epics where streamingPricesAvailable=True.
+    Instruments without streaming fall back to REST polling via ig_client.get_mark_price().
+    """
     global _client, _connected, _needs_reauth, _mark_cache
     # Disconnect any live client before replacing it
     if _client is not None:
@@ -68,11 +72,15 @@ def start(
     client.connectionDetails.setPassword(ls_password)
     client.addListener(_StatusListener())
 
-    # MARKET subscription — one item per epic
-    market_items = [f"MARKET:{e}" for e in epics]
-    market_sub   = Subscription(mode="MERGE", items=market_items, fields=["BID", "OFFER"])
-    market_sub.addListener(_MarketListener())
-    client.subscribe(market_sub)
+    # MARKET subscription — only epics with streaming enabled
+    # Filter is done by caller (ig_bot.py) after checking streamingPricesAvailable
+    if epics:
+        market_items = [f"MARKET:{e}" for e in epics]
+        market_sub   = Subscription(mode="MERGE", items=market_items, fields=["BID", "OFFER"])
+        market_sub.addListener(_MarketListener())
+        client.subscribe(market_sub)
+    else:
+        logger.info("ig_stream: No streaming-enabled epics — MARKET subscription skipped")
 
     # TRADE subscription — only when trade_callback is provided (live mode)
     if trade_callback is not None:
@@ -155,7 +163,7 @@ class _TradeListener:
         self._handle_opu(update.getValue("OPU"))
 
     def _handle_wou(self, raw) -> None:
-        if not raw:
+        if not raw or not raw.strip() or raw.strip()[0] not in ('{', '['):
             return
         try:
             data = json.loads(raw)
@@ -178,7 +186,7 @@ class _TradeListener:
                 logger.error(f"ig_stream: trade_callback error on WOU_FILL: {e}")
 
     def _handle_opu(self, raw) -> None:
-        if not raw:
+        if not raw or not raw.strip() or raw.strip()[0] not in ('{', '['):
             return
         try:
             data = json.loads(raw)

@@ -53,7 +53,7 @@ S5_SMC_FVG_LOOKBACK = 20     # 15m candles to search for the FVG
 S5_LEVERAGE         = 10
 S5_TRADE_SIZE_PCT   = 0.04   # 4% of total portfolio as margin
 S5_MIN_RR           = 2.0    # minimum reward:risk ratio (structural target vs SL)
-S5_TRAIL_RANGE_PCT  = 5      # fallback trailing callback % after partial close
+S5_TRAIL_RANGE_PCT  = 10     # fallback trailing callback % after partial close
 S5_USE_SWING_TRAIL  = True   # after partial close, trail SL to 15m swing low/high (SMC style)
 
 # ── S/R Clearance ─────────────────────────────────────────── #

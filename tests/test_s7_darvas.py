@@ -40,6 +40,36 @@ def test_today_h1_slice_drops_yesterday_and_forming_hour(monkeypatch):
     assert s.index[-1] == pd.Timestamp("2026-04-28 01:00", tz="UTC")
 
 
+def test_today_h1_slice_handles_production_shape(monkeypatch):
+    """Production shape from tr.get_candles: RangeIndex + int-ms `ts` column."""
+    rows = [
+        ("2026-04-27 22:00", 100, 95),
+        ("2026-04-27 23:00", 99,  94),
+        ("2026-04-28 00:00", 98,  94),
+        ("2026-04-28 01:00", 99,  93),
+        ("2026-04-28 02:00", 96,  93),
+    ]
+    df = pd.DataFrame({
+        "ts":    [int(pd.Timestamp(r[0], tz="UTC").timestamp() * 1000) for r in rows],
+        "open":  [r[1] for r in rows],
+        "high":  [r[1] for r in rows],
+        "low":   [r[2] for r in rows],
+        "close": [(r[1] + r[2]) / 2 for r in rows],
+        "vol":   [0.0 for _ in rows],
+    })
+    df = df.sort_values("ts").reset_index(drop=True)
+    assert isinstance(df.index, pd.RangeIndex)
+
+    monkeypatch.setattr(
+        "strategies.s7._utcnow",
+        lambda: pd.Timestamp("2026-04-28 02:30", tz="UTC"),
+    )
+    s = today_h1_slice(df)
+    assert len(s) == 2
+    assert int(s.iloc[0]["ts"]) == int(pd.Timestamp("2026-04-28 00:00", tz="UTC").timestamp() * 1000)
+    assert int(s.iloc[-1]["ts"]) == int(pd.Timestamp("2026-04-28 01:00", tz="UTC").timestamp() * 1000)
+
+
 def test_detector_returns_false_when_too_few_candles():
     df = _walk_h1([99, 98, 97, 96], [95, 94, 93, 92])  # 4 < 6
     locked, top, low, ti, li, reason = detect_darvas_box(df, confirm=2)

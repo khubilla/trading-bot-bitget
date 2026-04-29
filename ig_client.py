@@ -194,6 +194,21 @@ def get_stream_credentials() -> dict:
     }
 
 
+def is_streaming_available(epic: str) -> bool:
+    """Check if streaming prices are available for the given epic.
+
+    Returns True if streamingPricesAvailable=True, False otherwise.
+    Used to filter which epics can be subscribed to via Lightstreamer.
+    """
+    try:
+        sess = _get_session()
+        response = sess.get(f"/markets/{epic}", version="3")
+        return response.get("instrument", {}).get("streamingPricesAvailable", False)
+    except Exception as e:
+        logger.warning(f"Failed to check streaming availability for {epic}: {e}")
+        return False
+
+
 def _refresh_session() -> None:
     """Clear the cached session so the next _get_session() performs a fresh login."""
     global _session

@@ -255,3 +255,47 @@ def test_trade_listener_handles_non_numeric_level_gracefully():
     listener.onItemUpdate(update)
     assert len(received) == 1
     assert received[0][2] == 0.0
+
+
+def test_is_streaming_available_returns_true_when_enabled():
+    """is_streaming_available() returns True for epics with streaming enabled."""
+    from unittest.mock import patch
+    import ig_client as ig_c
+
+    mock_resp = {
+        "instrument": {
+            "streamingPricesAvailable": True,
+            "epic": "TEST.EPIC",
+        }
+    }
+
+    original_session = ig_c._session
+    try:
+        with patch.object(ig_c._get_session(), "get", return_value=mock_resp):
+            result = ig_c.is_streaming_available("TEST.EPIC")
+    finally:
+        ig_c._session = original_session
+
+    assert result is True
+
+
+def test_is_streaming_available_returns_false_when_disabled():
+    """is_streaming_available() returns False for epics without streaming."""
+    from unittest.mock import patch
+    import ig_client as ig_c
+
+    mock_resp = {
+        "instrument": {
+            "streamingPricesAvailable": False,
+            "epic": "NO.STREAM",
+        }
+    }
+
+    original_session = ig_c._session
+    try:
+        with patch.object(ig_c._get_session(), "get", return_value=mock_resp):
+            result = ig_c.is_streaming_available("NO.STREAM")
+    finally:
+        ig_c._session = original_session
+
+    assert result is False

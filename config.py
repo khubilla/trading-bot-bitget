@@ -33,8 +33,8 @@ PRODUCT_TYPE = "usdt-futures"    # USDT-margined perpetual futures
 MARGIN_COIN  = "USDT"
 
 # --- Pair Scanner ---
-MIN_VOLUME_USDT   = 5_000_000   # 24h quote volume filter (5 million USDT)
-MAX_PRICE_USDT    = 150         # Exclude pairs priced above this (set high to include BTC/ETH if desired)
+MIN_VOLUME_USDT   = 1_000_000   # 24h quote volume filter (5 million USDT)
+MAX_PRICE_USDT    = 0         # Exclude pairs priced above this (set high to include BTC/ETH if desired)
 SCAN_INTERVAL_SEC = 60           # Re-scan all pairs every 60 seconds
 
 # --- Liquidity Filter ---
@@ -67,7 +67,30 @@ LOG_FILE  = str(_DATA_DIR / "bot.log")
 TRADE_LOG = str(_DATA_DIR / "trades.csv")
 
 # --- Non-Trading Hours ---
-# Avoid trading during these hours (PH time)
-# Set to None or empty list to disable this filter.
-NON_TRADING_HOURS_FROM = 22 # 22:00 PH time (14:00 UTC)
-NON_TRADING_HOURS_TO = 1 # 01:00 PH time (17:00 UTC)
+# Avoid trading during these hours (PH time, UTC+8)
+# Format: List of (start_hour, end_hour) tuples. Ranges can cross midnight.
+# Set to empty list [] to disable this filter.
+# CRITICAL: Based on trade analysis, 8-11 AM PH causes 45% of catastrophic losses
+NON_TRADING_HOURS = [
+    (8, 11),   # 8:00 AM - 11:00 AM PH (00:00-03:00 UTC) - WORST SESSION: 45% of catastrophic losses
+    (22, 1),   # 10:00 PM - 1:00 AM PH (14:00-17:00 UTC) - Your original restriction
+]
+
+# --- Weekend Trading ---
+# Disable trading on Saturdays (low liquidity, 25% win rate, -242% net P&L)
+DISABLE_SATURDAY_TRADING = True
+
+# --- Enhanced Trading Windows ---
+# Increase position size during high-performance sessions (PH time, UTC+8)
+# Format: List of (start_hour, end_hour, multiplier) tuples
+# Based on trade analysis: European Main (16:00-19:00 PH) has 59.1% win rate, +593% P&L
+ENHANCED_TRADING_WINDOWS = [
+    (16, 19, 2.0),  # 4:00 PM - 7:00 PM PH (08:00-11:00 UTC) - European Main Session - 2x position size
+]
+
+# Optional: Reduce position size during risky days
+# Tuesday reduction REMOVED - analysis shows root causes (Asian Late session,
+# symbol re-entry) are already addressed by blackout windows. 2/4 Tuesdays were
+# profitable (+185%, +103%). Net P&L was only -4.4% across 18 trades.
+REDUCE_TUESDAY_SIZE = False
+# TUESDAY_SIZE_MULTIPLIER = 0.5  # Disabled - not needed with blackout windows

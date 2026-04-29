@@ -31,7 +31,12 @@ def today_h1_slice(h1_df: pd.DataFrame) -> pd.DataFrame:
     today_utc = _utcnow().floor("1D")
     if today_utc.tzinfo is None:
         today_utc = today_utc.tz_localize("UTC")
-    mask = h1_df.index >= today_utc
+    if isinstance(h1_df.index, pd.DatetimeIndex):
+        ts = h1_df.index
+    else:
+        # Production shape from tr.get_candles: RangeIndex + int-ms `ts` column.
+        ts = pd.to_datetime(h1_df["ts"], unit="ms", utc=True)
+    mask = ts >= today_utc
     return h1_df[mask].iloc[:-1]
 
 

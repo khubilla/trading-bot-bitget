@@ -54,8 +54,8 @@ SENTIMENT_THRESHOLD = 0.70   # >70% green volume → BULLISH; <30% → BEARISH
 SENTIMENT_SCAN_SEC  = 60     # Re-calculate alongside pair scan
 
 # --- Claude Trade Filter ---
-CLAUDE_FILTER_ENABLED   = True                        # set True to enable approval gate
-CLAUDE_FILTER_MODEL     = "claude-3-haiku-20240307"  # cheapest Claude model
+CLAUDE_FILTER_ENABLED   = False                        # set True to enable approval gate
+CLAUDE_FILTER_MODEL     = "claude-haiku-4-5"  # cheapest Claude model
 CLAUDE_FILTER_HISTORY_N = 30                           # last N trades to send as context
 
 # --- Logging ---

@@ -388,9 +388,8 @@ def get_order_fill(symbol: str, order_id: str) -> dict:
     Returns {"status": "live"|"filled"|"cancelled", "fill_price": float}
     """
     resp = bc.get(
-        "/api/v2/mix/order/plan-orders",
-        params={"symbol": symbol, "productType": PRODUCT_TYPE,
-                "planType": "normal_plan", "isPlan": "plan"},
+        "/api/v2/mix/order/orders-plan-pending",
+        params={"symbol": symbol, "productType": PRODUCT_TYPE, "planType": "normal_plan"},
     )
     if resp.get("code") != "00000":
         raise RuntimeError(f"get_order_fill (plan) failed: {resp}")
@@ -405,9 +404,8 @@ def get_order_fill(symbol: str, order_id: str) -> dict:
             return {"status": "cancelled", "fill_price": 0.0}
     # Order not in active plan list — check history
     hist = bc.get(
-        "/api/v2/mix/order/plan-orders",
-        params={"symbol": symbol, "productType": PRODUCT_TYPE,
-                "planType": "normal_plan", "isPlan": "history"},
+        "/api/v2/mix/order/orders-plan-history",
+        params={"symbol": symbol, "productType": PRODUCT_TYPE, "planType": "normal_plan"},
     )
     if hist.get("code") == "00000":
         for o in (hist.get("data") or {}).get("entrustedList", []):
@@ -427,7 +425,7 @@ def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0
     new_trail_trigger: if > 0, re-place with this trigger; else preserve the
     existing profit_plan trigger.
     """
-    data    = bc.get("/api/v2/mix/order/plan-orders", {"symbol": symbol, "productType": PRODUCT_TYPE})
+    data    = bc.get("/api/v2/mix/order/orders-plan-pending", {"symbol": symbol, "productType": PRODUCT_TYPE})
     orders  = (data.get("data") or {}).get("entrustedList", [])
     targets = [o for o in orders if o.get("holdSide") == hold_side
                and o.get("planType") in ("profit_plan", "moving_plan")]

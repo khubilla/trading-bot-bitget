@@ -2,7 +2,7 @@
 # ============================================================
 #  Strategy 6 Configuration — V-Formation Liquidity Sweep Short
 # ============================================================
-S6_ENABLED = True
+S6_ENABLED = False
 
 # ── Pattern detection ─────────────────────────────────────── #
 S6_RSI_LOOKBACK      = 14      # RSI period

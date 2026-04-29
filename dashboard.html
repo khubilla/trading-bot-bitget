@@ -1177,9 +1177,9 @@
         <button class="strat-tab"        id="tab-s2" onclick="switchTab('s2')">S2 — Coil</button>
         <button class="strat-tab"        id="tab-s3" onclick="switchTab('s3')">S3 — Pullback</button>
         <button class="strat-tab"        id="tab-s4" onclick="switchTab('s4')">S4 — Short</button>
-        <button class="strat-tab"        id="tab-s7" onclick="switchTab('s7')">S7 — Darvas</button>
         <button class="strat-tab"        id="tab-s5" onclick="switchTab('s5')">S5 — SMC OB</button>
         <button class="strat-tab"        id="tab-s6" onclick="switchTab('s6')">S6 — V-Sweep</button>
+        <button class="strat-tab"        id="tab-s7" onclick="switchTab('s7')">S7 — Darvas</button>
       </div>
       <div class="scanner-toolbar">
         <input id="pair-search" type="text" placeholder="Search pair…" oninput="onSearchInput(this.value)" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')">
@@ -2915,9 +2915,10 @@ function signalScore(sym, ps, tab) {
     const reason  = ps.s7_reason || '';
     const sig     = ps.s7_signal || 'HOLD';
     const spike   = reason.includes('spike') && !reason.includes('No spike');
-    const rsiHot  = reason.includes('RSI peak') || sig === 'SHORT';
-    const boxOk   = reason.includes('Darvas box ✅') || sig === 'SHORT';
-    const srClear = ps.s7_sr_support_pct != null && ps.s7_sr_support_pct >= 15;
+    const rsiHot  = reason.includes('RSI peak') || sig !== 'HOLD';
+    const boxOk   = reason.includes('Darvas box ✅') || sig !== 'HOLD';
+    const srClear = (ps.s7_sr_support_pct != null && ps.s7_sr_support_pct >= 15)
+                 || (ps.s7_sr_resistance_pct != null && ps.s7_sr_resistance_pct >= 15);
     return (spike ? 1 : 0) + (spike && rsiHot ? 1 : 0) + (spike && rsiHot && boxOk ? 2 : 0) + (srClear ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
   }
   return 0;
@@ -3133,18 +3134,20 @@ function s7CardHTML(sym, ps) {
   const sig      = ps.s7_signal || 'HOLD';
   const reason   = ps.s7_reason || '—';
   const symShort = sym.replace('USDT', '');
-  const cardClass = sig === 'SHORT' ? 'signal-short' : '';
+  const cardClass = sig === 'LONG' ? 'signal-long' : sig === 'SHORT' ? 'signal-short' : '';
   const spikeOk  = reason.includes('spike') && !reason.includes('No spike');
-  const rsiHot   = reason.includes('RSI peak') || sig === 'SHORT';
-  const div_ok   = reason.includes('RSI div ✅') || sig === 'SHORT';
-  const boxOk    = reason.includes('Darvas box ✅') || sig === 'SHORT';
+  const rsiHot   = reason.includes('RSI peak') || sig !== 'HOLD';
+  const div_ok   = reason.includes('RSI div ✅') || sig !== 'HOLD';
+  const boxOk    = reason.includes('Darvas box ✅') || sig !== 'HOLD';
   const spikeClass = spikeOk ? 'pass' : 'fail';
   const rsiClass   = !spikeOk ? 'muted' : rsiHot ? 'pass' : 'fail';
   const divClass   = !spikeOk || !rsiHot ? 'muted' : div_ok ? 'pass' : 'warn';
   const boxClass   = !spikeOk || !rsiHot ? 'muted' : boxOk ? 'pass' : 'fail';
-  const srPct      = ps.s7_sr_support_pct;
-  const srClass    = srPct == null ? 'muted' : srPct >= 15 ? 'pass' : srPct >= 10 ? 'warn' : 'fail';
-  const srLabel    = srPct == null ? '—' : `${srPct.toFixed(1)}% away`;
+  // SR clearance: SHORT uses support below, LONG uses resistance above
+  const srPct   = sig === 'LONG' ? ps.s7_sr_resistance_pct : ps.s7_sr_support_pct;
+  const srClass = srPct == null ? 'muted' : srPct >= 15 ? 'pass' : srPct >= 10 ? 'warn' : 'fail';
+  const srLabel = srPct == null ? '—' : `${srPct.toFixed(1)}% away`;
+  const srRowLabel = sig === 'LONG' ? 'Resistance' : 'Support';
   const boxLow     = ps.s7_box_low;
   const boxTop     = ps.s7_box_top;
   const boxLabel   = boxLow ? `low=${boxLow.toFixed(4)} top=${boxTop ? boxTop.toFixed(4) : '?'}` : '—';
@@ -3179,7 +3182,7 @@ function s7CardHTML(sym, ps) {
           <span class="check-val ${boxClass}">${!spikeOk || !rsiHot ? '—' : boxOk ? boxLabel : 'Not locked'}</span>
         </div>
         <div class="pair-check">
-          <span class="check-label">Support</span>
+          <span class="check-label">${srRowLabel}</span>
           <span class="check-val ${srClass}">${srLabel}</span>
         </div>
       </div>
@@ -3345,12 +3348,12 @@ function renderPairGrid(s) {
   $('pair-count').textContent = pairs.length + ' pairs';
   const grid = $('pair-grid-inner');
   let html = '';
-  if (activeTab === 's6') {
+  if (activeTab === 's7') {
+    html = pairs.map(sym => s7CardHTML(sym, pairStates[sym] || {})).join('');
+  } else if (activeTab === 's6') {
     html = pairs.map(sym => s6CardHTML(sym, pairStates[sym] || {})).join('');
   } else if (activeTab === 's5') {
     html = pairs.map(sym => s5CardHTML(sym, pairStates[sym] || {})).join('');
-  } else if (activeTab === 's7') {
-    html = pairs.map(sym => s7CardHTML(sym, pairStates[sym] || {})).join('');
   } else if (activeTab === 's4') {
     html = pairs.map(sym => s4CardHTML(sym, pairStates[sym] || {})).join('');
   } else if (activeTab === 's3') {

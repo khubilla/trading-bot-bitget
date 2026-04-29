@@ -1,12 +1,11 @@
 # ============================================================
-#  Strategy 7 Configuration — Post-Pump 1H Darvas Breakdown Short
+#  Strategy 7 Configuration — Post-Pump 1H Darvas Range (Bidirectional)
 # ============================================================
-# Same daily setup as S4 (post-pump RSI exhaustion).
-# Entry trigger differs: instead of "below previous day's low",
-# wait for a stair-step 1H Darvas box (top + low) formed within
-# the current UTC day, then fire on a confirmed 1H close below
-# the low box.
-# Sentiment gate: BEARISH only (gated in bot.py scan loop).
+# Same daily setup as S4 (post-pump RSI exhaustion) applies to BOTH directions.
+# The same locked 1H Darvas box (top + low) yields two triggers routed by sentiment:
+#   SHORT (BEARISH): confirmed 1H close below box_low × (1 − S7_ENTRY_BUFFER)
+#   LONG  (BULLISH): confirmed 1H close above box_top × (1 + S7_ENTRY_BUFFER)
+# NEUTRAL sentiment → HOLD (gated in bot.py scan loop).
 
 S7_ENABLED = True
 

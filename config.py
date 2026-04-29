@@ -72,8 +72,8 @@ TRADE_LOG = str(_DATA_DIR / "trades.csv")
 # Set to empty list [] to disable this filter.
 # CRITICAL: Based on trade analysis, 8-11 AM PH causes 45% of catastrophic losses
 NON_TRADING_HOURS = [
-    (8, 11),   # 8:00 AM - 11:00 AM PH (00:00-03:00 UTC) - WORST SESSION: 45% of catastrophic losses
-    (22, 1),   # 10:00 PM - 1:00 AM PH (14:00-17:00 UTC) - Your original restriction
+    (6, 11),   # 8:00 AM - 11:00 AM PH (00:00-03:00 UTC) - WORST SESSION: 45% of catastrophic losses
+    #(22, 1),   # 10:00 PM - 1:00 AM PH (14:00-17:00 UTC) - Your original restriction
 ]
 
 # --- Weekend Trading ---

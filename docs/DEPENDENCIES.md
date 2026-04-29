@@ -237,15 +237,18 @@ def evaluate_s7(
     symbol: str,
     daily_df: pd.DataFrame,
     h1_df: pd.DataFrame,
+    allowed_direction: str = "BEARISH",  # "BULLISH" | "BEARISH" | "NEUTRAL"
 ) -> tuple[str, float, float, float, float, float, bool, str, str]:
     # Returns: (signal, daily_rsi, box_top, box_low, body_pct, rsi_peak, rsi_div, rsi_div_str, reason)
+    # signal ∈ {"LONG", "SHORT", "HOLD"}
 ```
 
 **Callers:**
-- `bot.py` — `s7_sig, s7_rsi, s7_box_top, s7_box_low, s7_body_pct, s7_rsi_peak, s7_rsi_div, s7_rsi_div_str, s7_reason = evaluate_s7(symbol, daily_df, _h1_df_s7)` where `_h1_df_s7 = tr.get_candles(symbol, "1H", limit=48)` is fetched separately (NOT from `htf_df` which only has 15 candles)
+- `bot.py` — `s7_sig, s7_rsi, s7_box_top, s7_box_low, s7_body_pct, s7_rsi_peak, s7_rsi_div, s7_rsi_div_str, s7_reason = evaluate_s7(symbol, daily_df, _h1_df_s7, self.sentiment.direction)` where `_h1_df_s7 = tr.get_candles(symbol, "1H", limit=48)` is fetched separately (NOT from `htf_df` which only has 15 candles); called only when `self.sentiment.direction != "NEUTRAL"`
 
 **Breaking changes:**
 - Changing return value count/order → bot.py unpacking fails
+- Adding `allowed_direction` without default breaks callers (kept default="BEARISH" for safety)
 - ig_bot.py does NOT call evaluate_s7; no IG impact
 
 ---
@@ -432,16 +435,17 @@ Each key is a symbol (e.g., "BTCUSDT"). Value is a dict with 44 fields:
   "s6_fakeout_seen": bool | None, # True once mark_price > peak_level (phase 1 gate)
 
   # S7 fields
-  "s7_signal": str,           # "SHORT" | "HOLD"
+  "s7_signal": str,              # "LONG" | "SHORT" | "HOLD"
   "s7_reason": str,
-  "s7_box_top": float | None,   # Locked Darvas top-box high
-  "s7_box_low": float | None,   # Locked Darvas low-box low
-  "s7_rsi": float | None,       # Current daily RSI
-  "s7_rsi_peak": float | None,  # Highest RSI in lookback window
-  "s7_body_pct": float | None,  # Best spike body pct found
-  "s7_div": bool | None,        # RSI bearish divergence detected
-  "s7_div_str": str,            # Divergence summary e.g. "82.3→74.1"
-  "s7_sr_clearance_pct": float | None, # Spike base clearance %
+  "s7_box_top": float | None,    # Locked Darvas top-box high
+  "s7_box_low": float | None,    # Locked Darvas low-box low
+  "s7_rsi": float | None,        # Current daily RSI
+  "s7_rsi_peak": float | None,   # Highest RSI in lookback window
+  "s7_body_pct": float | None,   # Best spike body pct found
+  "s7_div": bool | None,         # RSI bearish divergence detected
+  "s7_div_str": str,             # Divergence summary e.g. "82.3→74.1"
+  "s7_sr_support_pct": float | None,    # SHORT: spike base clearance % below entry
+  "s7_sr_resistance_pct": float | None, # LONG: nearest resistance clearance % above entry
 
   # Shared S/R fields
   "sr_resistance_pct": float | None,
@@ -1049,7 +1053,7 @@ Each strategy lives in `strategies/sN.py` and owns:
 | S4 | `strategies/s4.py` | `evaluate_s4` | — | `compute_and_place_short_exits` | `_place_partial_trail_exits` | `maybe_trail_sl` (SHORT) |
 | S5 | `strategies/s5.py` | `evaluate_s5` | `compute_and_place_long_exits` | `compute_and_place_short_exits` | `_place_exits` | `maybe_trail_sl` |
 | S6 | `strategies/s6.py` | `evaluate_s6` | — | `compute_and_place_short_exits` | `_place_partial_trail_exits` | — |
-| S7 | `strategies/s7.py` | `evaluate_s7` | — | `compute_and_place_short_exits` | `_place_partial_trail_exits` (from s4) | `maybe_trail_sl` (SHORT) |
+| S7 | `strategies/s7.py` | `evaluate_s7` | `compute_and_place_long_exits` | `compute_and_place_short_exits` | `_place_partial_trail_exits` (from s4) | `maybe_trail_sl` (LONG + SHORT) |
 
 ### 7.2 `compute_and_place_*_exits(symbol, qty_str, fill, ...) → (ok, sl_trig, trail_trig)`
 
@@ -1528,3 +1532,4 @@ head -1 ig_trades.csv
 - 2026-04-10: Liquidity filter — added Section 5.5 (Bitget scanner/liquidity config params). New params LIQUIDITY_CHECK_ENABLED and MIN_OB_DEPTH_USDT in config.py; new private function _filter_by_liquidity() in scanner.py called as last funnel step in get_qualified_pairs_and_sentiment(). Bitget-only; IG unaffected. No state.json, CSV, or return-value changes.
 - 2026-04-11: S2/S4/S6 scale-in SL fix — _do_scale_in (bot.py) now always re-places SL unconditionally for all three strategies after scale-in. S2: max(box_low*0.999, new_avg*(1-S2_STOP_LOSS_PCT)). S4: new_avg*(1+0.50/S4_LEVERAGE). S6: new_avg*(1+S6_SL_PCT/S6_LEVERAGE). Removed stale comment claiming S4 SL is structural. partial TP (profit_plan) and trailing (moving_plan) were already correct via refresh_plan_exits().
 - 2026-04-28: S7 Post-Pump 1H Darvas Breakdown Short — added strategies/s7.py (evaluate_s7 9-tuple return, detect_darvas_box walking algorithm, queue_pending, handle_pending_tick); added config_s7.py; added S7 fields to Section 4.1 pair_states (s7_signal, s7_reason, s7_box_top, s7_box_low, s7_rsi, s7_rsi_peak, s7_body_pct, s7_div, s7_div_str, s7_sr_clearance_pct); updated Section 2.1 strategies diagram and function list; added evaluate_s7() signature to Section 2.1; updated trades.csv snap fields (snap_box_top, snap_box_low_initial added); updated Section 7.1 strategy table; updated analytics.py STRATEGIES tuple to include S7; updated optimize.py CURRENT_PARAMS and STRATEGY_COLUMNS for S7; added S7 display panel to dashboard.html; ig_bot.py unaffected (S7 is Bitget-only).
+- 2026-04-29: S7 bidirectional — evaluate_s7() gained `allowed_direction` param (BULLISH→LONG, BEARISH→SHORT, NEUTRAL→HOLD); same daily gates (spike+RSI) apply to both directions; LONG fires on 1H close above box_top×(1+S7_ENTRY_BUFFER), SHORT fires on 1H close below box_low×(1−S7_ENTRY_BUFFER); added compute_and_place_long_exits(), compute_paper_trail_long(), LONG branch in maybe_trail_sl(); scale_in_specs() is now direction-aware; bot.py sentiment gate changed from ==BEARISH to !=NEUTRAL; added s7_sr_resistance_pct to Section 4.1 pair_states; s7_signal now accepts LONG; Section 7.1 strategy table updated; paper_trader.py LONG branch tuple gained S7; dashboard.html s7CardHTML handles LONG card class + dynamic SR row label; GENERAL_CONCEPTS.md §7 updated; ig_bot.py unaffected.

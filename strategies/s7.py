@@ -1,11 +1,15 @@
 """
-Strategy 7 — Post-Pump 1H Darvas Breakdown Short.
+Strategy 7 — Post-Pump 1H Darvas Range (bidirectional).
 
-Setup gates mirror S4 (spike body ≥ 20% within last 30D, RSI peak ≥ 75 within
-last 10D, RSI still hot ≥ 70). Entry trigger is a confirmed 1H close below a
-locked Darvas-box low formed within the current UTC day.
+Daily setup gates (same for both directions): spike body ≥ 20% within last 30D,
+RSI peak ≥ 75 within last 10D, RSI still hot ≥ 70. The 1H Darvas detector
+locks a top + low box from candles since UTC midnight; the same locked box
+yields two triggers, picked by sentiment:
 
-Sentiment gate: BEARISH only (gated upstream in bot.py).
+  • SHORT (BEARISH): confirmed 1H close below box_low × (1 − S7_ENTRY_BUFFER)
+  • LONG  (BULLISH): confirmed 1H close above box_top × (1 + S7_ENTRY_BUFFER)
+
+NEUTRAL sentiment → HOLD. Sentiment is passed in as `allowed_direction`.
 """
 
 import logging
@@ -100,12 +104,17 @@ def evaluate_s7(
     symbol: str,
     daily_df: pd.DataFrame,
     h1_df: pd.DataFrame | None = None,
+    allowed_direction: str = "BEARISH",
 ) -> tuple[Signal, float, float, float, float, float, bool, str, str]:
     """
-    Strategy 7 — post-pump 1H Darvas breakdown short.
+    Strategy 7 — post-pump 1H Darvas range (bidirectional).
+
+    Daily exhaustion gates and the 1H Darvas detector run identically for both
+    directions; `allowed_direction` ("BULLISH" / "BEARISH" / "NEUTRAL") routes
+    which side of the locked box becomes the trigger.
 
     Returns (signal, daily_rsi, box_top, box_low, body_pct, rsi_peak,
-             rsi_div, rsi_div_str, reason).
+             rsi_div, rsi_div_str, reason). `signal` ∈ {"LONG","SHORT","HOLD"}.
     """
     from indicators import calculate_rsi
     from tools import body_pct as _body_pct
@@ -117,6 +126,8 @@ def evaluate_s7(
 
     if not S7_ENABLED:
         return "HOLD", 50.0, 0.0, 0.0, 0.0, 0.0, False, "", "S7 disabled"
+    if allowed_direction not in ("BULLISH", "BEARISH"):
+        return "HOLD", 50.0, 0.0, 0.0, 0.0, 0.0, False, "", "S7 sentiment NEUTRAL"
 
     rsi_period = 14
     min_candles = rsi_period + S7_BIG_CANDLE_LOOKBACK + 2
@@ -182,12 +193,13 @@ def evaluate_s7(
             f"S7 daily ✅ spike={best_body*100:.0f}% | RSI peak={rsi_peak:.1f}{div_note} | 1H Darvas ❌ {det_reason}"
         )
 
+    sig: Signal = "LONG" if allowed_direction == "BULLISH" else "SHORT"
     logger.info(
-        f"[S7][{symbol}] ✅ SHORT setup | spike={best_body*100:.0f}% | "
+        f"[S7][{symbol}] ✅ {sig} setup | spike={best_body*100:.0f}% | "
         f"RSI peak={rsi_peak:.1f} now={daily_rsi:.1f}{div_note} | "
         f"Darvas top={box_top:.5f} low={box_low:.5f}"
     )
-    return "SHORT", daily_rsi, box_top, box_low, best_body, rsi_peak, rsi_div, rsi_div_str, (
+    return sig, daily_rsi, box_top, box_low, best_body, rsi_peak, rsi_div, rsi_div_str, (
         f"S7 ✅ spike={best_body*100:.0f}% | RSI peak={rsi_peak:.1f}{div_note} | "
         f"Darvas top={box_top:.5f} low={box_low:.5f}"
     )
@@ -230,11 +242,26 @@ def compute_paper_trail_short(mark: float, sl_price: float, tp_price_abs: float 
     return True, trail_trigger, trail_range, trail_trigger, False
 
 
+def compute_paper_trail_long(mark: float, sl_price: float, tp_price_abs: float = 0,
+                             take_profit_pct: float = 0.05) -> tuple[bool, float, float, float, bool]:
+    """Paper-trader LONG trail setup for S7. Returns (use_trailing, trail_trigger, trail_range, tp_price, breakeven_after_partial)."""
+    from config_s7 import S7_TRAILING_TRIGGER_PCT, S7_TRAILING_RANGE_PCT
+    trail_trigger = mark * (1 + S7_TRAILING_TRIGGER_PCT)
+    trail_range   = S7_TRAILING_RANGE_PCT
+    return True, trail_trigger, trail_range, trail_trigger, False
+
+
 # ── S7 Scale-In Helpers ───────────────────────────────────── #
 
-def scale_in_specs() -> dict:
-    """Per-strategy scale-in orchestration constants for S7 (SHORT)."""
+def scale_in_specs(side: str = "SHORT") -> dict:
+    """Per-strategy scale-in orchestration constants for S7. Direction-aware."""
     import config_s7
+    if side == "LONG":
+        return {
+            "direction": "BULLISH",
+            "hold_side": "long",
+            "leverage":  config_s7.S7_LEVERAGE,
+        }
     return {
         "direction": "BEARISH",
         "hold_side": "short",
@@ -243,8 +270,13 @@ def scale_in_specs() -> dict:
 
 
 def is_scale_in_window(ap: dict, mark_now: float) -> bool:
-    """True when price is retesting the S7 box-low breakdown level."""
+    """True when price is retesting the S7 box-edge breakout/breakdown level."""
     import config_s7
+    if ap.get("side") == "LONG":
+        bt = ap["s7_box_top"]
+        return (bt * (1 + config_s7.S7_ENTRY_BUFFER)
+                <= mark_now
+                <= bt * (1 + config_s7.S7_MAX_ENTRY_BUFFER))
     bl = ap["s7_box_low"]
     return (bl * (1 - config_s7.S7_MAX_ENTRY_BUFFER)
             <= mark_now
@@ -252,8 +284,12 @@ def is_scale_in_window(ap: dict, mark_now: float) -> bool:
 
 
 def recompute_scale_in_sl_trigger(ap: dict, new_avg: float) -> tuple[float, float]:
-    """S7 post-scale-in: SL at new_avg*(1+0.50/LEVERAGE), trail at new_avg*(1-TRIG_PCT)."""
+    """S7 post-scale-in: SL at leverage cap, trail trigger at TRIG_PCT in trade direction."""
     import config_s7
+    if ap.get("side") == "LONG":
+        new_sl   = new_avg * (1 - 0.50 / config_s7.S7_LEVERAGE)
+        new_trig = new_avg * (1 + config_s7.S7_TRAILING_TRIGGER_PCT)
+        return new_sl, new_trig
     new_sl   = new_avg * (1 + 0.50 / config_s7.S7_LEVERAGE)
     new_trig = new_avg * (1 - config_s7.S7_TRAILING_TRIGGER_PCT)
     return new_sl, new_trig
@@ -278,19 +314,44 @@ def compute_and_place_short_exits(symbol: str, qty_str: str, fill: float,
     return ok, sl_trig, trail_trig
 
 
+def compute_and_place_long_exits(symbol: str, qty_str: str, fill: float,
+                                 sl_trig: float, sl_exec: float) -> tuple[bool, float, float]:
+    """
+    Compute S7 long-side trail level and place the 2-leg TP exits
+    (50% partial at trail_trigger + trailing stop on remainder). SL is already
+    attached to the entry order via preset.
+    Returns (ok, sl_trig, trail_trig).
+    """
+    import trader
+    from strategies.s4 import _place_partial_trail_exits
+    from config_s7 import S7_TRAILING_TRIGGER_PCT, S7_TRAILING_RANGE_PCT
+
+    trail_trig = float(trader._round_price(fill * (1 + S7_TRAILING_TRIGGER_PCT), symbol))
+    ok = _place_partial_trail_exits(symbol, "long", qty_str, sl_trig, sl_exec,
+                                    trail_trig, S7_TRAILING_RANGE_PCT)
+    return ok, sl_trig, trail_trig
+
+
 # ── S7 Swing Trail ────────────────────────────────────────── #
 
 def maybe_trail_sl(symbol: str, ap: dict, tr_mod, st_mod, partial_done: bool) -> None:
     """
-    Structural swing trail for S7 SHORT: after partial fires, pull SL down to the
-    nearest daily swing-high above entry. Mirrors strategies.s4.maybe_trail_sl.
+    Structural swing trail for S7: after partial fires, step the SL toward
+    structure. SHORT mirrors strategies.s4 (down-only via swing-high after ref low).
+    LONG mirrors strategies.s2 (up-only via swing-low after ref high).
     """
     import config_s7
-    from tools import find_swing_low_target, find_swing_high_after_ref
+    from tools import (
+        find_swing_low_target, find_swing_high_after_ref,
+        find_swing_high_target, find_swing_low_after_ref,
+    )
 
     if not config_s7.S7_USE_SWING_TRAIL:
         return
-    if ap.get("side") != "SHORT" or not partial_done:
+    if not partial_done:
+        return
+    side = ap.get("side")
+    if side not in ("SHORT", "LONG"):
         return
     try:
         lb    = config_s7.S7_SWING_LOOKBACK
@@ -299,18 +360,32 @@ def maybe_trail_sl(symbol: str, ap: dict, tr_mod, st_mod, partial_done: bool) ->
         if cs_df.empty or len(cs_df) < 3:
             return
         ref = ap.get("swing_trail_ref")
-        if ref is None:
-            ap["swing_trail_ref"] = find_swing_low_target(cs_df, mark, lookback=lb)
-            return
-        if mark <= ref:
-            raw = find_swing_high_after_ref(cs_df, mark, ref, lookback=lb)
-            if raw:
-                swing_sl = raw * (1 + config_s7.S7_ENTRY_BUFFER)
-                if swing_sl < ap.get("sl", float("inf")) and tr_mod.update_position_sl(symbol, swing_sl, hold_side="short"):
-                    ap["sl"] = swing_sl
-                    st_mod.update_open_trade_sl(symbol, swing_sl)
-                    ap["swing_trail_ref"] = find_swing_low_target(cs_df, mark, lookback=lb)
-                    logger.info(f"[S7][{symbol}] 📍 Swing trail: SL → {swing_sl:.5f} (daily swing high after ref low {ref:.5f})")
+        if side == "SHORT":
+            if ref is None:
+                ap["swing_trail_ref"] = find_swing_low_target(cs_df, mark, lookback=lb)
+                return
+            if mark <= ref:
+                raw = find_swing_high_after_ref(cs_df, mark, ref, lookback=lb)
+                if raw:
+                    swing_sl = raw * (1 + config_s7.S7_ENTRY_BUFFER)
+                    if swing_sl < ap.get("sl", float("inf")) and tr_mod.update_position_sl(symbol, swing_sl, hold_side="short"):
+                        ap["sl"] = swing_sl
+                        st_mod.update_open_trade_sl(symbol, swing_sl)
+                        ap["swing_trail_ref"] = find_swing_low_target(cs_df, mark, lookback=lb)
+                        logger.info(f"[S7][{symbol}] 📍 Swing trail: SL → {swing_sl:.5f} (daily swing high after ref low {ref:.5f})")
+        else:  # LONG
+            if ref is None:
+                ap["swing_trail_ref"] = find_swing_high_target(cs_df, mark, lookback=lb)
+                return
+            if mark >= ref:
+                raw = find_swing_low_after_ref(cs_df, mark, ref, lookback=lb)
+                if raw:
+                    swing_sl = raw * (1 - config_s7.S7_ENTRY_BUFFER)
+                    if swing_sl > ap.get("sl", 0) and tr_mod.update_position_sl(symbol, swing_sl, hold_side="long"):
+                        ap["sl"] = swing_sl
+                        st_mod.update_open_trade_sl(symbol, swing_sl)
+                        ap["swing_trail_ref"] = find_swing_high_target(cs_df, mark, lookback=lb)
+                        logger.info(f"[S7][{symbol}] 📍 Swing trail: SL → {swing_sl:.5f} (daily swing low after ref high {ref:.5f})")
     except Exception as e:
         logger.error(f"S7 swing trail error [{symbol}]: {e}")
 
@@ -318,19 +393,19 @@ def maybe_trail_sl(symbol: str, ap: dict, tr_mod, st_mod, partial_done: bool) ->
 # ── S7 Pending-Signal Queue ───────────────────────────────── #
 
 def queue_pending(bot, c: dict) -> None:
-    """Queue an S7 SHORT spike-reversal pending signal for the entry watcher."""
+    """Queue an S7 pending signal (LONG breakout or SHORT breakdown) for the entry watcher."""
     import time as _t
     import state as st
-    import config_s7
 
     symbol      = c["symbol"]
+    side        = c.get("sig", "SHORT")
     s7_trigger  = c["s7_trigger"]
     s7_sl       = c["s7_sl"]
     box_top     = c["s7_box_top"]
     box_low     = c["s7_box_low"]
     bot.pending_signals[symbol] = {
         "strategy":             "S7",
-        "side":                 "SHORT",
+        "side":                 side,
         "trigger":              s7_trigger,
         "s7_sl":                s7_sl,
         "box_low":              box_low,
@@ -348,12 +423,13 @@ def queue_pending(bot, c: dict) -> None:
         "expires":              _t.time() + 86400,
     }
     st.save_pending_signals(bot.pending_signals)
+    op = "≥" if side == "LONG" else "≤"
     logger.info(
-        f"[S7][{symbol}] 🕐 PENDING SHORT queued | trigger≤{s7_trigger:.5f} | "
+        f"[S7][{symbol}] 🕐 PENDING {side} queued | trigger{op}{s7_trigger:.5f} | "
         f"box top={box_top:.5f} low={box_low:.5f} | SL={s7_sl:.5f}"
     )
     st.add_scan_log(
-        f"[S7][{symbol}] 🕐 PENDING SHORT | trigger≤{s7_trigger:.5f}", "SIGNAL"
+        f"[S7][{symbol}] 🕐 PENDING {side} | trigger{op}{s7_trigger:.5f}", "SIGNAL"
     )
 
 
@@ -363,14 +439,16 @@ def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
                         paper_mode: bool | None = None) -> str | None:
     """
     S7 entry-watcher tick. Returns 'break' to stop outer loop (concurrency cap),
-    None otherwise. Fires SHORT only on a confirmed 1H *close* below box_low.
+    None otherwise. Fires on a confirmed 1H *close* outside the locked box edge
+    matching `sig["side"]` (LONG → above box_top, SHORT → below box_low).
     """
     import state as st
     import trader as tr
     import config, config_s7
 
+    side = sig.get("side", "SHORT")
     ps = st.get_pair_state(symbol)
-    if ps.get("s7_signal", "HOLD") not in ("SHORT",):
+    if ps.get("s7_signal", "HOLD") != side:
         logger.info(f"[S7][{symbol}] 🚫 Signal gone — cancelling pending")
         st.add_scan_log(f"[S7][{symbol}] 🚫 Pending cancelled (signal gone)", "INFO")
         bot.pending_signals.pop(symbol, None)
@@ -393,7 +471,10 @@ def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
     if box_low != sig["box_low"] or box_top != sig.get("box_top"):
         sig["box_low"] = box_low
         sig["box_top"] = box_top
-        sig["trigger"] = box_low * (1 - config_s7.S7_ENTRY_BUFFER)
+        if side == "LONG":
+            sig["trigger"] = box_top * (1 + config_s7.S7_ENTRY_BUFFER)
+        else:
+            sig["trigger"] = box_low * (1 - config_s7.S7_ENTRY_BUFFER)
         st.save_pending_signals(bot.pending_signals)
 
     try:
@@ -402,24 +483,40 @@ def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
         return None
 
     # SL invalidation
-    if mark > sig["s7_sl"]:
-        logger.info(f"[S7][{symbol}] ❌ Invalidated — mark {mark:.5f} > SL {sig['s7_sl']:.5f}")
-        st.add_scan_log(f"[S7][{symbol}] ❌ Pending cancelled (price above SL)", "INFO")
-        bot.pending_signals.pop(symbol, None)
-        st.save_pending_signals(bot.pending_signals)
-        return None
+    if side == "LONG":
+        if mark < sig["s7_sl"]:
+            logger.info(f"[S7][{symbol}] ❌ Invalidated — mark {mark:.5f} < SL {sig['s7_sl']:.5f}")
+            st.add_scan_log(f"[S7][{symbol}] ❌ Pending cancelled (price below SL)", "INFO")
+            bot.pending_signals.pop(symbol, None)
+            st.save_pending_signals(bot.pending_signals)
+            return None
+    else:
+        if mark > sig["s7_sl"]:
+            logger.info(f"[S7][{symbol}] ❌ Invalidated — mark {mark:.5f} > SL {sig['s7_sl']:.5f}")
+            st.add_scan_log(f"[S7][{symbol}] ❌ Pending cancelled (price above SL)", "INFO")
+            bot.pending_signals.pop(symbol, None)
+            st.save_pending_signals(bot.pending_signals)
+            return None
 
-    # Confirmed-close trigger: latest CLOSED 1H must close below box_low
+    # Confirmed-close trigger: latest CLOSED 1H must close beyond the box edge
     if len(h1_df) < 2:
         return None
     last_closed_close = float(h1_df.iloc[-2]["close"])
-    if last_closed_close >= box_low:
-        return None  # not yet broken on close
+    if side == "LONG":
+        if last_closed_close <= box_top:
+            return None
+    else:
+        if last_closed_close >= box_low:
+            return None
 
-    # Stale-entry guard
+    # Stale-entry guard — must still be inside the entry window
     s7_trigger = sig["trigger"]
-    in_window  = (mark <= s7_trigger and
-                  mark >= box_low * (1 - config_s7.S7_MAX_ENTRY_BUFFER))
+    if side == "LONG":
+        in_window = (mark >= s7_trigger and
+                     mark <= box_top * (1 + config_s7.S7_MAX_ENTRY_BUFFER))
+    else:
+        in_window = (mark <= s7_trigger and
+                     mark >= box_low * (1 - config_s7.S7_MAX_ENTRY_BUFFER))
     if not in_window:
         return None  # don't chase
 

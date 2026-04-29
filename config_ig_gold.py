@@ -43,7 +43,7 @@ CONFIG = {
     "s5_smc_fvg_filter":             True,  # was False
     "s5_smc_fvg_lookback":           15,    # was 10
     "s5_leverage":                   1,
-    "s5_trade_size_pct":             0.05,
+    "s5_trade_size_pct":             0.1,
     "s5_min_rr":                     1,
     "s5_trail_range_pct":            5,
     "s5_use_candle_stops":           True,

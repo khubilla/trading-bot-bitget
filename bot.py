@@ -1363,21 +1363,25 @@ class MTFBot:
             if s4_trigger > 0:
                 s4_1h_low_ok = s4_trigger <= s4_1h_low
 
-        # ── Strategy 7 (post-pump 1H Darvas breakdown short) ─────── #
+        # ── Strategy 7 (post-pump 1H Darvas — bidirectional) ─────── #
         s7_sig, s7_rsi, s7_box_top, s7_box_low, s7_body_pct, s7_rsi_peak, s7_div, s7_div_str, s7_reason = (
             "HOLD", 50.0, 0.0, 0.0, 0.0, 0.0, False, "", ""
         )
-        if config_s7.S7_ENABLED and self.sentiment.direction == "BEARISH":
+        if config_s7.S7_ENABLED and self.sentiment.direction != "NEUTRAL":
             _h1_df_s7 = tr.get_candles(symbol, "1H", limit=48)
             s7_sig, s7_rsi, s7_box_top, s7_box_low, s7_body_pct, s7_rsi_peak, s7_div, s7_div_str, s7_reason = (
-                evaluate_s7(symbol, daily_df, _h1_df_s7)
+                evaluate_s7(symbol, daily_df, _h1_df_s7, self.sentiment.direction)
             )
             logger.info(f"[S7][{symbol}] {s7_reason}")
 
-        s7_sr_sup_pct = None
+        s7_sr_sup_pct = None  # SHORT clearance below entry (spike base)
+        s7_sr_res_pct = None  # LONG clearance above entry (nearest resistance)
         if s7_sig == "SHORT" and s7_box_low > 0:
             _s7_base = find_spike_base(daily_df, price_ceiling=close)
             s7_sr_sup_pct = round((close - _s7_base) / close * 100, 1) if _s7_base else None
+        elif s7_sig == "LONG" and s7_box_top > 0:
+            _s7_res = find_nearest_resistance(daily_df, close)
+            s7_sr_res_pct = round((_s7_res - close) / close * 100, 1) if _s7_res else None
 
         # ── Strategy 6 ───────────────────────────────────────────── #
         s6_sig, s6_peak_level, s6_sl, s6_drop_pct, s6_rsi_at_peak, s6_reason = "HOLD", 0.0, 0.0, 0.0, 0.0, ""
@@ -1461,7 +1465,8 @@ class MTFBot:
             "s7_body_pct":        round(s7_body_pct, 4) if s7_body_pct else None,
             "s7_div":             s7_div,
             "s7_div_str":         s7_div_str,
-            "s7_sr_support_pct":  s7_sr_sup_pct,
+            "s7_sr_support_pct":    s7_sr_sup_pct,
+            "s7_sr_resistance_pct": s7_sr_res_pct,
             # Reset S5 priority rank each cycle — patched in by _execute_best_s5_candidate
             "s5_priority_rank":  None,
             "s5_priority_score": None,
@@ -1536,6 +1541,18 @@ class MTFBot:
             self.candidates.append({
                 "strategy": "S7", "symbol": symbol, "sig": "SHORT",
                 "rr": None, "sr_pct": s7_sr_sup_pct,
+                "s7_trigger": s7_trigger, "s7_sl": s7_sl,
+                "s7_box_top": s7_box_top, "s7_box_low": s7_box_low,
+                "s7_rsi": s7_rsi, "s7_rsi_peak": s7_rsi_peak,
+                "s7_body_pct": s7_body_pct, "s7_div": s7_div, "s7_div_str": s7_div_str,
+                "s7_reason": s7_reason, "daily_df": daily_df,
+            })
+        elif s7_sig == "LONG" and s7_box_top > 0:
+            s7_trigger = s7_box_top * (1 + config_s7.S7_ENTRY_BUFFER)
+            s7_sl      = s7_trigger * (1 - 0.50 / config_s7.S7_LEVERAGE)
+            self.candidates.append({
+                "strategy": "S7", "symbol": symbol, "sig": "LONG",
+                "rr": None, "sr_pct": s7_sr_res_pct,
                 "s7_trigger": s7_trigger, "s7_sl": s7_sl,
                 "s7_box_top": s7_box_top, "s7_box_low": s7_box_low,
                 "s7_rsi": s7_rsi, "s7_rsi_peak": s7_rsi_peak,
@@ -1666,12 +1683,15 @@ class MTFBot:
     # ── Scale-in executor ────────────────────────────────────────── #
 
     def _do_scale_in(self, sym: str, ap: dict) -> None:
-        """Execute scale-in for S2/S4/S6 and save candle snapshot."""
+        """Execute scale-in for S2/S4/S6/S7 and save candle snapshot."""
         try:
             from importlib import import_module
             strat = ap["strategy"]
             mod   = import_module(f"strategies.{strat.lower()}")
-            specs = mod.scale_in_specs()
+            # S7 is bidirectional — pass the trade side so scale_in_specs()
+            # picks BULLISH/long vs BEARISH/short. Other strategies are
+            # unidirectional and ignore extra args via the default-side override.
+            specs = mod.scale_in_specs(ap["side"]) if strat == "S7" else mod.scale_in_specs()
 
             # Sentiment gate: only scale in when market direction matches the trade.
             _sentiment = getattr(self, "sentiment", None)
@@ -2230,25 +2250,32 @@ class MTFBot:
         }
 
     def _fire_s7(self, symbol: str, sig: dict, mark: float, balance: float) -> None:
-        """Open S7 SHORT at fire time. Runs S/R check against pair_states."""
+        """Open S7 LONG (breakout) or SHORT (breakdown) at fire time. Runs S/R check against pair_states."""
+        side = sig.get("side", "SHORT")
         ps = st.get_pair_state(symbol)
-        sr_support_pct = ps.get("s7_sr_support_pct")
-        if sr_support_pct is not None and sr_support_pct < config_s7.S7_MIN_SR_CLEARANCE * 100:
+        if side == "LONG":
+            sr_pct = ps.get("s7_sr_resistance_pct")
+            sr_label = "resistance"
+        else:
+            sr_pct = ps.get("s7_sr_support_pct")
+            sr_label = "support"
+        if sr_pct is not None and sr_pct < config_s7.S7_MIN_SR_CLEARANCE * 100:
             logger.info(
-                f"[S7][{symbol}] ⏸️ Fire skipped — support clearance {sr_support_pct:.1f}% too small"
+                f"[S7][{symbol}] ⏸️ Fire skipped — {sr_label} clearance {sr_pct:.1f}% too small"
             )
             st.add_scan_log(
-                f"[S7][{symbol}] ⛔ Fire: support too close ({sr_support_pct:.1f}%)", "WARN"
+                f"[S7][{symbol}] ⛔ Fire: {sr_label} too close ({sr_pct:.1f}%)", "WARN"
             )
             self.pending_signals.pop(symbol, None)
             st.save_pending_signals(self.pending_signals)
             return
         if config.CLAUDE_FILTER_ENABLED:
-            _sr_str = f"{sr_support_pct:.1f}%" if sr_support_pct else "none found"
+            _sr_str = f"{sr_pct:.1f}%" if sr_pct else "none found"
             _cd = claude_approve("S7", symbol, {
+                "Side": side,
                 "RSI peak": sig.get("snap_rsi_peak", "?"),
                 "RSI divergence": str(sig.get("snap_rsi_div", "?")),
-                "S/R clearance (spike base)": _sr_str,
+                f"S/R clearance ({sr_label})": _sr_str,
                 "Sentiment": sig.get("snap_sentiment", "?"),
                 "Box top": round(sig.get("box_top", 0), 5),
                 "Box low": round(sig.get("box_low", 0), 5),
@@ -2260,18 +2287,31 @@ class MTFBot:
                 self.pending_signals.pop(symbol, None)
                 st.save_pending_signals(self.pending_signals)
                 return
-        s7_sl_actual = mark * (1 + 0.50 / config_s7.S7_LEVERAGE)
         size_multiplier = get_position_size_multiplier()
         adjusted_size = config_s7.S7_TRADE_SIZE_PCT * 0.5 * size_multiplier
         size_note = f" ({size_multiplier}x)" if size_multiplier != 1.0 else ""
-        st.add_scan_log(
-            f"[S7][{symbol}] 🔴 SHORT fired @ {mark:.5f} | entry≤{sig['trigger']:.5f} | "
-            f"box low={sig.get('box_low', 0):.5f}{size_note}", "SIGNAL"
-        )
-        trade = tr.open_short(
-            symbol, sl_floor=s7_sl_actual, leverage=config_s7.S7_LEVERAGE,
-            trade_size_pct=adjusted_size, strategy="S7",
-        )
+        if side == "LONG":
+            s7_sl_actual = mark * (1 - 0.50 / config_s7.S7_LEVERAGE)
+            st.add_scan_log(
+                f"[S7][{symbol}] 🟢 LONG fired @ {mark:.5f} | entry≥{sig['trigger']:.5f} | "
+                f"box top={sig.get('box_top', 0):.5f}{size_note}", "SIGNAL"
+            )
+            trade = tr.open_long(
+                symbol, sl_floor=s7_sl_actual, leverage=config_s7.S7_LEVERAGE,
+                trade_size_pct=adjusted_size, strategy="S7",
+            )
+            trade_action = "S7_LONG"
+        else:
+            s7_sl_actual = mark * (1 + 0.50 / config_s7.S7_LEVERAGE)
+            st.add_scan_log(
+                f"[S7][{symbol}] 🔴 SHORT fired @ {mark:.5f} | entry≤{sig['trigger']:.5f} | "
+                f"box low={sig.get('box_low', 0):.5f}{size_note}", "SIGNAL"
+            )
+            trade = tr.open_short(
+                symbol, sl_floor=s7_sl_actual, leverage=config_s7.S7_LEVERAGE,
+                trade_size_pct=adjusted_size, strategy="S7",
+            )
+            trade_action = "S7_SHORT"
         trade["strategy"]              = "S7"
         trade["snap_rsi"]              = sig.get("snap_rsi")
         trade["snap_rsi_peak"]         = sig.get("snap_rsi_peak")
@@ -2282,12 +2322,12 @@ class MTFBot:
         trade["snap_box_low_initial"]  = sig.get("snap_box_low_initial")
         trade["snap_sl"]               = round(s7_sl_actual, 8)
         trade["snap_sentiment"]        = sig.get("snap_sentiment")
-        trade["snap_sr_clearance_pct"] = sr_support_pct
+        trade["snap_sr_clearance_pct"] = sr_pct
         trade["trade_id"] = uuid.uuid4().hex[:8]
         trade.update(dna_snapshot("S7", symbol, {
             "daily": sig.get("daily_df"),
         }))
-        _log_trade("S7_SHORT", trade)
+        _log_trade(trade_action, trade)
         st.add_open_trade(trade)
         try:
             snapshot.save_snapshot(
@@ -2298,9 +2338,15 @@ class MTFBot:
         except Exception as e:
             logger.warning(f"[S7][{symbol}] snapshot save failed: {e}")
         if PAPER_MODE: tr.tag_strategy(symbol, "S7")
+        if side == "LONG":
+            box_high_field = sig["trigger"]
+            box_low_field  = sig["s7_sl"]
+        else:
+            box_high_field = sig["s7_sl"]
+            box_low_field  = sig["trigger"]
         self.active_positions[symbol] = {
-            "side": "SHORT", "strategy": "S7",
-            "box_high": sig["s7_sl"], "box_low": sig["trigger"],
+            "side": side, "strategy": "S7",
+            "box_high": box_high_field, "box_low": box_low_field,
             "scale_in_pending": True, "scale_in_after": time.time() + 3600,
             "scale_in_trade_size_pct": config_s7.S7_TRADE_SIZE_PCT * size_multiplier,
             "s7_box_low": sig["box_low"],

@@ -154,7 +154,7 @@ def open_long(
     tp_price      = mark * (1 + take_profit_pct)
     breakeven_after_partial = False
 
-    if strategy in ("S2", "S3", "S5"):
+    if strategy in ("S2", "S3", "S5", "S7"):
         from importlib import import_module
         mod = import_module(f"strategies.{strategy.lower()}")
         use_trailing, trail_trigger, trail_range, tp_price, breakeven_after_partial = \

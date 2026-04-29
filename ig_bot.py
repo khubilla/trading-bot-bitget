@@ -741,8 +741,13 @@ class IGBot:
         if mark <= 0:
             return
 
-        # 9. Place limit working order
+        # 9. Guard: reject if mark has already crossed the trigger level
         side = "LONG" if sig == "PENDING_LONG" else "SHORT"
+        if not _entry_in_window(side, mark, trigger, instrument):
+            logger.info(f"[{name}] [S5] Skipping limit order — mark {mark:.1f} invalid vs trigger {trigger:.1f}")
+            return
+
+        # 10. Place limit working order
         sl   = round(sl, 1)
         tp   = round(tp, 1) if tp else round(trigger + abs(trigger - sl) if side == "LONG" else trigger - abs(trigger - sl), 1)
         contract_size = instrument["contract_size"]

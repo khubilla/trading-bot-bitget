@@ -178,12 +178,13 @@ The market sentiment is computed each scan cycle from the ratio of green vs. red
 
 | Sentiment | Strategies allowed |
 |-----------|--------------------|
-| BULLISH | S1 LONG, S2 LONG, S3 LONG, S5 LONG/SHORT |
-| BEARISH | S1 SHORT, S4 SHORT, S5 SHORT, S6 SHORT |
-| NEUTRAL | S2 LONG only (S1 paused, S3 paused, S4/S6 inactive) |
+| BULLISH | S1 LONG, S2 LONG, S3 LONG, S5 LONG/SHORT, S7 LONG |
+| BEARISH | S1 SHORT, S4 SHORT, S5 SHORT, S6 SHORT, S7 SHORT |
+| NEUTRAL | S2 LONG only (S1 paused, S3 paused, S4/S6/S7 inactive) |
 
 S3 only fires when sentiment is **BULLISH** — it is paused on NEUTRAL and BEARISH.  
 S4 and S6 only fire when sentiment is **BEARISH** — they are inactive on NEUTRAL and BULLISH.  
+S7 fires on BULLISH (LONG) or BEARISH (SHORT) — it is inactive on NEUTRAL.  
 S2 fires on BULLISH and NEUTRAL.
 
 ---

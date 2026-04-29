@@ -79,8 +79,8 @@ def test_tick_places_limit_on_pending_long(monkeypatch):
         lambda *a, **kw: ("PENDING_LONG", 40500.0, 39500.0, 42000.0, 40000.0, 40500.0, "OB hit"),
     )
 
-    # get_mark_price returns a live price
-    monkeypatch.setattr(ig, "get_mark_price", lambda epic: 40400.0)
+    # get_mark_price returns above trigger so BUY LIMIT at 40500 is valid (price pulling back down)
+    monkeypatch.setattr(ig, "get_mark_price", lambda epic: 40600.0)
 
     placed_calls = []
     monkeypatch.setattr(ig, "place_limit_long",
@@ -111,7 +111,8 @@ def test_tick_places_limit_on_pending_short(monkeypatch):
         ig_bot, "evaluate_s5",
         lambda *a, **kw: ("PENDING_SHORT", 40000.0, 40500.0, 38000.0, 40000.0, 40500.0, "OB hit short"),
     )
-    monkeypatch.setattr(ig, "get_mark_price", lambda epic: 40100.0)
+    # get_mark_price returns below trigger so SELL LIMIT at 40000 is valid (price pulling up)
+    monkeypatch.setattr(ig, "get_mark_price", lambda epic: 39900.0)
 
     placed_calls = []
     monkeypatch.setattr(ig, "place_limit_short",

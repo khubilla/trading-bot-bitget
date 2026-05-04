@@ -226,7 +226,7 @@ def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0
     """
     import time as _t
 
-    data    = bc.get("/api/v2/mix/order/orders-plan-pending", {"symbol": symbol, "productType": PRODUCT_TYPE})
+    data    = bc.get("/api/v2/mix/order/plan-orders", {"symbol": symbol, "productType": PRODUCT_TYPE, "isPlan": "plan"})
     orders  = (data.get("data") or {}).get("entrustedList", [])
     targets = [o for o in orders if o.get("holdSide") == hold_side
                and o.get("planType") in ("profit_plan", "moving_plan")]
@@ -327,6 +327,7 @@ def open_long(
     use_s2_exits: bool     = False,
     use_s3_exits: bool     = False,
     use_s5_exits: bool     = False,
+    use_s7_exits: bool     = False,
     strategy: str | None   = None,
     tp_price_abs: float    = 0,
 ) -> dict:
@@ -344,6 +345,7 @@ def open_long(
     elif strategy == "S2": use_s2_exits = True
     elif strategy == "S3": use_s3_exits = True
     elif strategy == "S5": use_s5_exits = True
+    elif strategy == "S7": use_s7_exits = True
     import time as _t
     balance  = get_usdt_balance()
     equity   = _get_total_equity() or balance
@@ -391,6 +393,9 @@ def open_long(
     elif use_s3_exits:
         from strategies.s3 import compute_and_place_long_exits as _s3_long_exits
         ok, sl_trig, tp_trig = _s3_long_exits(symbol, qty, fill, sl_floor, box_low, stop_loss_pct)
+    elif use_s7_exits:
+        from strategies.s7 import compute_and_place_long_exits as _s7_long_exits
+        ok, sl_trig, tp_trig = _s7_long_exits(symbol, qty, fill, sl_floor, 0)
     else:
         tp_trig = float(_round_price(fill * (1 + take_profit_pct), symbol))
         tp_exec = float(_round_price(tp_trig * 1.005, symbol))
@@ -429,6 +434,7 @@ def open_short(
     use_s4_exits: bool     = False,
     use_s5_exits: bool     = False,
     use_s6_exits: bool     = False,
+    use_s7_exits: bool     = False,
     strategy: str | None   = None,
     tp_price_abs: float    = 0,
 ) -> dict:
@@ -443,6 +449,7 @@ def open_short(
     elif strategy == "S4": use_s4_exits = True
     elif strategy == "S5": use_s5_exits = True
     elif strategy == "S6": use_s6_exits = True
+    elif strategy == "S7": use_s7_exits = True
     import time as _t
     balance  = get_usdt_balance()
     equity   = _get_total_equity() or balance
@@ -488,6 +495,9 @@ def open_short(
     elif use_s6_exits:
         from strategies.s6 import compute_and_place_short_exits as _s6_short_exits
         ok, sl_trig, tp_trig = _s6_short_exits(symbol, qty, fill, sl_trig, sl_exec)
+    elif use_s7_exits:
+        from strategies.s7 import compute_and_place_short_exits as _s7_short_exits
+        ok, sl_trig, tp_trig = _s7_short_exits(symbol, qty, fill, sl_trig, sl_exec)
     else:
         tp_trig = float(_round_price(fill * (1 - take_profit_pct), symbol))
         tp_exec = float(_round_price(tp_trig * 0.995, symbol))
@@ -646,46 +656,35 @@ def cancel_all_orders(symbol: str):
 def _place_limit_order(side: str, symbol: str, limit_price: float,
                        sl_price: float, tp_price: float, qty_str: str) -> str:
     """
-    Place a true limit order via Bitget's place-order endpoint.
+    Place a trigger (plan) order via Bitget's place-plan-order endpoint.
 
-    For a LONG (buy), the order fills when price DROPS to or below limit_price.
-    For a SHORT (sell), the order fills when price RISES to or above limit_price.
-
-    sl_price, tp_price: attached atomically via presetStopLossPrice/presetTakeProfitPrice.
-    The SL/TP are active immediately on fill (zero unprotected window).
+    Activates as a market order when the mark price reaches limit_price.
+    sl_price/tp_price are attached as stopLossTriggerPrice/stopSurplusTriggerPrice.
     _place_s5_exits() still runs after fill to set partial TP and trailing stop.
     """
     sl_trig = float(_round_price(sl_price, symbol))
-    tp_trig = float(_round_price(tp_price, symbol))
-
-    # Compute execute prices (slightly worse than trigger for slippage protection)
-    if side == "buy":  # LONG
-        sl_exec = float(_round_price(sl_trig * 0.995, symbol))  # 0.5% below SL trigger
-        tp_exec = float(_round_price(tp_trig * 1.005, symbol))  # 0.5% above TP trigger
-    else:  # SHORT
-        sl_exec = float(_round_price(sl_trig * 1.005, symbol))  # 0.5% above SL trigger
-        tp_exec = float(_round_price(tp_trig * 0.995, symbol))  # 0.5% below TP trigger
+    tp_trig = float(_round_price(tp_price, symbol)) if tp_price else 0.0
 
     body = {
-        "symbol":                     symbol,
-        "productType":                PRODUCT_TYPE,
-        "marginMode":                 "isolated",
-        "marginCoin":                 MARGIN_COIN,
-        "side":                       side,
-        "tradeSide":                  "open",
-        "orderType":                  "limit",
-        "size":                       qty_str,
-        "price":                      _round_price(limit_price, symbol),
-        "force":                      "gtc",  # Good-til-cancelled
-        "presetStopLossPrice":        str(sl_trig),
-        "presetStopLossExecutePrice": str(sl_exec),
-        "presetTakeProfitPrice":      str(tp_trig),
-        "presetTakeProfitExecutePrice": str(tp_exec),
+        "symbol":                   symbol,
+        "productType":              PRODUCT_TYPE,
+        "marginMode":               "isolated",
+        "marginCoin":               MARGIN_COIN,
+        "side":                     side,
+        "tradeSide":                "open",
+        "orderType":                "market",
+        "size":                     qty_str,
+        "triggerPrice":             _round_price(limit_price, symbol),
+        "triggerType":              "mark_price",
+        "planType":                 "normal_plan",
+        "stopLossTriggerPrice":     str(sl_trig),
+        "stopLossTriggerType":      "mark_price",
+        "stopSurplusTriggerPrice":  str(tp_trig) if tp_trig > 0 else "",
+        "stopSurplusTriggerType":   "mark_price",
     }
-    resp = bc.post("/api/v2/mix/order/place-order", body)
-    # presetStopLossPrice/presetTakeProfitPrice attach SL/TP atomically on fill
+    resp = bc.post("/api/v2/mix/order/place-plan-order", body)
     if resp.get("code") != "00000":
-        raise RuntimeError(f"place_limit_order failed: {resp}")
+        raise RuntimeError(f"place_plan_order failed: {resp}")
     return str(resp["data"]["orderId"])
 
 
@@ -702,8 +701,8 @@ def place_limit_short(symbol: str, limit_price: float, sl_price: float,
 
 
 def cancel_order(symbol: str, order_id: str) -> None:
-    """Cancel an open limit order by order_id."""
-    resp = bc.post("/api/v2/mix/order/cancel-order", {
+    """Cancel an open plan (trigger) order by order_id."""
+    resp = bc.post("/api/v2/mix/order/cancel-plan-order", {
         "symbol":      symbol,
         "productType": PRODUCT_TYPE,
         "orderId":     order_id,
@@ -714,28 +713,26 @@ def cancel_order(symbol: str, order_id: str) -> None:
 
 def get_order_fill(symbol: str, order_id: str) -> dict:
     """
-    Poll the status of an S5 limit order.
+    Poll the status of an S5 plan (trigger) order.
     Returns {"status": "live"|"filled"|"cancelled", "fill_price": float}
 
-    Limit order statuses (Bitget):
-      "live"       → waiting to fill
-      "full_fill"  → completely filled
-      "partial_fill" → partially filled (treat as live for S5)
-      "cancelled"  → cancelled or expired
+    Plan order statuses (Bitget):
+      "not_trigger" → waiting for trigger price — still live
+      "triggered"   → trigger hit, market order placed — treat as filled
+      "cancel"      → cancelled
     """
-    # Check active orders first
-    resp = bc.get("/api/v2/mix/order/orders-pending",
-                  params={"symbol": symbol, "productType": PRODUCT_TYPE})
+    resp = bc.get("/api/v2/mix/order/plan-orders",
+                  params={"symbol": symbol, "productType": PRODUCT_TYPE,
+                          "planType": "normal_plan", "isPlan": "plan"})
     if resp.get("code") != "00000":
-        raise RuntimeError(f"get_order_fill (pending) failed: {resp}")
+        raise RuntimeError(f"get_order_fill (plan) failed: {resp}")
     orders = (resp.get("data") or {}).get("entrustedList", [])
     for o in orders:
         if str(o.get("orderId")) == str(order_id):
-            status = o.get("status", "")
-            if status in ("live", "partial_fill"):
+            plan_status = o.get("planStatus", o.get("status", ""))
+            if plan_status in ("not_trigger", "live"):
                 return {"status": "live", "fill_price": 0.0}
-            if status == "full_fill":
-                # Filled — get actual fill price from position
+            if plan_status in ("triggered", "executed"):
                 fill_price = 0.0
                 try:
                     pos_data = bc.get("/api/v2/mix/position/single-position", {
@@ -749,16 +746,15 @@ def get_order_fill(symbol: str, order_id: str) -> dict:
                 return {"status": "filled", "fill_price": fill_price}
             return {"status": "cancelled", "fill_price": 0.0}
 
-    # Order not in pending — check history
-    hist = bc.get("/api/v2/mix/order/orders-history",
-                  params={"symbol": symbol, "productType": PRODUCT_TYPE})
+    # Order not in active list — check history
+    hist = bc.get("/api/v2/mix/order/plan-orders",
+                  params={"symbol": symbol, "productType": PRODUCT_TYPE,
+                          "planType": "normal_plan", "isPlan": "history"})
     if hist.get("code") == "00000":
-        orders = (hist.get("data") or {}).get("entrustedList", [])
-        for o in orders:
+        for o in (hist.get("data") or {}).get("entrustedList", []):
             if str(o.get("orderId")) == str(order_id):
-                status = o.get("status", "")
-                if status == "full_fill":
-                    # Filled — get fill price from position (order might be gone from history quickly)
+                plan_status = o.get("planStatus", o.get("status", ""))
+                if plan_status in ("triggered", "executed"):
                     fill_price = 0.0
                     try:
                         pos_data = bc.get("/api/v2/mix/position/single-position", {

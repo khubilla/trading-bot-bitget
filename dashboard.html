@@ -895,6 +895,7 @@
   .ig-log-ts   { color: var(--muted); min-width: 34px; flex-shrink: 0; }
   .ig-log-inst { min-width: 32px; flex-shrink: 0; font-weight: 600; font-size: 8px; }
   .ig-log-inst.US30 { color: var(--blue); }
+  .ig-log-inst.US100 { color: var(--emerald); }
   .ig-log-inst.Gold { color: var(--amber); }
   .ig-log-msg  { color: var(--text2); line-height: 1.4; }
 
@@ -2132,7 +2133,7 @@ function render(s) {
 }
 
 // ── Entry Chart Modal ──────────────────────────────────
-const _ENTRY_CHART_INTERVAL = {S1:'3m', S2:'1D', S3:'15m', S4:'1D', S5:'15m', S6:'1D'};
+const _ENTRY_CHART_INTERVAL = {S1:'3m', S2:'1D', S3:'15m', S4:'1D', S5:'15m', S6:'1D', S7:'1H'};
 
 async function openCombinedChart(trade) {
   if (!trade || !trade.trade_id) return openEntryChart(trade);
@@ -3437,6 +3438,7 @@ function openChart(symbol) {
     else if (chartActiveTab === 's2') currentInterval = '1D';
     else if (chartActiveTab === 's4') currentInterval = '1D';
     else if (chartActiveTab === 's6') currentInterval = '1D';
+    else if (chartActiveTab === 's7') currentInterval = '1H';
     else currentInterval = '3m';
   }
   $('chartOverlay').classList.add('open');
@@ -4131,6 +4133,7 @@ function attachCardClicks() {
       else if (strat === 'S4') { chartActiveTab = 's4'; currentInterval = '1D';  }
       else if (strat === 'S5') { chartActiveTab = 's5'; currentInterval = '15m'; }
       else if (strat === 'S6') { chartActiveTab = 's6'; currentInterval = '1D';  }
+      else if (strat === 'S7') { chartActiveTab = 's7'; currentInterval = '1H';  }
       openChart(card.dataset.symbol);
     };
   });

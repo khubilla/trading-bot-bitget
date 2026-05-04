@@ -13,10 +13,11 @@ Usage:
 import os
 from pathlib import Path
 
-from config_ig_us30 import CONFIG as _US30
+from config_ig_us30  import CONFIG as _US30
+from config_ig_us100 import CONFIG as _US100
 from config_ig_gold  import CONFIG as _GOLD
 
-INSTRUMENTS = [_US30, _GOLD]
+INSTRUMENTS = [_US30, _US100, _GOLD]
 
 # Load .env from project root
 _env_file = Path(__file__).parent / ".env"

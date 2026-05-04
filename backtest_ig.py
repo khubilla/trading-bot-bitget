@@ -33,8 +33,9 @@ from config_ig import INSTRUMENTS
 _CACHE_DIR  = Path("data/ig_cache")
 _ET         = pytz.timezone("America/New_York")
 _YF_SYMBOLS = {
-    "US30": "^DJI",
-    "GOLD": "GC=F",
+    "US30":  "^DJI",
+    "US100": "^IXIC",  # NASDAQ Composite
+    "GOLD":  "GC=F",
 }
 _YF_PERIODS   = {"1D": "10y",  "1H": "2y",  "15m": "60d"}
 _YF_INTERVALS = {"1D": "1d",   "1H": "1h",  "15m": "15m"}

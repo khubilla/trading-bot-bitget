@@ -132,7 +132,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 
 _STRATEGY_INTERVAL = {
-    "S1": "3m", "S2": "1D", "S3": "15m", "S4": "1D", "S5": "15m",
+    "S1": "3m", "S2": "1D", "S3": "15m", "S4": "1D", "S5": "15m", "S6": "1D", "S7": "1H",
 }
 _TRADE_EVENT_ORDER = ["open", "scale_in", "partial", "close"]
 
@@ -833,7 +833,7 @@ def get_entry_chart(
         from indicators import calculate_stoch
 
         interval = _STRATEGY_INTERVAL.get(strategy, "15m")
-        interval_ms = {"3m": 180_000, "15m": 900_000, "1D": 86_400_000}.get(interval, 900_000)
+        interval_ms = {"3m": 180_000, "15m": 900_000, "1H": 3_600_000, "1D": 86_400_000}.get(interval, 900_000)
 
         # Parse open_at ISO → ms
         open_ts_ms = int(datetime.fromisoformat(open_at).timestamp() * 1000)

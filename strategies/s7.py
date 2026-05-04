@@ -20,7 +20,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 Signal = Literal["LONG", "SHORT", "HOLD", "PENDING_LONG", "PENDING_SHORT"]
 
-SNAPSHOT_INTERVAL = "1D"
+SNAPSHOT_INTERVAL = "1H"
 
 
 def _utcnow() -> pd.Timestamp:

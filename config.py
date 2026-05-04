@@ -33,8 +33,8 @@ PRODUCT_TYPE = "usdt-futures"    # USDT-margined perpetual futures
 MARGIN_COIN  = "USDT"
 
 # --- Pair Scanner ---
-MIN_VOLUME_USDT   = 1_000_000   # 24h quote volume filter (5 million USDT)
-MAX_PRICE_USDT    = 0         # Exclude pairs priced above this (set high to include BTC/ETH if desired)
+MIN_VOLUME_USDT   = 5_000_000   # 24h quote volume filter (5 million USDT)
+MAX_PRICE_USDT    = 1000         # Exclude pairs priced above this (set high to include BTC/ETH if desired)
 SCAN_INTERVAL_SEC = 60           # Re-scan all pairs every 60 seconds
 
 # --- Liquidity Filter ---

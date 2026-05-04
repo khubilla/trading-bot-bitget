@@ -7,7 +7,7 @@
 #   LONG  (BULLISH): confirmed 1H close above box_top × (1 + S7_ENTRY_BUFFER)
 # NEUTRAL sentiment → HOLD (gated in bot.py scan loop).
 
-S7_ENABLED = True
+S7_ENABLED = False
 
 # ── Big Candle Detection (mirrors S4) ───────────────────────── #
 S7_BIG_CANDLE_BODY_PCT  = 0.20   # ≥ 20% body to qualify as a momentum candle

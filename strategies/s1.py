@@ -298,9 +298,8 @@ def _place_exits(symbol: str, hold_side: str, qty_str: str,
 
     for attempt in range(3):
         try:
-            # SL is already attached via preset - SKIP line that was: bg.place_pos_sl_only(...)
-            logger.info(f"[{symbol}] S1 exits: SL already set via preset (trigger={sl_trig:.5f} exec={sl_exec:.5f}), placing TPs only")
-
+            bg.place_pos_sl_only(symbol, hold_side, sl_trig, sl_exec)
+            _t.sleep(0.5)
             bg.place_profit_plan(symbol, hold_side, half_qty, trail_trigger)
             _t.sleep(0.5)
             bg.place_moving_plan(symbol, hold_side, rest_qty, trail_trigger, range_rate)

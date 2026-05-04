@@ -115,28 +115,14 @@ def evaluate_s5(
         )
 
     # ── 2. 1H Break of Structure ───────────────────────────── #
-    htf_win = htf_df.iloc[-(S5_HTF_BOS_LOOKBACK + 2):-1].reset_index(drop=True)
-    n_htf   = len(htf_win)
-    bos_high = None
-    bos_low  = None
-
-    for k in range(n_htf - 2, 0, -1):
-        if bos_high is None:
-            h = float(htf_win.iloc[k]["high"])
-            if (h > float(htf_win.iloc[k - 1]["high"]) and
-                    h > float(htf_win.iloc[k + 1]["high"])):
-                post_closes = htf_win.iloc[k + 1:]["close"].astype(float)
-                if any(c > h for c in post_closes):
-                    bos_high = h
-        if bos_low is None:
-            lo = float(htf_win.iloc[k]["low"])
-            if (lo < float(htf_win.iloc[k - 1]["low"]) and
-                    lo < float(htf_win.iloc[k + 1]["low"])):
-                post_closes = htf_win.iloc[k + 1:]["close"].astype(float)
-                if any(c < lo for c in post_closes):
-                    bos_low = lo
-        if bos_high is not None and bos_low is not None:
-            break
+    # BOS: last candle close exceeds the highest high (LONG) or lowest low (SHORT)
+    # of the prior S5_HTF_BOS_LOOKBACK candles.
+    htf_prior = htf_df.iloc[-(S5_HTF_BOS_LOOKBACK + 1):-1]
+    prior_high = float(htf_prior["high"].astype(float).max())
+    prior_low  = float(htf_prior["low"].astype(float).min())
+    last_close = float(htf_df.iloc[-1]["close"])
+    bos_high = prior_high if last_close > prior_high else None
+    bos_low  = prior_low  if last_close < prior_low  else None
 
     if go_long and bos_high is None:
         return "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, (
@@ -330,7 +316,7 @@ def compute_and_place_long_exits(symbol: str, qty_str: str, fill: float,
 
     sl_trig   = float(trader._round_price(sl_floor, symbol))
     sl_exec   = float(trader._round_price(sl_trig * 0.995, symbol))
-    one_r     = fill - sl_trig
+    one_r     = fill - sl_exec
     part_trig = float(trader._round_price(fill + one_r, symbol))
     tp_targ   = float(trader._round_price(tp_price_abs, symbol)) if tp_price_abs > fill else 0.0
     ok = _place_exits(symbol, "long", qty_str, sl_trig, sl_exec, part_trig, tp_targ, S5_TRAIL_RANGE_PCT)
@@ -348,7 +334,7 @@ def compute_and_place_short_exits(symbol: str, qty_str: str, fill: float,
     import trader
     from config_s5 import S5_TRAIL_RANGE_PCT
 
-    one_r     = sl_trig - fill
+    one_r     = sl_exec - fill
     part_trig = float(trader._round_price(fill - one_r, symbol))
     tp_targ   = float(trader._round_price(tp_price_abs, symbol)) if 0 < tp_price_abs < fill else 0.0
     ok = _place_exits(symbol, "short", qty_str, sl_trig, sl_exec, part_trig, tp_targ, S5_TRAIL_RANGE_PCT)
@@ -368,14 +354,14 @@ def place_exits_from_signal(symbol: str, side: str, qty_str: str, fill: float,
     if side == "LONG":
         sl_trig   = float(trader._round_price(sl_price, symbol))
         sl_exec   = float(trader._round_price(sl_trig * 0.995, symbol))
-        one_r     = fill - sl_trig
+        one_r     = fill - sl_exec
         part_trig = float(trader._round_price(fill + one_r, symbol))
         tp_targ   = float(trader._round_price(tp_price, symbol)) if tp_price > fill else 0.0
         hold_side = "long"
     else:
         sl_trig   = float(trader._round_price(sl_price, symbol))
         sl_exec   = float(trader._round_price(sl_trig * 1.005, symbol))
-        one_r     = sl_trig - fill
+        one_r     = sl_exec - fill
         part_trig = float(trader._round_price(fill - one_r, symbol))
         tp_targ   = float(trader._round_price(tp_price, symbol)) if 0 < tp_price < fill else 0.0
         hold_side = "short"
@@ -863,7 +849,8 @@ def compute_paper_trail_long(mark: float, sl_price: float, tp_price_abs: float =
                              take_profit_pct: float = 0.05) -> tuple[bool, float, float, float, bool]:
     """Paper-trader LONG trail setup for S5 (1:1 R:R, breakeven after partial)."""
     from config_s5 import S5_TRAIL_RANGE_PCT
-    one_r         = mark - sl_price
+    sl_exec       = sl_price * 0.995  # Apply same exec buffer as live
+    one_r         = mark - sl_exec
     trail_trigger = mark + one_r
     trail_range   = S5_TRAIL_RANGE_PCT
     tp_price      = tp_price_abs if tp_price_abs > mark else trail_trigger
@@ -874,7 +861,8 @@ def compute_paper_trail_short(mark: float, sl_price: float, tp_price_abs: float 
                               take_profit_pct: float = 0.05) -> tuple[bool, float, float, float, bool]:
     """Paper-trader SHORT trail setup for S5 (1:1 R:R, breakeven after partial)."""
     from config_s5 import S5_TRAIL_RANGE_PCT
-    one_r         = sl_price - mark
+    sl_exec       = sl_price * 1.005  # Apply same exec buffer as live
+    one_r         = sl_exec - mark
     trail_trigger = mark - one_r
     trail_range   = S5_TRAIL_RANGE_PCT
     tp_price      = tp_price_abs if 0 < tp_price_abs < mark else trail_trigger

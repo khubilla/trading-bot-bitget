@@ -149,10 +149,14 @@ def _now_et() -> datetime:
 
 
 def _in_trading_window(now: datetime) -> bool:
-    """True if current ET time is within [SESSION_START, SESSION_END) for the first instrument.
+    """True if current ET time is within [SESSION_START, SESSION_END) and not a weekend block.
 
-    Module-level function kept for test-patching only; _tick_instrument uses the _for variants.
+    Module-level function used by _tick_instrument; patchable in tests.
     """
+    if now.weekday() == 5:  # Saturday — no new entries
+        return False
+    if now.weekday() == 6 and now.hour < 18:  # Sunday before 6 PM ET
+        return False
     inst = config_ig.INSTRUMENTS[0]
     start = now.replace(hour=inst["session_start"][0],
                         minute=inst["session_start"][1],
@@ -673,15 +677,8 @@ class IGBot:
             self._monitor_position(instrument)
 
         # 3. Outside session window or weekend → no new entries
-        if not _in_trading_window_for(instrument, now):
+        if not _in_trading_window(now):
             logger.debug(f"[{name}] Outside trading window ({now.strftime('%H:%M')} ET)")
-            return
-        # Weekend check: Saturday all day, Sunday before 6 PM ET (markets open Sunday 6 PM)
-        if now.weekday() == 5:  # Saturday
-            logger.info(f"[{name}] Weekend (Saturday) — no new entries")
-            return
-        if now.weekday() == 6 and now.hour < 18:  # Sunday before 6 PM ET
-            logger.info(f"[{name}] Weekend (Sunday before 6 PM ET) — no new entries")
             return
 
         # 4. Already in a trade
@@ -971,7 +968,9 @@ class IGBot:
         ob_high  = po["ob_high"]
         size     = po["size"]
 
-        risk = abs(fill_price - sl)
+        # Apply same exec buffer as Bitget (0.5% slippage for non-guaranteed stops)
+        sl_exec = sl * 0.995 if side == "LONG" else sl * 1.005
+        risk = abs(fill_price - sl_exec)
         tp1  = round(fill_price + risk if side == "LONG" else fill_price - risk, 1)
 
         trade_id = uuid.uuid4().hex[:8]

@@ -1609,6 +1609,7 @@ class MTFBot:
 
         _dispatchers = {
             "S1": self._execute_s1,
+            "S7": self._execute_s7,
         }
 
         for candidate in ranked:
@@ -1659,12 +1660,6 @@ class MTFBot:
                     min_bal = 5.0 / (config_s4.S4_TRADE_SIZE_PCT * config_s4.S4_LEVERAGE)
                     if balance >= min_bal:
                         self._queue_s4_pending(candidate)
-            elif strategy == "S7":
-                if sym not in self.pending_signals:
-                    min_bal = 5.0 / (config_s7.S7_TRADE_SIZE_PCT * config_s7.S7_LEVERAGE)
-                    if balance >= min_bal:
-                        from strategies.s7 import queue_pending as _queue_s7
-                        _queue_s7(self, candidate)
             elif strategy == "S5":
                 with self._trade_lock:
                     if sym in self.active_positions:
@@ -1749,7 +1744,6 @@ class MTFBot:
                             )
                         hold_side = specs["hold_side"]
                         # Recompute trail trigger and SL from new average entry after scale-in
-                        new_trig = 0.0
                         # Update initial_qty and margin to reflect scaled-in position
                         _new_qty = float(_scale_pos.get("qty", 0))
                         if _new_qty > 0:
@@ -1763,9 +1757,14 @@ class MTFBot:
                             if tr.update_position_sl(sym, new_sl, hold_side=hold_side):
                                 ap["sl"] = new_sl
                                 st.update_open_trade_sl(sym, new_sl)
-                        if not tr.refresh_plan_exits(sym, hold_side, new_trig):
-                            logger.warning(f"[{strat}][{sym}] ⚠️ Scale-in exits refresh failed — verify plan orders manually")
-                            st.add_scan_log(f"[{strat}][{sym}] ⚠️ Scale-in exits refresh failed", "WARN")
+                            # BUGFIX: Only refresh plan exits after we have a valid new_trig
+                            # (was outside the if block, causing it to be called with new_trig=0.0
+                            # when API lags and entry_price is still 0)
+                            if not tr.refresh_plan_exits(sym, hold_side, new_trig):
+                                logger.warning(f"[{strat}][{sym}] ⚠️ Scale-in exits refresh failed — verify plan orders manually")
+                                st.add_scan_log(f"[{strat}][{sym}] ⚠️ Scale-in exits refresh failed", "WARN")
+                        else:
+                            logger.warning(f"[{strat}][{sym}] ⚠️ Position entry_price not available after scale-in — exits not refreshed")
                     except Exception as _ref_e:
                         logger.warning(f"[{strat}][{sym}] ⚠️ Scale-in exits refresh error: {_ref_e}")
                 # Save scale-in snapshot
@@ -1862,6 +1861,99 @@ class MTFBot:
             "box_high": c["s1_bh"], "box_low": c["s1_bl"],
             "trade_id": trade["trade_id"],
             "sl": trade.get("sl", 0.0),
+        }
+        return True
+
+    def _execute_s7(self, c: dict, balance: float) -> bool:
+        """Execute S7 LONG/SHORT immediately when signal fires."""
+        symbol = c["symbol"]
+        if symbol in self.active_positions:
+            return False
+
+        side = c["sig"]
+        mark_now = tr.get_mark_price(symbol)
+
+        # S/R clearance check
+        sr_pct = c.get("sr_pct")
+        if sr_pct is not None and sr_pct < config_s7.S7_MIN_SR_CLEARANCE * 100:
+            sr_label = "resistance" if side == "LONG" else "support"
+            st.add_scan_log(
+                f"[S7][{symbol}] ⛔ Skipped — {sr_label} clearance {sr_pct:.1f}% < {config_s7.S7_MIN_SR_CLEARANCE*100:.0f}%",
+                "WARN"
+            )
+            return False
+
+        # Apply dynamic position sizing
+        size_multiplier = get_position_size_multiplier()
+        adjusted_size = config_s7.S7_TRADE_SIZE_PCT * 0.5 * size_multiplier
+        size_note = f" ({size_multiplier}x)" if size_multiplier != 1.0 else ""
+
+        if side == "LONG":
+            s7_sl_actual = mark_now * (1 - 0.50 / config_s7.S7_LEVERAGE)
+            st.add_scan_log(
+                f"[S7][{symbol}] 🟢 LONG | box top={c['s7_box_top']:.5f} | rank=#{c['priority_rank']}{size_note}",
+                "SIGNAL"
+            )
+            trade = tr.open_long(
+                symbol, sl_floor=s7_sl_actual, leverage=config_s7.S7_LEVERAGE,
+                trade_size_pct=adjusted_size, strategy="S7",
+            )
+            trade_action = "S7_LONG"
+            box_high_field = c["s7_trigger"]
+            box_low_field  = s7_sl_actual
+        else:  # SHORT
+            s7_sl_actual = mark_now * (1 + 0.50 / config_s7.S7_LEVERAGE)
+            st.add_scan_log(
+                f"[S7][{symbol}] 🔴 SHORT | box low={c['s7_box_low']:.5f} | rank=#{c['priority_rank']}{size_note}",
+                "SIGNAL"
+            )
+            trade = tr.open_short(
+                symbol, sl_floor=s7_sl_actual, leverage=config_s7.S7_LEVERAGE,
+                trade_size_pct=adjusted_size, strategy="S7",
+            )
+            trade_action = "S7_SHORT"
+            box_high_field = s7_sl_actual
+            box_low_field  = c["s7_trigger"]
+
+        trade["strategy"]              = "S7"
+        trade["snap_rsi"]              = round(c["s7_rsi"], 1)
+        trade["snap_rsi_peak"]         = round(c["s7_rsi_peak"], 1)
+        trade["snap_spike_body_pct"]   = round(c["s7_body_pct"] * 100, 1)
+        trade["snap_rsi_div"]          = c["s7_div"]
+        trade["snap_rsi_div_str"]      = c["s7_div_str"]
+        trade["snap_box_top"]          = c["s7_box_top"]
+        trade["snap_box_low_initial"]  = c["s7_box_low"]
+        trade["snap_sl"]               = round(s7_sl_actual, 8)
+        trade["snap_sentiment"]        = self.sentiment.direction
+        trade["snap_sr_clearance_pct"] = sr_pct
+        trade["trade_id"]              = uuid.uuid4().hex[:8]
+        trade.update(dna_snapshot("S7", symbol, {"daily": c.get("daily_df")}))
+        trade["box_low"]  = c["s7_box_low"]
+        trade["box_high"] = c["s7_box_top"]
+
+        _log_trade(trade_action, trade)
+        st.add_open_trade(trade)
+
+        try:
+            snapshot.save_snapshot(
+                trade_id=trade["trade_id"], event="open",
+                symbol=symbol, interval="1H", candles=[],
+                event_price=float(trade.get("entry", 0)),
+            )
+        except Exception as e:
+            logger.warning(f"[S7][{symbol}] snapshot save failed: {e}")
+
+        if PAPER_MODE: tr.tag_strategy(symbol, "S7")
+
+        self.active_positions[symbol] = {
+            "side": side, "strategy": "S7",
+            "box_high": box_high_field, "box_low": box_low_field,
+            "scale_in_pending": True, "scale_in_after": time.time() + 3600,
+            "scale_in_trade_size_pct": config_s7.S7_TRADE_SIZE_PCT * size_multiplier,
+            "s7_box_low": c["s7_box_low"],
+            "s7_box_top": c["s7_box_top"],
+            "trade_id": trade["trade_id"],
+            "sl": s7_sl_actual,
         }
         return True
 
@@ -2327,12 +2419,17 @@ class MTFBot:
         trade.update(dna_snapshot("S7", symbol, {
             "daily": sig.get("daily_df"),
         }))
+        # Populate Darvas box levels for the CSV log (open_long/open_short don't receive them)
+        trade["box_low"]  = sig["box_low"]
+        trade["box_high"] = sig.get("box_top", 0)
         _log_trade(trade_action, trade)
         st.add_open_trade(trade)
         try:
+            h1_df = tr.get_candles(symbol, "1H", limit=48)
             snapshot.save_snapshot(
                 trade_id=trade["trade_id"], event="open",
-                symbol=symbol, interval="1D", candles=[],
+                symbol=symbol, interval="1H",
+                candles=_df_to_candles(h1_df),
                 event_price=float(trade.get("entry", 0)),
             )
         except Exception as e:
@@ -2445,7 +2542,7 @@ class MTFBot:
 
                     strategy = sig.get("strategy")
 
-                    if strategy in ("S2", "S3", "S4", "S5", "S6", "S7"):
+                    if strategy in ("S2", "S3", "S4", "S5", "S6"):
                         # Delegate to the strategy module's handle_pending_tick.
                         # Returns "break" to stop the outer for-loop (MAX_CONCURRENT_TRADES hit).
                         from importlib import import_module
@@ -2457,6 +2554,11 @@ class MTFBot:
                                 break
                         except Exception as e:
                             logger.error(f"[{strategy}][{symbol}] pending tick error: {e}")
+                    elif strategy == "S7":
+                        # S7 now executes immediately (not pending) — remove stale pending signals
+                        logger.info(f"[S7][{symbol}] ⏰ Removing stale pending signal (S7 now executes immediately)")
+                        self.pending_signals.pop(symbol, None)
+                        st.save_pending_signals(self.pending_signals)
                     else:
                         # ── Unknown strategy: expire stale signals ──── #
                         if time.time() > sig.get("expires", 0):

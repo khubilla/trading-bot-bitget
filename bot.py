@@ -1821,11 +1821,11 @@ class MTFBot:
             "SIGNAL"
         )
         if s1_sig == "LONG":
-            trade = tr.open_long(symbol, sl_floor=sl_long, leverage=lev,
+            trade = tr.open_long(symbol, box_low=c["s1_bl"], sl_floor=sl_long, leverage=lev,
                                  trade_size_pct=adjusted_size,
                                  strategy="S1")
         else:
-            trade = tr.open_short(symbol, sl_floor=sl_short, leverage=lev,
+            trade = tr.open_short(symbol, box_high=c["s1_bh"], sl_floor=sl_short, leverage=lev,
                                   trade_size_pct=adjusted_size,
                                   strategy="S1")
         trade["strategy"] = "S1"

@@ -115,7 +115,7 @@ def detect_consolidation(
 # ── LTF Entry ─────────────────────────────────────────────── #
 
 def check_ltf_long(ltf_df: pd.DataFrame) -> tuple[bool, float, float, float]:
-    if len(ltf_df) < RSI_PERIOD + CONSOLIDATION_CANDLES + 2:
+    if len(ltf_df) < RSI_PERIOD + CONSOLIDATION_CANDLES + 3:
         return False, 50.0, 0.0, 0.0
 
     closes  = ltf_df["close"].astype(float)
@@ -125,20 +125,44 @@ def check_ltf_long(ltf_df: pd.DataFrame) -> tuple[bool, float, float, float]:
     if rsi_val <= RSI_LONG_THRESH:
         return False, rsi_val, 0.0, 0.0
 
-    is_coil, box_high, box_low = detect_consolidation(
-        ltf_df, rsi_series=rsi_ser, rsi_threshold=RSI_LONG_THRESH, direction="LONG"
-    )
-    if not is_coil:
+    # Check consolidation on candles BEFORE the last closed candle.
+    # This prevents the breakout candle from polluting the consolidation window.
+    # With CONSOLIDATION_CANDLES=2: window = ltf_df.iloc[-4:-2] (positions -4, -3)
+    consolidation_window = ltf_df.iloc[-(CONSOLIDATION_CANDLES + 2):-2]
+
+    if len(consolidation_window) < CONSOLIDATION_CANDLES:
         return False, rsi_val, 0.0, 0.0
 
-    close = float(ltf_df["close"].iloc[-1])
-    if close > box_high * (1 + BREAKOUT_BUFFER_PCT):
+    box_high = float(consolidation_window["high"].max())
+    box_low  = float(consolidation_window["low"].min())
+    mid      = (box_high + box_low) / 2
+
+    if mid == 0:
+        return False, rsi_val, 0.0, 0.0
+
+    range_pct = (box_high - box_low) / mid
+    if range_pct > CONSOLIDATION_RANGE_PCT:
+        logger.debug(f"  Consolidation ❌ range={range_pct*100:.3f}% > {CONSOLIDATION_RANGE_PCT*100}%")
+        return False, rsi_val, box_high, box_low
+
+    # Check RSI was in zone throughout the consolidation window
+    window_rsi = rsi_ser.iloc[-(CONSOLIDATION_CANDLES + 2):-2]
+    if not (window_rsi > RSI_LONG_THRESH).all():
+        logger.debug(f"  Consolidation ❌ RSI not > {RSI_LONG_THRESH} throughout (min={window_rsi.min():.1f})")
+        return False, rsi_val, box_high, box_low
+
+    logger.debug(f"  Consolidation ✓ range={range_pct*100:.3f}% H={box_high} L={box_low}")
+
+    # Check if last CLOSED candle broke out above the box
+    last_closed = float(ltf_df["close"].iloc[-2])
+    if last_closed > box_high * (1 + BREAKOUT_BUFFER_PCT):
         return True, rsi_val, box_high, box_low
+
     return False, rsi_val, box_high, box_low
 
 
 def check_ltf_short(ltf_df: pd.DataFrame) -> tuple[bool, float, float, float]:
-    if len(ltf_df) < RSI_PERIOD + CONSOLIDATION_CANDLES + 2:
+    if len(ltf_df) < RSI_PERIOD + CONSOLIDATION_CANDLES + 3:
         return False, 50.0, 0.0, 0.0
 
     closes  = ltf_df["close"].astype(float)
@@ -148,15 +172,39 @@ def check_ltf_short(ltf_df: pd.DataFrame) -> tuple[bool, float, float, float]:
     if rsi_val >= RSI_SHORT_THRESH:
         return False, rsi_val, 0.0, 0.0
 
-    is_coil, box_high, box_low = detect_consolidation(
-        ltf_df, rsi_series=rsi_ser, rsi_threshold=RSI_SHORT_THRESH, direction="SHORT"
-    )
-    if not is_coil:
+    # Check consolidation on candles BEFORE the last closed candle.
+    # This prevents the breakout candle from polluting the consolidation window.
+    # With CONSOLIDATION_CANDLES=2: window = ltf_df.iloc[-4:-2] (positions -4, -3)
+    consolidation_window = ltf_df.iloc[-(CONSOLIDATION_CANDLES + 2):-2]
+
+    if len(consolidation_window) < CONSOLIDATION_CANDLES:
         return False, rsi_val, 0.0, 0.0
 
-    close = float(ltf_df["close"].iloc[-1])
-    if close < box_low * (1 - BREAKOUT_BUFFER_PCT):
+    box_high = float(consolidation_window["high"].max())
+    box_low  = float(consolidation_window["low"].min())
+    mid      = (box_high + box_low) / 2
+
+    if mid == 0:
+        return False, rsi_val, 0.0, 0.0
+
+    range_pct = (box_high - box_low) / mid
+    if range_pct > CONSOLIDATION_RANGE_PCT:
+        logger.debug(f"  Consolidation ❌ range={range_pct*100:.3f}% > {CONSOLIDATION_RANGE_PCT*100}%")
+        return False, rsi_val, box_high, box_low
+
+    # Check RSI was in zone throughout the consolidation window
+    window_rsi = rsi_ser.iloc[-(CONSOLIDATION_CANDLES + 2):-2]
+    if not (window_rsi < RSI_SHORT_THRESH).all():
+        logger.debug(f"  Consolidation ❌ RSI not < {RSI_SHORT_THRESH} throughout (max={window_rsi.max():.1f})")
+        return False, rsi_val, box_high, box_low
+
+    logger.debug(f"  Consolidation ✓ range={range_pct*100:.3f}% H={box_high} L={box_low}")
+
+    # Check if last CLOSED candle broke out below the box
+    last_closed = float(ltf_df["close"].iloc[-2])
+    if last_closed < box_low * (1 - BREAKOUT_BUFFER_PCT):
         return True, rsi_val, box_high, box_low
+
     return False, rsi_val, box_high, box_low
 
 

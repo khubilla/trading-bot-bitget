@@ -218,16 +218,24 @@ def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0
     new_trail_trigger: if > 0, re-placed orders use this trigger price instead of
     preserving the existing profit_plan trigger (used after scale-in changes avg entry).
 
-    Steps:
-    1. Fetch pending profit_plan + moving_plan for this hold_side.
-    2. Cancel them.
-    3. Read current total position qty from the exchange.
-    4. Re-place both orders — at new_trail_trigger if provided, else original trigger.
+    Bitget V2 /orders-plan-pending REQUIRES a `planType` filter. TPSL umbrella values
+    are `profit_loss` (covers profit_plan/loss_plan/pos_*) and `track_plan` (trailing
+    variants like moving_plan). We query both and merge so the function works
+    regardless of which family the placed orders fall under.
     """
     import time as _t
 
-    data    = bc.get("/api/v2/mix/order/plan-orders", {"symbol": symbol, "productType": PRODUCT_TYPE, "isPlan": "plan"})
-    orders  = (data.get("data") or {}).get("entrustedList", [])
+    orders: list = []
+    for plan_type in ("profit_loss", "track_plan"):
+        try:
+            data = bc.get(
+                "/api/v2/mix/order/orders-plan-pending",
+                {"symbol": symbol, "productType": PRODUCT_TYPE, "planType": plan_type},
+            )
+            orders.extend((data.get("data") or {}).get("entrustedList") or [])
+        except Exception as e:
+            logger.warning(f"[{symbol}] refresh_plan_exits: fetch planType={plan_type} failed: {e}")
+
     targets = [o for o in orders if o.get("holdSide") == hold_side
                and o.get("planType") in ("profit_plan", "moving_plan")]
 

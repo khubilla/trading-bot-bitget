@@ -113,6 +113,15 @@ def cancel_all_orders(symbol: str):
     bb.cancel_all_orders(symbol)
 
 
+def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0) -> bool:
+    """Resize partial-TP + trailing stop after scale-in. Delegates to bybit.refresh_plan_exits."""
+    if DRY_RUN:
+        logger.info(f"[Bybit][DRY_RUN][{symbol}] refresh_plan_exits hold={hold_side} "
+                    f"trigger={new_trail_trigger}")
+        return True
+    return bb.refresh_plan_exits(symbol, hold_side, new_trail_trigger)
+
+
 # ── Strategy exit dispatchers ───────────────────────────────────── #
 #
 # Called by open_long / open_short after the entry market order fills.

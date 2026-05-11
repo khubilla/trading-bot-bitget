@@ -268,7 +268,7 @@ class TestRefreshPlanExits:
         """Existing orders are cancelled and new ones placed with updated sizes."""
         monkeypatch.setattr(trader, "_sym_info", _sym_info_stousdt)
         monkeypatch.setattr(bc, "get",
-            lambda path, params=None: self._make_plan_orders() if "plan-orders" in path else {})
+            lambda path, params=None: self._make_plan_orders() if "orders-plan-pending" in path else {})
         monkeypatch.setattr(trader, "get_all_open_positions",
             lambda: {"STOUSDT": {"side": "LONG", "qty": 314.0, "entry_price": 0.154}})
 
@@ -300,7 +300,7 @@ class TestRefreshPlanExits:
         """Total qty=315 → half=157, rest=158."""
         monkeypatch.setattr(trader, "_sym_info", _sym_info_stousdt)
         monkeypatch.setattr(bc, "get",
-            lambda path, params=None: self._make_plan_orders() if "plan-orders" in path else {})
+            lambda path, params=None: self._make_plan_orders() if "orders-plan-pending" in path else {})
         monkeypatch.setattr(trader, "get_all_open_positions",
             lambda: {"STOUSDT": {"side": "LONG", "qty": 315.0, "entry_price": 0.154}})
 
@@ -332,7 +332,7 @@ class TestRefreshPlanExits:
         """New orders must use the trigger price from the existing profit_plan."""
         monkeypatch.setattr(trader, "_sym_info", _sym_info_stousdt)
         monkeypatch.setattr(bc, "get",
-            lambda path, params=None: self._make_plan_orders() if "plan-orders" in path else {})
+            lambda path, params=None: self._make_plan_orders() if "orders-plan-pending" in path else {})
         monkeypatch.setattr(trader, "get_all_open_positions",
             lambda: {"STOUSDT": {"qty": 200.0}})
 
@@ -358,7 +358,7 @@ class TestRefreshPlanExits:
         """When new_trail_trigger is passed, placed orders must use it, not the old order's trigger."""
         monkeypatch.setattr(trader, "_sym_info", _sym_info_stousdt)
         monkeypatch.setattr(bc, "get",
-            lambda path, params=None: self._make_plan_orders() if "plan-orders" in path else {})
+            lambda path, params=None: self._make_plan_orders() if "orders-plan-pending" in path else {})
         monkeypatch.setattr(trader, "get_all_open_positions",
             lambda: {"STOUSDT": {"qty": 200.0}})
 
@@ -386,7 +386,7 @@ class TestRefreshPlanExits:
         """new_trail_trigger=0 (default) must fall back to the existing profit_plan trigger."""
         monkeypatch.setattr(trader, "_sym_info", _sym_info_stousdt)
         monkeypatch.setattr(bc, "get",
-            lambda path, params=None: self._make_plan_orders() if "plan-orders" in path else {})
+            lambda path, params=None: self._make_plan_orders() if "orders-plan-pending" in path else {})
         monkeypatch.setattr(trader, "get_all_open_positions",
             lambda: {"STOUSDT": {"qty": 200.0}})
 

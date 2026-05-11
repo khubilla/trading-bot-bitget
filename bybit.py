@@ -383,22 +383,25 @@ def place_profit_plan(symbol: str, hold_side: str, qty_str: str,
 def place_moving_plan(symbol: str, hold_side: str, qty_str: str,
                       trigger: float, range_rate: str) -> None:
     """
-    Trailing stop on a position. Bybit V5 supports it via
-    /v5/position/trading-stop with `trailingStop` + `activePrice`.
+    Trailing stop on a position via /v5/position/trading-stop.
 
-    range_rate is the trailing distance — Bybit takes it as a price-distance
-    (e.g. "10" = $10 trailing). The Bitget-style percentage range_rate (e.g.
-    "0.1" meaning 10%) is converted to absolute price distance using trigger.
+    Bybit's trailing stop is position-level — `qty_str` is accepted for signature
+    compatibility with bitget.place_moving_plan but is not used. After a partial
+    TP fires the position shrinks naturally; the trailing stop continues to apply
+    to the whole remaining position. This matches the Bitget endpoint's effective
+    behaviour (close the rest at trail).
+
+    range_rate: accepts either a Bitget-style percentage (< 1, e.g. "0.10" = 10%)
+    or an absolute price distance (≥ 1). Bybit's API expects absolute price.
     """
     try:
         pct = float(range_rate)
     except (ValueError, TypeError):
-        pct = 0.1
-    # If range_rate looks like a percentage (< 1), convert to absolute distance.
+        pct = 0.10
     if pct < 1:
         trailing_distance = trigger * pct
     else:
-        trailing_distance = pct  # already absolute
+        trailing_distance = pct
 
     bc.post("/v5/position/trading-stop", {
         "category":      CATEGORY,
@@ -406,8 +409,119 @@ def place_moving_plan(symbol: str, hold_side: str, qty_str: str,
         "positionIdx":   0,
         "trailingStop":  round_price(trailing_distance, symbol),
         "activePrice":   round_price(trigger, symbol),
-        "tpslMode":      "Partial",
+        "tpslMode":      "Full",
     })
+
+
+def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0) -> bool:
+    """
+    Resize partial-TP conditional + trailing stop after a scale-in.
+
+    Mirrors bitget.refresh_plan_exits semantics adapted to Bybit V5:
+      - Partial TP is a *conditional reduce-only market order* (placed by
+        bybit.place_profit_plan). We cancel and re-place with new total/2 qty.
+      - Trailing stop is a *position-level* setting (placed by
+        bybit.place_moving_plan). Calling /v5/position/trading-stop with new
+        params replaces the previous trailing stop atomically — no cancel needed.
+
+    Args:
+        new_trail_trigger: if > 0, used as the new partial-TP trigger AND
+            trailing-stop activePrice. If 0, the previous order's triggerPrice
+            is preserved.
+
+    Returns True on success. Logs and returns False if no existing partial-TP
+    conditional is found (cannot infer prior trigger / range), or if all 3
+    re-placement attempts fail.
+    """
+    side_to_reduce = "Sell" if hold_side == "long" else "Buy"
+
+    try:
+        resp = bc.get(
+            "/v5/order/realtime",
+            params={"category": CATEGORY, "symbol": symbol, "openOnly": "0"},
+        )
+        orders = (resp.get("result") or {}).get("list") or []
+    except Exception as e:
+        logger.warning(f"[Bybit][{symbol}] refresh_plan_exits: fetch open orders failed: {e}")
+        return False
+
+    # Find conditional reduce-only market orders matching the close side of this position.
+    targets = []
+    for o in orders:
+        if not o.get("reduceOnly"):
+            continue
+        if o.get("side") != side_to_reduce:
+            continue
+        # Conditional orders have a non-zero triggerPrice
+        try:
+            if float(o.get("triggerPrice") or 0) <= 0:
+                continue
+        except (ValueError, TypeError):
+            continue
+        targets.append(o)
+
+    if not targets:
+        logger.warning(
+            f"[Bybit][{symbol}] refresh_plan_exits: no conditional reduce-only "
+            f"orders found — exits unchanged"
+        )
+        return False
+
+    # Preserve trigger from the existing order if caller didn't supply one.
+    if new_trail_trigger > 0:
+        trigger = new_trail_trigger
+    else:
+        try:
+            trigger = float(targets[0].get("triggerPrice") or 0)
+        except (ValueError, TypeError):
+            trigger = 0.0
+    if trigger <= 0:
+        logger.error(f"[Bybit][{symbol}] refresh_plan_exits: no valid trigger price available")
+        return False
+
+    # Cancel existing conditional(s)
+    for o in targets:
+        try:
+            bc.post("/v5/order/cancel", {
+                "category": CATEGORY,
+                "symbol":   symbol,
+                "orderId":  o["orderId"],
+            })
+            _time.sleep(0.3)
+        except Exception as e:
+            logger.warning(f"[Bybit][{symbol}] cancel conditional {o.get('orderId')}: {e}")
+
+    _time.sleep(0.5)
+
+    # Read new total qty after scale-in
+    positions = get_all_open_positions()
+    total_qty_float = float((positions.get(symbol) or {}).get("qty", 0))
+    if total_qty_float <= 0:
+        logger.error(f"[Bybit][{symbol}] refresh_plan_exits: position not found after scale-in")
+        return False
+
+    half_qty = round_qty(total_qty_float / 2, symbol)
+    rest_qty_str = round_qty(total_qty_float - float(half_qty), symbol)
+
+    # Re-place: partial TP conditional + position-level trailing stop.
+    # Trailing range default 10% (Bitget convention); preserved across refreshes.
+    range_rate = "0.10"
+
+    for attempt in range(3):
+        try:
+            place_profit_plan(symbol, hold_side, half_qty, trigger)
+            _time.sleep(0.5)
+            place_moving_plan(symbol, hold_side, rest_qty_str, trigger, range_rate)
+            logger.info(
+                f"[Bybit][{symbol}] ✅ Plan exits refreshed after scale-in: "
+                f"partial_tp={half_qty}@{trigger}, trailing_stop active@{trigger}"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"[Bybit][{symbol}] refresh_plan_exits attempt {attempt+1}/3: {e}")
+            if attempt < 2:
+                _time.sleep(1.5)
+    return False
 
 
 def update_position_sl(symbol: str, new_sl: float, hold_side: str = "long") -> bool:

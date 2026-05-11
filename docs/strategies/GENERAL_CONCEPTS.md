@@ -216,7 +216,7 @@ The bot allows a maximum of `config.MAX_CONCURRENT_TRADES` open positions simult
 
 ---
 
-## 11. Scale-In Rules (S2, S4, and S6)
+## 11. Scale-In Rules (S2, S4, S6, and S7)
 
 - After an initial entry at 50% of the target trade size, the bot queues a **scale-in** 1 hour later.
 - Scale-in requires **two conditions** to both be true. If either fails, the scale-in is skipped and retried on the next tick:

@@ -424,9 +424,23 @@ def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0
 
     new_trail_trigger: if > 0, re-place with this trigger; else preserve the
     existing profit_plan trigger.
+
+    Note: Bitget V2 /orders-plan-pending REQUIRES the `planType` filter param.
+    TPSL umbrella values are `profit_loss` (covers profit_plan/loss_plan/pos_*)
+    and `track_plan` (covers moving_plan / trailing variants). We query both
+    and merge so the function works regardless of which family the orders fall
+    under.
     """
-    data    = bc.get("/api/v2/mix/order/orders-plan-pending", {"symbol": symbol, "productType": PRODUCT_TYPE})
-    orders  = (data.get("data") or {}).get("entrustedList", [])
+    orders: list = []
+    for plan_type in ("profit_loss", "track_plan"):
+        try:
+            data = bc.get(
+                "/api/v2/mix/order/orders-plan-pending",
+                {"symbol": symbol, "productType": PRODUCT_TYPE, "planType": plan_type},
+            )
+            orders.extend((data.get("data") or {}).get("entrustedList") or [])
+        except Exception as e:
+            logger.warning(f"[{symbol}] refresh_plan_exits: fetch planType={plan_type} failed: {e}")
     targets = [o for o in orders if o.get("holdSide") == hold_side
                and o.get("planType") in ("profit_plan", "moving_plan")]
 

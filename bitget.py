@@ -441,7 +441,11 @@ def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0
             orders.extend((data.get("data") or {}).get("entrustedList") or [])
         except Exception as e:
             logger.warning(f"[{symbol}] refresh_plan_exits: fetch planType={plan_type} failed: {e}")
-    targets = [o for o in orders if o.get("holdSide") == hold_side
+    # Bitget V2 inconsistency: place-tpsl-order accepts the body field `holdSide`,
+    # but the orders-plan-pending response returns the side under `posSide`.
+    # Similarly, the response uses `callbackRatio` for the trail range while
+    # placement uses `rangeRate`. Both must be read from the response shape.
+    targets = [o for o in orders if o.get("posSide") == hold_side
                and o.get("planType") in ("profit_plan", "moving_plan")]
 
     profit = next((o for o in targets if o["planType"] == "profit_plan"), None)
@@ -452,7 +456,7 @@ def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0
         return False
 
     trail_trigger = new_trail_trigger if new_trail_trigger > 0 else float(profit["triggerPrice"])
-    trail_range   = str(moving.get("rangeRate", "10"))
+    trail_range   = str(moving.get("callbackRatio", "10"))
 
     for o in [profit, moving]:
         try:

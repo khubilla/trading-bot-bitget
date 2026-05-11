@@ -435,19 +435,30 @@ def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0
     """
     side_to_reduce = "Sell" if hold_side == "long" else "Buy"
 
-    try:
-        resp = bc.get(
-            "/v5/order/realtime",
-            params={"category": CATEGORY, "symbol": symbol, "openOnly": "0"},
-        )
-        orders = (resp.get("result") or {}).get("list") or []
-    except Exception as e:
-        logger.warning(f"[Bybit][{symbol}] refresh_plan_exits: fetch open orders failed: {e}")
-        return False
+    # Bybit V5: untriggered conditional orders require orderFilter=StopOrder.
+    # The default filter ("Order") returns only regular (non-conditional) orders,
+    # so our partial-TP conditional would otherwise be invisible.
+    orders: list = []
+    for order_filter in ("StopOrder", "Order"):
+        try:
+            resp = bc.get(
+                "/v5/order/realtime",
+                params={"category": CATEGORY, "symbol": symbol,
+                        "orderFilter": order_filter, "openOnly": "0"},
+            )
+            orders.extend((resp.get("result") or {}).get("list") or [])
+        except Exception as e:
+            logger.warning(
+                f"[Bybit][{symbol}] refresh_plan_exits: fetch orderFilter={order_filter} failed: {e}"
+            )
 
     # Find conditional reduce-only market orders matching the close side of this position.
     targets = []
+    seen_order_ids: set[str] = set()
     for o in orders:
+        oid = str(o.get("orderId") or "")
+        if oid in seen_order_ids:
+            continue   # dedupe in case both orderFilter queries returned the same order
         if not o.get("reduceOnly"):
             continue
         if o.get("side") != side_to_reduce:
@@ -458,6 +469,7 @@ def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0
                 continue
         except (ValueError, TypeError):
             continue
+        seen_order_ids.add(oid)
         targets.append(o)
 
     if not targets:

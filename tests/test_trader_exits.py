@@ -253,13 +253,16 @@ class TestOpenLongS3Exits:
 class TestRefreshPlanExits:
 
     def _make_plan_orders(self):
+        # Real Bitget V2 response shape (verified against /orders-plan-pending on live order):
+        # the response uses `posSide` (not `holdSide`) and `callbackRatio` (not `rangeRate`).
+        # Placement bodies still use holdSide/rangeRate — only the response shape differs.
         return {
             "data": {
                 "entrustedList": [
                     {"orderId": "PP1", "planType": "profit_plan",
-                     "holdSide": "long", "triggerPrice": "0.17", "size": "104"},
+                     "posSide": "long", "triggerPrice": "0.17", "size": "104"},
                     {"orderId": "MP1", "planType": "moving_plan",
-                     "holdSide": "long", "triggerPrice": "0.17", "rangeRate": "10", "size": "105"},
+                     "posSide": "long", "triggerPrice": "0.17", "callbackRatio": "10", "size": "105"},
                 ]
             }
         }

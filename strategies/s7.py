@@ -1,10 +1,11 @@
 """
-Strategy 7 — Post-Pump 1H Darvas Range (bidirectional).
+Strategy 7 — Post-Pump 1H Consolidation Breakout/Breakdown (bidirectional).
 
 Daily setup gates (same for both directions): spike body ≥ 20% within last 30D,
-RSI peak ≥ 75 within last 10D, RSI still hot ≥ 70. The 1H Darvas detector
-locks a top + low box from candles since UTC midnight; the same locked box
-yields two triggers, picked by sentiment:
+RSI peak ≥ 75 within last 10D, RSI still hot ≥ 70. Once the daily setup is in
+place we switch to 1H: the consolidation box is just max(high) / min(low) over
+today's closed 1H candles, *excluding* the latest closed candle (which is
+reserved as the breakout/breakdown test). Sentiment routes the side:
 
   • SHORT (BEARISH): confirmed 1H close below box_low × (1 − S7_ENTRY_BUFFER)
   • LONG  (BULLISH): confirmed 1H close above box_top × (1 + S7_ENTRY_BUFFER)
@@ -44,60 +45,31 @@ def today_h1_slice(h1_df: pd.DataFrame) -> pd.DataFrame:
     return h1_df[mask].iloc[:-1]
 
 
-def detect_darvas_box(
+def detect_consolidation_box(
     h1_slice: pd.DataFrame,
-    confirm: int = 2,
-) -> tuple[bool, float, float, int, int, str]:
+    min_candles: int = 4,
+) -> tuple[bool, float, float, str]:
     """
-    Walk the 1H slice forward and lock a top-box high then a low-box low using
-    classic Darvas mechanics: each new lower-low / higher-high resets the
-    confirmation counter; the box locks once `confirm` consecutive candles
-    hold above/below the establishing candle.
+    Compute the 1H consolidation range from `h1_slice`. The latest closed
+    candle in the slice is reserved as the breakout/breakdown test candle and
+    is excluded from the box; the box spans the *earlier* closed candles.
 
-    Returns (locked, top_high, low_low, top_idx, low_idx, reason).
+    Requires ≥ `min_candles + 1` rows so the establishing window has at least
+    `min_candles` candles before the test candle.
+
+    Returns (locked, box_top, box_low, reason).
     """
-    min_needed = 2 * confirm + 2
-    if len(h1_slice) < min_needed:
-        return (False, 0.0, 0.0, -1, -1,
-                f"Need ≥ {min_needed} 1H candles since UTC midnight (have {len(h1_slice)})")
-
-    rows = list(h1_slice.itertuples())
-
-    # --- top-box pass ---
-    top_high, top_idx, conf, top_locked = float("-inf"), -1, 0, False
-    for i, row in enumerate(rows):
-        if row.high > top_high:
-            top_high, top_idx, conf = float(row.high), i, 0
-        else:
-            conf += 1
-            if conf >= confirm:
-                top_locked = True
-                break
-    if not top_locked:
-        return (False, top_high, 0.0, top_idx, -1,
-                "Top box not yet confirmed (running high still pushing)")
-
-    # --- low-box pass over rows after top_idx ---
-    low_low, low_off, conf, low_locked = float("+inf"), -1, 0, False
-    for j, row in enumerate(rows[top_idx + 1:]):
-        if row.low < low_low:
-            low_low, low_off, conf = float(row.low), j, 0
-        else:
-            conf += 1
-            if conf >= confirm:
-                low_locked = True
-                break
-    if not low_locked:
-        return (False, top_high, low_low, top_idx, -1,
-                "Low box not yet confirmed (running low still falling)")
-
-    if low_low >= top_high:
-        return (False, top_high, low_low, top_idx, top_idx + 1 + low_off,
-                f"Sanity: low_low {low_low} >= top_high {top_high}")
-
-    low_idx = top_idx + 1 + low_off
-    return (True, top_high, low_low, top_idx, low_idx,
-            f"Darvas box ✅ top={top_high} low={low_low}")
+    if len(h1_slice) < min_candles + 1:
+        return (False, 0.0, 0.0,
+                f"Need ≥ {min_candles + 1} closed 1H candles since UTC midnight "
+                f"(have {len(h1_slice)})")
+    est = h1_slice.iloc[:-1]
+    box_top = float(est["high"].max())
+    box_low = float(est["low"].min())
+    if box_low >= box_top:
+        return False, box_top, box_low, f"Sanity: low {box_low} >= top {box_top}"
+    return (True, box_top, box_low,
+            f"Box ✅ top={box_top} low={box_low} from {len(est)} candles")
 
 
 def evaluate_s7(
@@ -121,7 +93,7 @@ def evaluate_s7(
     from config_s7 import (
         S7_ENABLED, S7_BIG_CANDLE_BODY_PCT, S7_BIG_CANDLE_LOOKBACK,
         S7_RSI_PEAK_THRESH, S7_RSI_PEAK_LOOKBACK, S7_RSI_DIV_MIN_DROP,
-        S7_RSI_STILL_HOT_THRESH, S7_BOX_CONFIRM_COUNT,
+        S7_RSI_STILL_HOT_THRESH,
     )
 
     if not S7_ENABLED:
@@ -187,21 +159,21 @@ def evaluate_s7(
             f"S7 daily ✅ spike={best_body*100:.0f}% | RSI peak={rsi_peak:.1f}{div_note} | 1H Darvas ❌ no H1 data"
         )
     today_slice = today_h1_slice(h1_df)
-    locked, box_top, box_low, _, _, det_reason = detect_darvas_box(today_slice, confirm=S7_BOX_CONFIRM_COUNT)
+    locked, box_top, box_low, det_reason = detect_consolidation_box(today_slice)
     if not locked:
         return "HOLD", daily_rsi, 0.0, 0.0, best_body, rsi_peak, rsi_div, rsi_div_str, (
-            f"S7 daily ✅ spike={best_body*100:.0f}% | RSI peak={rsi_peak:.1f}{div_note} | 1H Darvas ❌ {det_reason}"
+            f"S7 daily ✅ spike={best_body*100:.0f}% | RSI peak={rsi_peak:.1f}{div_note} | 1H box ❌ {det_reason}"
         )
 
     sig: Signal = "LONG" if allowed_direction == "BULLISH" else "SHORT"
     logger.info(
         f"[S7][{symbol}] ✅ {sig} setup | spike={best_body*100:.0f}% | "
         f"RSI peak={rsi_peak:.1f} now={daily_rsi:.1f}{div_note} | "
-        f"Darvas top={box_top:.5f} low={box_low:.5f}"
+        f"1H box top={box_top:.5f} low={box_low:.5f}"
     )
     return sig, daily_rsi, box_top, box_low, best_body, rsi_peak, rsi_div, rsi_div_str, (
         f"S7 ✅ spike={best_body*100:.0f}% | RSI peak={rsi_peak:.1f}{div_note} | "
-        f"Darvas top={box_top:.5f} low={box_low:.5f}"
+        f"1H box top={box_top:.5f} low={box_low:.5f}"
     )
 
 
@@ -455,19 +427,19 @@ def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
         st.save_pending_signals(bot.pending_signals)
         return None
 
-    # Re-run Darvas detector on fresh 1H candles
+    # Re-compute the 1H consolidation box on fresh candles. The detector
+    # excludes the latest closed 1H — that candle is the breakout/breakdown
+    # test below.
     try:
         h1_df = tr.get_candles(symbol, "1H", limit=48)
     except Exception:
         return None
     today_slice = today_h1_slice(h1_df)
-    locked, box_top, box_low, _, _, _ = detect_darvas_box(
-        today_slice, confirm=config_s7.S7_BOX_CONFIRM_COUNT
-    )
+    locked, box_top, box_low, _ = detect_consolidation_box(today_slice)
     if not locked:
         return None  # still pending; do not cancel
 
-    # Update pending fields if box has expanded (wick-and-reclaim)
+    # Refresh pending box levels + trigger as the establish window grows.
     if box_low != sig["box_low"] or box_top != sig.get("box_top"):
         sig["box_low"] = box_low
         sig["box_top"] = box_top
@@ -498,25 +470,25 @@ def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
             st.save_pending_signals(bot.pending_signals)
             return None
 
-    # Confirmed-close trigger: latest CLOSED 1H must close beyond the box edge
-    if len(h1_df) < 2:
+    # Confirmed-close trigger: latest CLOSED 1H must close beyond the buffered
+    # box edge. today_slice already excludes the forming hour, so its last row
+    # is that test candle.
+    if len(today_slice) < 1:
         return None
-    last_closed_close = float(h1_df.iloc[-2]["close"])
-    if side == "LONG":
-        if last_closed_close <= box_top:
-            return None
-    else:
-        if last_closed_close >= box_low:
-            return None
-
-    # Stale-entry guard — must still be inside the entry window
+    test_close = float(today_slice.iloc[-1]["close"])
     s7_trigger = sig["trigger"]
     if side == "LONG":
-        in_window = (mark >= s7_trigger and
-                     mark <= box_top * (1 + config_s7.S7_MAX_ENTRY_BUFFER))
+        if test_close <= s7_trigger:
+            return None
     else:
-        in_window = (mark <= s7_trigger and
-                     mark >= box_low * (1 - config_s7.S7_MAX_ENTRY_BUFFER))
+        if test_close >= s7_trigger:
+            return None
+
+    # Stale-entry guard — don't chase if mark has run past the entry window.
+    if side == "LONG":
+        in_window = mark <= box_top * (1 + config_s7.S7_MAX_ENTRY_BUFFER)
+    else:
+        in_window = mark >= box_low * (1 - config_s7.S7_MAX_ENTRY_BUFFER)
     if not in_window:
         return None  # don't chase
 

@@ -1,4 +1,4 @@
-"""Unit tests for evaluate_s7() daily-gate + Darvas composition (bidirectional)."""
+"""Unit tests for evaluate_s7() daily-gate + 1H consolidation box composition (bidirectional)."""
 import pandas as pd
 import pytest
 
@@ -30,7 +30,7 @@ def _daily_with_spike(rsi_peak_value=80.0, post_peak_decay=0.0, body_pct=0.30, n
 
 
 def _h1_with_locked_box():
-    """A 1H slice that produces a locked Darvas box (matches detector canonical example)."""
+    """A 1H slice with ≥5 candles so detect_consolidation_box locks a box."""
     base = pd.Timestamp("2026-04-28 00:00", tz="UTC")
     highs = [98, 99, 96, 95, 92, 91, 88, 87, 86, 85]
     lows  = [95, 94, 93, 90, 88, 87, 85, 84, 84, 85]

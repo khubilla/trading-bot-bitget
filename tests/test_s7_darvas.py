@@ -1,8 +1,7 @@
-"""Unit tests for S7 1H Darvas-box detector and helpers."""
+"""Unit tests for the S7 1H consolidation-box detector and slice helper."""
 import pandas as pd
-import pytest
 
-from strategies.s7 import today_h1_slice, detect_darvas_box
+from strategies.s7 import today_h1_slice, detect_consolidation_box
 
 
 def _make_h1_df(rows):
@@ -24,11 +23,11 @@ def _walk_h1(highs, lows, start="2026-04-28 00:00"):
 
 def test_today_h1_slice_drops_yesterday_and_forming_hour(monkeypatch):
     df = _make_h1_df([
-        ("2026-04-27 22:00", 100, 95),  # yesterday — drop
-        ("2026-04-27 23:00", 99,  94),  # yesterday — drop
-        ("2026-04-28 00:00", 98,  94),  # today closed
-        ("2026-04-28 01:00", 99,  93),  # today closed
-        ("2026-04-28 02:00", 96,  93),  # today, currently forming — drop
+        ("2026-04-27 22:00", 100, 95),
+        ("2026-04-27 23:00", 99,  94),
+        ("2026-04-28 00:00", 98,  94),
+        ("2026-04-28 01:00", 99,  93),
+        ("2026-04-28 02:00", 96,  93),
     ])
     monkeypatch.setattr(
         "strategies.s7._utcnow",
@@ -71,49 +70,60 @@ def test_today_h1_slice_handles_production_shape(monkeypatch):
 
 
 def test_detector_returns_false_when_too_few_candles():
-    df = _walk_h1([99, 98, 97, 96], [95, 94, 93, 92])  # 4 < 6
-    locked, top, low, ti, li, reason = detect_darvas_box(df, confirm=2)
+    """Requires ≥ min_candles + 1 rows so the establishing set has ≥ min_candles."""
+    df = _walk_h1([99, 98, 97, 96], [95, 94, 93, 92])  # 4 rows, default min=4 needs 5
+    locked, top, low, reason = detect_consolidation_box(df)
     assert locked is False
-    assert "Need" in reason or "candles" in reason.lower()
+    assert "Need" in reason
 
 
-def test_detector_locks_top_then_low_on_canonical_example():
-    # Example from spec §5.3: top locks at 99 (idx 1), low locks at 84 (idx 7)
-    highs = [98, 99, 96, 95, 92, 91, 88, 87, 86, 85]
-    lows  = [95, 94, 93, 90, 88, 87, 85, 84, 84, 85]
+def test_detector_box_excludes_latest_candle():
+    """The last row is the breakout test, not part of the box."""
+    # Establish window (first 4 rows): high∈[100,99,98,97], low∈[95,94,93,92]
+    # Test candle (last row): high=120, low=110 — must NOT contribute to the box
+    highs = [100, 99, 98, 97, 120]
+    lows  = [ 95, 94, 93, 92, 110]
     df = _walk_h1(highs, lows)
-    locked, top, low, ti, li, reason = detect_darvas_box(df, confirm=2)
+    locked, top, low, _ = detect_consolidation_box(df)
     assert locked is True
-    assert top == 99
-    assert low == 84
-    assert ti == 1
-    assert li == 7
+    assert top == 100  # max of first 4, not 120
+    assert low == 92   # min of first 4, not 110
 
 
-def test_detector_top_not_locked_when_high_keeps_pushing():
-    # Highs keep making new highs — top never confirms
-    highs = [90, 91, 92, 93, 94, 95, 96, 97]
-    lows  = [85, 86, 87, 88, 89, 90, 91, 92]
+def test_detector_picks_extremes_across_full_establish_window():
+    """Box top/low span the entire establish window (no walking/freezing)."""
+    # Establish window has highs reaching 110 (a later push), unlike the broken
+    # walking-Darvas algo which would have frozen at 100.
+    highs = [100, 98, 99, 110, 105, 107, 108]  # establish = first 6 → max=110
+    lows  = [ 95, 94, 93,  98,  96,  95,  94]  # test = last row, ignored
     df = _walk_h1(highs, lows)
-    locked, top, low, ti, li, reason = detect_darvas_box(df, confirm=2)
-    assert locked is False
-    assert "Top box not yet confirmed" in reason
+    locked, top, low, _ = detect_consolidation_box(df)
+    assert locked is True
+    assert top == 110
+    assert low == 93
 
 
-def test_detector_low_not_locked_when_low_keeps_falling():
-    # Top locks early, but lows keep falling after — low never confirms
-    highs = [99, 98, 97, 96, 95, 94, 93, 92]
-    lows  = [95, 94, 93, 92, 91, 90, 89, 88]
-    df = _walk_h1(highs, lows)
-    locked, top, low, ti, li, reason = detect_darvas_box(df, confirm=2)
-    assert locked is False
-    assert "Low box not yet confirmed" in reason
-
-
-def test_detector_rejects_inverted_structure():
-    # Low ends up >= top (degenerate) — sanity rejection
+def test_detector_min_candles_param():
+    """Custom min_candles changes the required row count."""
+    # 6 rows total → with min_candles=5, establish = first 5, need ≥6 rows ✓
     highs = [100, 99, 98, 97, 96, 95]
-    lows  = [99, 98, 97, 96, 95, 95]
+    lows  = [ 90, 91, 92, 93, 94, 92]
     df = _walk_h1(highs, lows)
-    locked, top, low, *_ = detect_darvas_box(df, confirm=2)
+    locked, top, low, _ = detect_consolidation_box(df, min_candles=5)
+    assert locked is True
+    assert top == 100
+    assert low == 90  # min of first 5
+
+    # min_candles=6 needs 7 rows; only 6 available → fail
+    locked2, *_ = detect_consolidation_box(df, min_candles=6)
+    assert locked2 is False
+
+
+def test_detector_rejects_inverted_box():
+    """Sanity rejection if establish window is degenerate (low >= top)."""
+    # All same prices — high == low across rows
+    highs = [100, 100, 100, 100, 100]
+    lows  = [100, 100, 100, 100, 100]
+    df = _walk_h1(highs, lows)
+    locked, *_ = detect_consolidation_box(df)
     assert locked is False

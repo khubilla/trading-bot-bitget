@@ -484,12 +484,12 @@ def test_queue_s7_pending_stores_payload(monkeypatch):
 
 
 def test_execute_best_candidate_queues_s7(monkeypatch):
-    """S7 SHORT candidate executes immediately (not queued)."""
+    """S7 SHORT candidate is routed through the pending watcher (queue, not fire)."""
     b = _make_full_bot(monkeypatch)
     b.sentiment = type("S", (), {"direction": "BEARISH"})()
-    executed = []
-    monkeypatch.setattr(b, "_execute_s7", lambda c, bal: executed.append(c["symbol"]) or True)
+    queued = []
+    monkeypatch.setattr(b, "_queue_s7_pending",
+                        lambda c: queued.append(c["symbol"]))
     b.candidates = [dict(_make_s7_candidate(), sig="SHORT")]
     b._execute_best_candidate("BEARISH", 1000.0)
-    assert "SOLUSDT" in executed
-    assert "SOLUSDT" not in b.pending_signals  # Should NOT be queued
+    assert "SOLUSDT" in queued

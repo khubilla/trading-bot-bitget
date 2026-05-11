@@ -19,12 +19,6 @@ S7_RSI_PEAK_LOOKBACK    = 10
 S7_RSI_STILL_HOT_THRESH = 70    # prev-day RSI must remain ≥ 70 (no fade yet)
 S7_RSI_DIV_MIN_DROP     = 5     # informational divergence threshold
 
-# ── 1H Darvas Box Detection (NEW) ───────────────────────────── #
-S7_BOX_CONFIRM_COUNT    = 2     # candles required to "hold" above/below the
-                                # establishing candle before the box locks
-                                # → 1 establishing + 2 confirming = 3 candles per box
-                                # → minimum total ≈ 6 candles since UTC midnight
-
 # ── Entry Trigger ───────────────────────────────────────────── #
 S7_ENTRY_BUFFER     = 0.005     # entry trigger = box_low × (1 − 0.5%)
 S7_MAX_ENTRY_BUFFER = 0.04      # skip if mark already > 4% past trigger

@@ -1,6 +1,6 @@
 # Codebase Dependency Map
 
-**Last updated:** 2026-04-16
+**Last updated:** 2026-05-11
 **Update frequency:** After every PR that changes interfaces, data contracts, or cross-file dependencies
 
 ---
@@ -23,7 +23,7 @@
 
 ## 1. Architecture Overview
 
-### Two Independent Bots
+### Three Independent Bots
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -52,6 +52,14 @@
 │  Instruments: US30 (IX.D.DOW) + GOLD (CS.D.CFDGOLD)       │
 │  Each tick: loops over INSTRUMENTS, one position per epic   │
 │  Output: ig_state.json, ig_trades.csv                      │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│                  BYBIT BOT (bybit_bot.py)                   │
+│  Crypto USDT-perp · S1-S7 strategies                       │
+│  Thin entry point: installs sys.modules aliases then        │
+│  delegates to bot.MTFBot().run() — no logic duplication.    │
+│  Output: bybit_state.json, bybit_trades.csv, bybit_bot.log │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -103,15 +111,17 @@ The old monolithic `strategy.py` has been split into:
 - `tools.py` — generic structure/pattern helpers (swing targets, order blocks, FVG, support/resistance, HTF check, candle geometry `body_pct`/`upper_wick`/`body_size`). No config deps.
 - `strategies/s1.py`..`strategies/s7.py` — one file per strategy. Each file owns its entry/exit rules and imports only from `indicators.py`, `tools.py`, and its own `config_sN.py`. Strategies do NOT import from each other. (Exception: `strategies/s7.py` imports `_place_partial_trail_exits` from `strategies/s4.py` to reuse the shared exit primitive.)
 
-**Shared by both Bitget and IG:**
+**Shared by all three bots (Bitget, IG, Bybit):**
 - `indicators.py`, `tools.py`, `strategies/s5.py`
 
-**Bitget only:**
-- `strategies/s1.py`, `s2.py`, `s3.py`, `s4.py`, `s6.py`
+**Shared by Bitget AND Bybit (via sys.modules aliasing — see § 10.5):**
+- `strategies/s1.py`, `s2.py`, `s3.py`, `s4.py`, `s6.py`, `s7.py`
+- `bot.py` — Bybit reuses the entire main loop; `bybit_bot.py` is a thin entry point that aliases `bitget → bybit`, `trader → bybit_trader`, `scanner → bybit_scanner`, `config_sN → config_bybit_sN`, `config → config_bybit` before importing `bot`.
 
 **Used by:**
-- `bot.py` (Bitget bot) — imports evaluate_s1..evaluate_s6 from respective strategy modules
+- `bot.py` (Bitget bot, also reused by Bybit via aliasing) — imports evaluate_s1..evaluate_s7 from respective strategy modules
 - `ig_bot.py` (IG bot) — imports evaluate_s5 from `strategies.s5`
+- `bybit_bot.py` (Bybit bot) — installs sys.modules aliases then runs `bot.MTFBot().run()`
 - `backtest.py` — imports indicators + `strategies.s1.detect_consolidation`
 - `backtest_ig.py` — imports evaluate_s5 from `strategies.s5`
 - `startup_recovery.py` — imports evaluate_s5 from `strategies.s5`
@@ -1029,6 +1039,28 @@ After scale-in, resizes `profit_plan` and `moving_plan` orders to the current to
 
 ---
 
+### 6.2 bybit.py / bybit_trader.py / bybit_client.py — Bybit V5 API Wrapper
+
+**Purpose:** Parallel implementation of the Bitget stack (`bitget_client.py` + `bitget.py` + `trader.py`) for Bybit USDT-perp futures. Same public surface as the Bitget stack so that strategy code reusing names like `import bitget as bg` / `import trader` resolves correctly under sys.modules aliasing.
+
+**Files:**
+- `bybit_client.py` — HMAC-SHA256 auth + HTTP primitives (`get`, `post`, `get_public`). Bybit V5 signing string: `timestamp + api_key + recv_window + payload` (hex digest, NOT base64). Headers: `X-BAPI-*`. Mirror of `bitget_client.py`.
+- `bybit.py` — Endpoint-level wrappers. Same function names as `bitget.py`: `place_pos_tpsl_full`, `place_pos_sl_only`, `place_profit_plan`, `place_moving_plan`, `place_market_order`, `place_plan_order`, `update_position_sl`, `cancel_plan_order`, `cancel_all_orders`, `get_candles`, `fetch_candles_at`, `get_mark_price`, `get_usdt_balance`, `get_total_equity`, `get_all_open_positions`, `get_single_position_entry`, `set_leverage`, `sym_info`, `round_price`, `round_qty`, `get_history_position`, `get_realized_pnl`, `get_order_fill`. Endpoints: `/v5/market/*`, `/v5/order/*`, `/v5/position/*`, `/v5/account/*`.
+- `bybit_trader.py` — High-level trader (`open_long`, `open_short`, `scale_in_long`, `scale_in_short`, `place_limit_long`, `place_limit_short`, `cancel_order`, `get_order_fill`, `update_position_sl`). Same public surface as `trader.py`. Honours `config_bybit.DRY_RUN` — when True, all order-placement calls log the intended action and return a simulated fill instead of hitting `/v5/order/create`.
+- `bybit_scanner.py` — Parallel of `scanner.py`. Endpoint: `GET /v5/market/tickers?category=linear`. Field names differ (`turnover24h`, `price24hPcnt`, `bid1Size`/`ask1Size` instead of Bitget's `quoteVolume`/`change24h`/`bidSz`).
+
+**Symbol format:** Same as Bitget (`BTCUSDT`, no slash, no colon). No normalization needed.
+
+**Candle interval mapping:** Bybit uses minute integers + `D`/`W` (e.g. `60` for 1H, `240` for 4H, `D` for daily); the Bitget format (`1H`, `4H`, `1D`) is mapped at the top of `bybit.py` via `_INTERVAL_MAP`.
+
+**One-way mode only:** All position/order calls pass `positionIdx=0`. Hedge mode is not supported.
+
+**Imported by:** None directly. `bybit_bot.py` installs sys.modules aliases (`bitget` → `bybit`, `trader` → `bybit_trader`, `scanner` → `bybit_scanner`) so when strategies do `import bitget as bg` or `import trader` they transparently get the Bybit equivalents. See § 10.5 (sys.modules aliasing).
+
+**Breaking change:** Any signature drift between `bybit.py` and `bitget.py` (or `bybit_trader.py` and `trader.py`) breaks the alias swap. Update them in lockstep.
+
+---
+
 ## 7. Strategy Implementations
 
 Each strategy lives in `strategies/sN.py` and owns:
@@ -1459,6 +1491,67 @@ head -20 trades_paper.csv | grep "action" | cut -d, -f1-3
 head -20 ig_trades.csv | grep "S5_" | cut -d, -f1-3
 # Expected: S5_LONG, S5_SHORT, S5_PARTIAL, S5_CLOSE, etc.
 ```
+
+---
+
+### 10.5 sys.modules Aliasing for the Bybit Bot
+
+**The pattern.** `bybit_bot.py` is intentionally short — it does NOT clone `bot.py`. At startup, before any other module is imported, it installs aliases in `sys.modules` so that when `bot.py` runs, every exchange-coupled lookup transparently targets Bybit:
+
+```python
+# bybit_bot.py — top of file
+import sys, config_bybit, config_bybit_s1, ..., config_bybit_s7
+import bybit, bybit_trader, bybit_scanner
+
+sys.modules["config"]    = config_bybit
+sys.modules["config_s1"] = config_bybit_s1   # … through s7
+sys.modules["bitget"]    = bybit
+sys.modules["trader"]    = bybit_trader
+sys.modules["scanner"]   = bybit_scanner
+
+import state
+state.set_file(config_bybit.STATE_FILE)
+
+import bot
+bot.MTFBot().run()
+```
+
+After aliasing, when `bot.py` runs:
+- `import config` → returns `config_bybit`
+- `import config_s5` → returns `config_bybit_s5`
+- `import trader as tr` → `tr` is `bybit_trader`
+- `from scanner import get_qualified_pairs_and_sentiment` → resolves to `bybit_scanner`
+- Strategy lazy imports `import bitget as bg` / `import trader` → resolve to `bybit` / `bybit_trader`
+
+**Result:** Zero strategy-file edits. `bot.py`, `ig_bot.py`, `trader.py`, `bitget.py`, `scanner.py`, `strategies/*.py` are unchanged.
+
+**Critical rules:**
+
+1. **Run as a separate Python process.** `sys.modules` is per-process. `bybit_bot.py` MUST NOT be imported into a process that already imported `bot.py` or `ig_bot.py` — the aliases would corrupt those bots' exchange references. `bybit_bot.py` guards against this at startup:
+   ```python
+   for _m in ("bot", "ig_bot"):
+       if _m in sys.modules:
+           raise RuntimeError(...)
+   ```
+
+2. **Alias BEFORE importing `bot`.** If any code path imports `bot` (transitively or directly) before the aliases are installed, the un-aliased modules get cached and the swap silently fails. `bybit_bot.py` puts every alias install above its `import bot` line.
+
+3. **Redirect state file early.** `state.py` initialises `STATE_FILE` from `os.environ["DATA_DIR"]` at import time. Call `state.set_file(config_bybit.STATE_FILE)` before `import bot` or both bots will fight over `./state.json`.
+
+4. **Keep `bybit.py` and `bybit_trader.py` interface-compatible with `bitget.py` and `trader.py`.** Any signature drift breaks the aliasing — strategy code calls `bg.place_market_order(...)` expecting Bitget's signature; if `bybit.place_market_order(...)` doesn't match, runtime error. See §6.2 for the contract.
+
+5. **`--paper` is rejected.** The Bybit bot does not support paper mode (no `bybit_paper_trader.py`). `bybit_bot.py` exits if `--paper` is in `sys.argv`. Use `config_bybit.DRY_RUN = True` instead — it short-circuits actual order placement at the `bybit_trader.open_long/open_short` level while still pulling real market data.
+
+**Verification:**
+```bash
+python -c "import bybit_bot; import bot; print('tr =', bot.tr.__name__, '| config =', bot.config.__name__)"
+# Expected: tr = bybit_trader | config = config_bybit
+```
+
+**Breaking scenarios:**
+- Adding a new config_sN.py without a matching config_bybit_sN.py and a sys.modules alias → Bybit bot silently runs against Bitget's config
+- Renaming a function in `bitget.py` without renaming in `bybit.py` → AttributeError at runtime when a strategy calls the renamed function
+- Importing `bot` at the top of any helper that's imported by `bybit_bot.py` before aliasing completes → swap silently fails
 
 ---
 

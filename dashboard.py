@@ -26,6 +26,8 @@ _DATA_DIR  = _Path(_os.environ.get("DATA_DIR", "."))
 STATE_FILE     = str(_DATA_DIR / ("state_paper.json" if PAPER_MODE else "state.json"))
 IG_STATE_FILE  = str(_DATA_DIR / "ig_state.json")
 IG_TRADES_FILE = str(_DATA_DIR / "ig_trades.csv")
+BYBIT_STATE_FILE  = str(_DATA_DIR / "bybit_state.json")
+BYBIT_TRADES_FILE = str(_DATA_DIR / "bybit_trades.csv")
 PORT       = int(_os.environ.get("PORT", 8081 if PAPER_MODE else 9090))
 app = FastAPI(title="MTF Bot Dashboard" + (" [PAPER]" if PAPER_MODE else ""))
 
@@ -332,16 +334,20 @@ def get_state():
 async def get_analytics(request: Request,
                         range: str = "all",
                         x: str = "trade",
-                        n: int | None = None):
+                        n: int | None = None,
+                        source: str = "bitget"):
     """Return per-strategy trade analytics for the dashboard Analytics tab.
 
     Query params:
       range  — "all" | "30d" | "90d" | "lastN"  (default "all")
       x      — "trade" | "time"                  (default "trade")
       n      — required when range == "lastN"; 1 ≤ n ≤ 10000
+      source — "bitget" | "bybit"                (default "bitget")
     """
     if x not in ("trade", "time"):
         return JSONResponse({"error": "invalid x"}, status_code=400)
+    if source not in ("bitget", "bybit"):
+        return JSONResponse({"error": "invalid source"}, status_code=400)
 
     if range == "all":
         range_spec = "all"
@@ -354,11 +360,14 @@ async def get_analytics(request: Request,
     else:
         return JSONResponse({"error": "invalid range"}, status_code=400)
 
-    csv_path = STATE_FILE.replace(
-        "state_paper.json", "trades_paper.csv"
-    ).replace(
-        "state.json", "trades.csv"
-    )
+    if source == "bybit":
+        csv_path = BYBIT_TRADES_FILE
+    else:
+        csv_path = STATE_FILE.replace(
+            "state_paper.json", "trades_paper.csv"
+        ).replace(
+            "state.json", "trades.csv"
+        )
     payload = analytics.build_analytics(csv_path, range_spec, x)
     return JSONResponse(payload)
 
@@ -411,17 +420,27 @@ async def chat(request: Request):
 
 
 @app.get("/api/candles/{symbol}")
-def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
+def get_candles(symbol: str, interval: str = "3m", limit: int = 80,
+                source: str = "bitget"):
     """
     Returns OHLCV candles + consolidation box + trigger lines.
     For 3m (S1): uses RSI-zone consolidation detection.
     For 1D (S2): uses daily RSI + S2 consolidation + entry trigger logic.
     For 15m (S3): uses Slow Stochastics + MACD + S3 pullback evaluation.
+
+    source — "bitget" (default) | "bybit". Routes the market-data fetch to the
+    corresponding exchange's trader module. Strategy evaluation (consolidation,
+    RSI etc.) is exchange-agnostic and runs identically on either dataset.
     """
     if not re.fullmatch(r"^[A-Z0-9]{2,20}$", symbol):
         return JSONResponse({"error": "invalid symbol"}, status_code=400)
+    if source not in ("bitget", "bybit"):
+        return JSONResponse({"error": "invalid source"}, status_code=400)
     try:
-        import trader as tr
+        if source == "bybit":
+            import bybit_trader as tr
+        else:
+            import trader as tr
         import config
         import config_s1
         from strategies.s1 import detect_consolidation
@@ -700,8 +719,12 @@ def get_candles(symbol: str, interval: str = "3m", limit: int = 80):
 
             # ── S5 indicators (15m OB zone) ───────────────────────── #
             try:
-                import config_s5 as _cs5
-                import trader as _tr5
+                if source == "bybit":
+                    import config_bybit_s5 as _cs5
+                    import bybit_trader as _tr5
+                else:
+                    import config_s5 as _cs5
+                    import trader as _tr5
                 _htf_df = _tr5.get_candles(symbol, "1H", limit=15)
                 _daily_df = _tr5.get_candles(symbol, "1D", limit=200)
                 if not _htf_df.empty and not _daily_df.empty:
@@ -1149,6 +1172,49 @@ def get_ig_state():
         "scan_signals":   scan_signals,
         "scan_log":       scan_log,
     })
+
+
+@app.get("/api/bybit/state")
+def get_bybit_state():
+    """
+    Bybit equivalent of /api/state. Bybit's bybit_state.json mirrors
+    Bitget's state.json shape (pair_states + open_trades + sentiment),
+    so the same dashboard panel can render either source.
+    """
+    if not os.path.exists(BYBIT_STATE_FILE):
+        return JSONResponse({
+            "status": "STOPPED",
+            "error": "bybit_state.json not found — is bybit_bot.py running?"
+        })
+    try:
+        with open(BYBIT_STATE_FILE, "r") as f:
+            state = json.load(f)
+        csv_history = _load_csv_history(BYBIT_TRADES_FILE)
+        if csv_history:
+            state["trade_history"] = csv_history
+        try:
+            import config_bybit_s1, config_bybit_s2, config_bybit_s3, config_bybit_s4
+            import config_bybit_s5, config_bybit_s6, config_bybit_s7
+            state["strategy_enabled"] = {
+                "S1": bool(config_bybit_s1.S1_ENABLED),
+                "S2": bool(config_bybit_s2.S2_ENABLED),
+                "S3": bool(config_bybit_s3.S3_ENABLED),
+                "S4": bool(config_bybit_s4.S4_ENABLED),
+                "S5": bool(config_bybit_s5.S5_ENABLED),
+                "S6": bool(config_bybit_s6.S6_ENABLED),
+                "S7": bool(config_bybit_s7.S7_ENABLED),
+            }
+        except Exception:
+            pass
+        try:
+            import config_bybit
+            state["max_concurrent"] = int(config_bybit.MAX_CONCURRENT_TRADES)
+            state["dry_run"]        = bool(config_bybit.DRY_RUN)
+        except Exception:
+            pass
+        return JSONResponse(state)
+    except Exception as e:
+        return JSONResponse({"status": "ERROR", "error": str(e)})
 
 
 @app.get("/", response_class=HTMLResponse)

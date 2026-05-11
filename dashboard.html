@@ -1054,6 +1054,9 @@
   <button class="exch-tab active" id="exch-bitget" onclick="switchExchange('bitget')">
     <span class="exch-dot bitget"></span> Bitget
   </button>
+  <button class="exch-tab" id="exch-bybit" onclick="switchExchange('bybit')">
+    <span class="exch-dot bitget"></span> Bybit
+  </button>
   <button class="exch-tab" id="exch-ig" onclick="switchExchange('ig')">
     <span class="exch-dot ig"></span> IG
   </button>
@@ -1518,6 +1521,10 @@ const Analytics = (() => {
   async function fetchData() {
     const params = new URLSearchParams({ range: state.range, x: state.xMode });
     if (state.range === 'lastN') params.set('n', state.lastN);
+    // Analytics follows the active exchange; IG has its own analytics elsewhere.
+    if (typeof activeExchange !== 'undefined' && activeExchange === 'bybit') {
+      params.set('source', 'bybit');
+    }
     setStatus('Loading…');
     try {
       const r = await fetch('/api/analytics?' + params.toString(),
@@ -2778,8 +2785,14 @@ async function sendChat() {
 let failCount = 0;
 
 async function poll() {
+  // Bitget and Bybit share the same panel + render() because their state.json
+  // shape is identical (pair_states + open_trades + sentiment). The poll just
+  // swaps the data source URL based on which exchange tab is active.
+  // IG has its own panel/poll (pollIG) — different data shape.
+  if (activeExchange === 'ig') return;
+  const url = activeExchange === 'bybit' ? '/api/bybit/state' : '/api/state';
   try {
-    const res = await _apiFetch('/api/state');
+    const res = await _apiFetch(url);
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     $('connBanner').classList.remove('visible');
@@ -3548,7 +3561,8 @@ async function loadChart(symbol, interval, fitOnLoad = false) {
   const savedRange = !fitOnLoad ? candleChart.timeScale().getVisibleLogicalRange() : null;
 
   try {
-    const res  = await _apiFetch(`/api/candles/${symbol}?interval=${interval}&limit=80`);
+    const srcParam = (typeof activeExchange !== 'undefined' && activeExchange === 'bybit') ? '&source=bybit' : '';
+    const res  = await _apiFetch(`/api/candles/${symbol}?interval=${interval}&limit=80${srcParam}`);
     const data = await res.json();
     if (data.error) { ageEl.textContent = 'Error: ' + data.error; return; }
 
@@ -4158,15 +4172,29 @@ document.addEventListener('keydown', e => {
 });
 
 // ── Exchange Switcher ────────────────────────────────────
+//
+// Bitget and Bybit share the same #bitget-panel because their state.json
+// shape is identical. switchExchange() flips activeExchange; poll() picks
+// the right /api/{state|bybit/state} URL on the next tick. We also call
+// poll() immediately so the panel refreshes without waiting 3s.
+//
+// IG has its own #ig-panel (different data shape — single position).
 let activeExchange = 'bitget';
 
 function switchExchange(ex) {
   activeExchange = ex;
   $('exch-bitget').classList.toggle('active', ex === 'bitget');
+  $('exch-bybit').classList.toggle('active', ex === 'bybit');
   $('exch-ig').classList.toggle('active', ex === 'ig');
-  $('bitget-panel').style.display = ex === 'bitget' ? '' : 'none';
-  $('ig-panel').style.display     = ex === 'ig'     ? '' : 'none';
-  if (ex === 'ig') pollIG();
+  // Bitget + Bybit reuse the same panel; IG uses its own.
+  $('bitget-panel').style.display = (ex === 'bitget' || ex === 'bybit') ? '' : 'none';
+  $('ig-panel').style.display     = ex === 'ig' ? '' : 'none';
+  if (ex === 'ig') {
+    pollIG();
+  } else {
+    // Force an immediate refresh against the newly-active source.
+    poll();
+  }
 }
 
 // ── IG Bot Poll ──────────────────────────────────────────

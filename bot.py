@@ -2100,9 +2100,16 @@ class MTFBot:
         _log_trade("S2_LONG", trade)
         st.add_open_trade(trade)
         try:
+            _candles = []
+            try:
+                _snap_df = tr.get_candles(symbol, "1D", limit=100)
+                if not _snap_df.empty:
+                    _candles = _df_to_candles(_snap_df)
+            except Exception:
+                pass   # snapshot still saved with empty candles
             snapshot.save_snapshot(
                 trade_id=trade["trade_id"], event="open",
-                symbol=symbol, interval="1D", candles=[],
+                symbol=symbol, interval="1D", candles=_candles,
                 event_price=float(trade.get("entry", 0)),
             )
         except Exception as e:
@@ -2169,9 +2176,16 @@ class MTFBot:
         _log_trade("S3_LONG", trade)
         st.add_open_trade(trade)
         try:
+            _candles = []
+            try:
+                _snap_df = tr.get_candles(symbol, config_s3.S3_LTF_INTERVAL, limit=100)
+                if not _snap_df.empty:
+                    _candles = _df_to_candles(_snap_df)
+            except Exception:
+                pass
             snapshot.save_snapshot(
                 trade_id=trade["trade_id"], event="open",
-                symbol=symbol, interval=config_s3.S3_LTF_INTERVAL, candles=[],
+                symbol=symbol, interval=config_s3.S3_LTF_INTERVAL, candles=_candles,
                 event_price=float(trade.get("entry", 0)),
             )
         except Exception as e:
@@ -2240,9 +2254,16 @@ class MTFBot:
         _log_trade("S4_SHORT", trade)
         st.add_open_trade(trade)
         try:
+            _candles = []
+            try:
+                _snap_df = tr.get_candles(symbol, "1D", limit=100)
+                if not _snap_df.empty:
+                    _candles = _df_to_candles(_snap_df)
+            except Exception:
+                pass
             snapshot.save_snapshot(
                 trade_id=trade["trade_id"], event="open",
-                symbol=symbol, interval="1D", candles=[],
+                symbol=symbol, interval="1D", candles=_candles,
                 event_price=float(trade.get("entry", 0)),
             )
         except Exception as e:
@@ -2394,9 +2415,16 @@ class MTFBot:
         _log_trade("S6_SHORT", trade)
         st.add_open_trade(trade)
         try:
+            _candles = []
+            try:
+                _snap_df = tr.get_candles(symbol, "1D", limit=100)
+                if not _snap_df.empty:
+                    _candles = _df_to_candles(_snap_df)
+            except Exception:
+                pass
             snapshot.save_snapshot(
                 trade_id=trade["trade_id"], event="open",
-                symbol=symbol, interval="1D", candles=[],
+                symbol=symbol, interval="1D", candles=_candles,
                 event_price=float(trade.get("entry", 0)),
             )
         except Exception as e:

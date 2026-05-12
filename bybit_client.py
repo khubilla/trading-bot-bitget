@@ -108,6 +108,15 @@ def _handle(resp: requests.Response, url: str) -> dict:
     code = data.get("retCode", 0)
     if code != 0:
         msg = data.get("retMsg", "unknown error")
+        # Soft-success codes: Bybit returns these when the requested state already
+        # matches what's set (e.g. SL already attached via entry order's preset,
+        # leverage already at the requested value, position mode already correct).
+        # They're not failures — the operation completed without changing anything.
+        # Swallowing them here means every caller benefits without per-function
+        # try/except boilerplate.
+        if code in _SOFT_SUCCESS_CODES:
+            logger.debug(f"[Bybit] soft-success retCode={code} {msg} ({url})")
+            return data
         raise RuntimeError(
             f"Bybit API error [{code}]: {msg}\n"
             f"  URL: {url}\n"
@@ -115,6 +124,14 @@ def _handle(resp: requests.Response, url: str) -> dict:
         )
 
     return data
+
+
+# Codes Bybit returns when the requested state is already in place — treat as success.
+_SOFT_SUCCESS_CODES = {
+    34040,    # position TPSL: "not modified" (e.g. SL already at requested value)
+    110043,   # set-leverage: leverage already at requested value
+    30084,    # set-position-mode: mode already at requested value
+}
 
 
 def _hint(code) -> str:

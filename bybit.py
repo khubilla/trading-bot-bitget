@@ -252,17 +252,43 @@ def get_last_price(symbol: str) -> float:
 # ── Account ──────────────────────────────────────────────────────── #
 
 def get_usdt_balance() -> float:
-    """Available USDT balance under Unified Trading Account."""
+    """
+    *Free* USDT balance under Unified Trading Account — matches Bitget's
+    semantic of `available` (excludes locked position/order margin AND
+    unrealised PnL). Used by the dashboard formula:
+
+        total_equity = balance + sum(open_trade.margin) + sum(open_trade.upnl)
+
+    so balance must NOT already include locked margin. Bybit's `walletBalance`
+    already includes margin, so we subtract `totalPositionIM + totalOrderIM`.
+    `availableToWithdraw` is sometimes the right value but is empty whenever
+    cross-margin holds collateral against open positions — unreliable.
+    """
     data = bc.get("/v5/account/wallet-balance", params={"accountType": "UNIFIED"})
     accounts = (data.get("result") or {}).get("list") or []
+
+    def _f(v) -> float:
+        try:
+            return float(v) if v not in (None, "") else 0.0
+        except (ValueError, TypeError):
+            return 0.0
+
     for acct in accounts:
         for coin in acct.get("coin", []):
-            if coin.get("coin") == SETTLE_COIN:
-                avail = coin.get("availableToWithdraw") or coin.get("walletBalance") or 0
+            if coin.get("coin") != SETTLE_COIN:
+                continue
+            wallet      = _f(coin.get("walletBalance"))
+            position_im = _f(coin.get("totalPositionIM"))
+            order_im    = _f(coin.get("totalOrderIM"))
+            # availableToWithdraw can be < wallet - margins (e.g. when borrows or
+            # bonus credits are excluded). Prefer it if non-empty.
+            avail_raw = coin.get("availableToWithdraw")
+            if avail_raw not in (None, ""):
                 try:
-                    return float(avail)
+                    return float(avail_raw)
                 except (ValueError, TypeError):
-                    return 0.0
+                    pass
+            return max(0.0, wallet - position_im - order_im)
     return 0.0
 
 

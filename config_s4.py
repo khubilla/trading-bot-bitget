@@ -11,6 +11,12 @@
 
 S4_ENABLED              = True
 
+# Scale-in: when True, initial entry is 50% size and the remaining 50% is
+# added 1 hour later if the entry window + BEARISH sentiment still hold.
+# When False, initial entry uses the full S4_TRADE_SIZE_PCT and no scale-in
+# is queued.
+S4_SCALE_IN_ENABLED     = True
+
 # ── Detection ────────────────────────────────────────────────────── #
 S4_BIG_CANDLE_BODY_PCT  = 0.20   # ≥20% body to count as spike
 S4_BIG_CANDLE_LOOKBACK  = 30     # search last 30 daily candles

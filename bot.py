@@ -2086,7 +2086,12 @@ class MTFBot:
                 st.save_pending_signals(self.pending_signals)
                 return
         size_multiplier = get_position_size_multiplier()
-        adjusted_size = config_s2.S2_TRADE_SIZE_PCT * 0.5 * size_multiplier
+        # When scale-in is disabled, enter at full size on the initial fill
+        # instead of half-then-scale.  Defaults to True if the flag is absent
+        # (Bybit's per-exchange configs may not have it yet).
+        _s2_scale_in = getattr(config_s2, "S2_SCALE_IN_ENABLED", True)
+        _s2_size_mult_initial = 0.5 if _s2_scale_in else 1.0
+        adjusted_size = config_s2.S2_TRADE_SIZE_PCT * _s2_size_mult_initial * size_multiplier
         size_note = f" ({size_multiplier}x)" if size_multiplier != 1.0 else ""
         st.add_scan_log(f"[S2][{symbol}] 🟢 LONG fired @ {mark:.5f}{size_note}", "SIGNAL")
         trade = tr.open_long(
@@ -2127,7 +2132,8 @@ class MTFBot:
         self.active_positions[symbol] = {
             "side": "LONG", "strategy": "S2",
             "box_high": sig["s2_bh"], "box_low": sig["s2_bl"],
-            "scale_in_pending": True, "scale_in_after": time.time() + 3600,
+            "scale_in_pending": _s2_scale_in,
+            "scale_in_after": time.time() + 3600,
             "scale_in_trade_size_pct": config_s2.S2_TRADE_SIZE_PCT * size_multiplier,  # Use same multiplier as initial entry
             "trade_id": trade["trade_id"],
         }
@@ -2237,7 +2243,9 @@ class MTFBot:
                 return
         s4_sl_actual = mark * (1 + 0.50 / config_s4.S4_LEVERAGE)
         size_multiplier = get_position_size_multiplier()
-        adjusted_size = config_s4.S4_TRADE_SIZE_PCT * 0.5 * size_multiplier
+        _s4_scale_in = getattr(config_s4, "S4_SCALE_IN_ENABLED", True)
+        _s4_size_mult_initial = 0.5 if _s4_scale_in else 1.0
+        adjusted_size = config_s4.S4_TRADE_SIZE_PCT * _s4_size_mult_initial * size_multiplier
         size_note = f" ({size_multiplier}x)" if size_multiplier != 1.0 else ""
         st.add_scan_log(
             f"[S4][{symbol}] 🔴 SHORT fired @ {mark:.5f} | entry≤{sig['trigger']:.5f}{size_note}", "SIGNAL"
@@ -2281,7 +2289,8 @@ class MTFBot:
         self.active_positions[symbol] = {
             "side": "SHORT", "strategy": "S4",
             "box_high": sig["s4_sl"], "box_low": sig["trigger"],
-            "scale_in_pending": True, "scale_in_after": time.time() + 3600,
+            "scale_in_pending": _s4_scale_in,
+            "scale_in_after": time.time() + 3600,
             "scale_in_trade_size_pct": config_s4.S4_TRADE_SIZE_PCT * size_multiplier,  # Use same multiplier as initial entry
             "s4_prev_low": sig["prev_low"],
             "trade_id": trade["trade_id"],
@@ -2326,7 +2335,9 @@ class MTFBot:
                 st.save_pending_signals(self.pending_signals)
                 return
         size_multiplier = get_position_size_multiplier()
-        adjusted_size = config_s7.S7_TRADE_SIZE_PCT * 0.5 * size_multiplier
+        _s7_scale_in = getattr(config_s7, "S7_SCALE_IN_ENABLED", True)
+        _s7_size_mult_initial = 0.5 if _s7_scale_in else 1.0
+        adjusted_size = config_s7.S7_TRADE_SIZE_PCT * _s7_size_mult_initial * size_multiplier
         size_note = f" ({size_multiplier}x)" if size_multiplier != 1.0 else ""
         if side == "LONG":
             s7_sl_actual = mark * (1 - 0.50 / config_s7.S7_LEVERAGE)
@@ -2390,7 +2401,8 @@ class MTFBot:
         self.active_positions[symbol] = {
             "side": side, "strategy": "S7",
             "box_high": box_high_field, "box_low": box_low_field,
-            "scale_in_pending": True, "scale_in_after": time.time() + 3600,
+            "scale_in_pending": _s7_scale_in,
+            "scale_in_after": time.time() + 3600,
             "scale_in_trade_size_pct": config_s7.S7_TRADE_SIZE_PCT * size_multiplier,
             "s7_box_low": sig["box_low"],
             "s7_box_top": sig.get("box_top", 0),
@@ -2401,7 +2413,9 @@ class MTFBot:
         """Open S6 SHORT after two-phase fakeout confirmed. Initial entry at 50% size; scale-in queued 1h later."""
         sl_price = mark * (1 + config_s6.S6_SL_PCT / config_s6.S6_LEVERAGE)
         size_multiplier = get_position_size_multiplier()
-        adjusted_size = config_s6.S6_TRADE_SIZE_PCT * 0.5 * size_multiplier
+        _s6_scale_in = getattr(config_s6, "S6_SCALE_IN_ENABLED", True)
+        _s6_size_mult_initial = 0.5 if _s6_scale_in else 1.0
+        adjusted_size = config_s6.S6_TRADE_SIZE_PCT * _s6_size_mult_initial * size_multiplier
         size_note = f" ({size_multiplier}x)" if size_multiplier != 1.0 else ""
         st.add_scan_log(
             f"[S6][{symbol}] 🔴 SHORT | peak={sig['peak_level']:.5f} | "
@@ -2442,7 +2456,8 @@ class MTFBot:
         self.active_positions[symbol] = {
             "side": "SHORT", "strategy": "S6",
             "box_high": sl_price, "box_low": sig["peak_level"],
-            "scale_in_pending": True, "scale_in_after": time.time() + 3600,
+            "scale_in_pending": _s6_scale_in,
+            "scale_in_after": time.time() + 3600,
             "scale_in_trade_size_pct": config_s6.S6_TRADE_SIZE_PCT * size_multiplier,  # Use same multiplier as initial entry
             "trade_id": trade["trade_id"],
         }

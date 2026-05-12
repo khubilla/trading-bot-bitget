@@ -7,7 +7,13 @@
 #   LONG  (BULLISH): confirmed 1H close above box_top × (1 + S7_ENTRY_BUFFER)
 # NEUTRAL sentiment → HOLD (gated in bot.py scan loop).
 
-S7_ENABLED = False
+S7_ENABLED = True
+
+# Scale-in: when True, initial entry is 50% size and the remaining 50% is
+# added 1 hour later when price retests the buffered box edge with matching
+# sentiment. When False, initial entry uses the full S7_TRADE_SIZE_PCT and
+# no scale-in is queued.
+S7_SCALE_IN_ENABLED = True
 
 # ── Big Candle Detection (mirrors S4) ───────────────────────── #
 S7_BIG_CANDLE_BODY_PCT  = 0.20   # ≥ 20% body to qualify as a momentum candle

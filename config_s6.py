@@ -4,6 +4,12 @@
 # ============================================================
 S6_ENABLED = False
 
+# Scale-in: when True, initial entry is 50% size and the remaining 50% is
+# added 1 hour later if mark is still below peak_level and sentiment is
+# BEARISH. When False, initial entry uses the full S6_TRADE_SIZE_PCT and
+# no scale-in is queued.
+S6_SCALE_IN_ENABLED = True
+
 # ── Pattern detection ─────────────────────────────────────── #
 S6_RSI_LOOKBACK      = 14      # RSI period
 S6_SPIKE_LOOKBACK    = 30      # Max daily candles to scan for a V-formation

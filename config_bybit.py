@@ -51,6 +51,13 @@ INITIAL_BALANCE = 160.0
 SENTIMENT_THRESHOLD = 0.70
 SENTIMENT_SCAN_SEC  = 60
 
+# --- Claude Trade Filter ---
+# Required attrs (bot.py reads CLAUDE_FILTER_ENABLED on every entry-watcher tick).
+# Set to False to disable the LLM approval gate on Bybit trades.
+CLAUDE_FILTER_ENABLED   = False
+CLAUDE_FILTER_MODEL     = "claude-haiku-4-5"
+CLAUDE_FILTER_HISTORY_N = 30
+
 # --- Strategy Enable Flags ---
 # Mirror Bitget bot.py behaviour: all strategies on, gated per-pair by their own configs.
 ENABLE_S1 = True
@@ -82,3 +89,5 @@ ENHANCED_TRADING_WINDOWS = [
 ]
 
 REDUCE_TUESDAY_SIZE = False
+
+DEMO_MODE = False

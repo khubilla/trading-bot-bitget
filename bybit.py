@@ -22,6 +22,33 @@ logger = logging.getLogger(__name__)
 _sym_cache: dict[str, dict] = {}
 
 
+# ── DRY_RUN guard ─────────────────────────────────────────────────── #
+#
+# bybit_trader.open_long/short already intercept the top-level entry call when
+# config_bybit.DRY_RUN is True, but strategies/* exit helpers reach into
+# bybit.place_pos_sl_only / place_profit_plan / place_moving_plan directly via
+# `import bitget as bg` (aliased to bybit). Without a guard here those calls
+# hit the real Bybit API and fail — there's no position to attach SL/TP to.
+# This helper short-circuits every write at the lowest level so DRY_RUN is
+# truly read-only.
+
+def _dry_run_active() -> bool:
+    """Re-read DRY_RUN every call so a config flip takes effect on next call."""
+    try:
+        import config_bybit
+        return bool(config_bybit.DRY_RUN)
+    except Exception:
+        return False
+
+
+def _dry_run_skip(action: str, **payload) -> bool:
+    if not _dry_run_active():
+        return False
+    short = " ".join(f"{k}={v}" for k, v in payload.items() if v is not None and v != "")
+    logger.info(f"[Bybit][DRY_RUN] {action} {short}".rstrip())
+    return True
+
+
 # ── Bybit candle interval mapping ────────────────────────────────── #
 #   Bitget:  "1m"   "5m"   "15m"   "1H"   "4H"   "1D"
 #   Bybit:   "1"    "5"    "15"    "60"   "240"  "D"
@@ -261,6 +288,8 @@ def get_single_position_entry(symbol: str) -> float:
 
 def set_leverage(symbol: str, leverage: int):
     """Set leverage for both long and short sides on this symbol."""
+    if _dry_run_skip("set_leverage", symbol=symbol, leverage=leverage):
+        return
     try:
         bc.post("/v5/position/set-leverage", {
             "category":     CATEGORY,
@@ -289,6 +318,9 @@ def place_market_order(symbol: str, side: str, qty_str: str,
     Optional sl_trigger / tp_trigger attach SL/TP atomically on order entry
     (Bybit V5 supports stopLoss / takeProfit fields on /v5/order/create).
     """
+    if _dry_run_skip("place_market_order", symbol=symbol, side=side, qty=qty_str,
+                     sl=sl_trigger, tp=tp_trigger):
+        return {"retCode": 0, "result": {"orderId": f"DRY-{symbol}-{int(_time.time())}"}}
     body = {
         "category":    CATEGORY,
         "symbol":      symbol,
@@ -318,6 +350,9 @@ def place_pos_tpsl_full(symbol: str, hold_side: str,
     `tp_exec` and `sl_exec` are unused on Bybit (it places market exits on trigger).
     Retries 3x.
     """
+    if _dry_run_skip("place_pos_tpsl_full", symbol=symbol, hold=hold_side,
+                     tp=tp_trig, sl=sl_trig):
+        return True
     body = {
         "category":      CATEGORY,
         "symbol":        symbol,
@@ -343,6 +378,8 @@ def place_pos_tpsl_full(symbol: str, hold_side: str,
 
 def place_pos_sl_only(symbol: str, hold_side: str, sl_trig: float, sl_exec: float) -> None:
     """Place SL-only on full position."""
+    if _dry_run_skip("place_pos_sl_only", symbol=symbol, hold=hold_side, sl=sl_trig):
+        return
     bc.post("/v5/position/trading-stop", {
         "category":    CATEGORY,
         "symbol":      symbol,
@@ -362,6 +399,9 @@ def place_profit_plan(symbol: str, hold_side: str, qty_str: str,
 
     hold_side: "long" → side="Sell" (reduce a long); "short" → side="Buy" (reduce a short).
     """
+    if _dry_run_skip("place_profit_plan", symbol=symbol, hold=hold_side,
+                     qty=qty_str, trigger=trigger):
+        return
     reduce_side = "Sell" if hold_side == "long" else "Buy"
     trig_dir = 1 if hold_side == "long" else 2  # 1 = trigger when mark rises; 2 = when mark falls
 
@@ -394,6 +434,9 @@ def place_moving_plan(symbol: str, hold_side: str, qty_str: str,
     range_rate: accepts either a Bitget-style percentage (< 1, e.g. "0.10" = 10%)
     or an absolute price distance (≥ 1). Bybit's API expects absolute price.
     """
+    if _dry_run_skip("place_moving_plan", symbol=symbol, hold=hold_side,
+                     trigger=trigger, range_rate=range_rate):
+        return
     try:
         pct = float(range_rate)
     except (ValueError, TypeError):
@@ -433,6 +476,9 @@ def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0
     conditional is found (cannot infer prior trigger / range), or if all 3
     re-placement attempts fail.
     """
+    if _dry_run_skip("refresh_plan_exits", symbol=symbol, hold=hold_side,
+                     trigger=new_trail_trigger):
+        return True
     side_to_reduce = "Sell" if hold_side == "long" else "Buy"
 
     # Bybit V5: untriggered conditional orders require orderFilter=StopOrder.
@@ -538,6 +584,8 @@ def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0
 
 def update_position_sl(symbol: str, new_sl: float, hold_side: str = "long") -> bool:
     """Replace the position's SL via /v5/position/trading-stop. Returns True on success."""
+    if _dry_run_skip("update_position_sl", symbol=symbol, hold=hold_side, new_sl=new_sl):
+        return True
     sl_str = round_price(new_sl, symbol)
     for attempt in range(3):
         try:
@@ -569,6 +617,9 @@ def place_plan_order(side: str, symbol: str, trigger_price: float,
     For LONG (buy): triggerDirection=1 (fires when mark RISES above trigger)
     For SHORT (sell): triggerDirection=2 (fires when mark FALLS below trigger)
     """
+    if _dry_run_skip("place_plan_order", symbol=symbol, side=side,
+                     trigger=trigger_price, sl=sl_price, tp=tp_price, qty=qty_str):
+        return f"DRY-{symbol}-{int(_time.time())}"
     bybit_side = "Buy" if side.lower() == "buy" else "Sell"
     trig_dir = 1 if bybit_side == "Buy" else 2
 
@@ -602,6 +653,8 @@ def place_plan_order(side: str, symbol: str, trigger_price: float,
 
 def cancel_plan_order(symbol: str, order_id: str) -> None:
     """Cancel a single conditional/plan order by id."""
+    if _dry_run_skip("cancel_plan_order", symbol=symbol, orderId=order_id):
+        return
     resp = bc.post("/v5/order/cancel", {
         "category": CATEGORY,
         "symbol":   symbol,
@@ -613,6 +666,8 @@ def cancel_plan_order(symbol: str, order_id: str) -> None:
 
 def cancel_all_orders(symbol: str) -> None:
     """Cancel all open + conditional orders for a symbol."""
+    if _dry_run_skip("cancel_all_orders", symbol=symbol):
+        return
     try:
         bc.post("/v5/order/cancel-all", {
             "category": CATEGORY,

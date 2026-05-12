@@ -23,6 +23,35 @@ logger = logging.getLogger(__name__)
 
 _session = requests.Session()
 
+# ── Rate-limit retry ──────────────────────────────────────────────── #
+#
+# Bybit V5 public market endpoints allow ~120 req/s per IP. Our scanner can
+# burst above that briefly when fanning out candle requests across all pairs
+# (3m + 15m + 1H + 1D × ~120 pairs). The exchange responds with retCode=10006
+# ("Too many visits"). It's transient — exponential-backoff retry recovers.
+# Production endpoints (POST /v5/order/create etc.) have their own per-key
+# limits but we hit them far less, so the same retry helps there too.
+_RATE_LIMIT_RETRIES = 4         # total attempts including the first
+_RATE_LIMIT_BACKOFF = 0.5       # seconds for the first retry; doubles each attempt
+
+
+def _with_rate_limit_retry(do_request, describe: str):
+    """Run do_request(); on retCode=10006 sleep & retry with exponential backoff."""
+    for attempt in range(_RATE_LIMIT_RETRIES):
+        try:
+            return do_request()
+        except RuntimeError as e:
+            msg = str(e)
+            if "[10006]" not in msg or attempt == _RATE_LIMIT_RETRIES - 1:
+                raise
+            delay = _RATE_LIMIT_BACKOFF * (2 ** attempt)
+            logger.warning(
+                f"[Bybit] rate-limited on {describe} (10006), "
+                f"backoff {delay:.1f}s (attempt {attempt+1}/{_RATE_LIMIT_RETRIES-1})"
+            )
+            time.sleep(delay)
+    # Unreachable — raise propagates from the loop above.
+
 
 # ── Signature ─────────────────────────────────────────────────────── #
 
@@ -113,28 +142,42 @@ def _hint(code) -> str:
 # ── Public methods ────────────────────────────────────────────────── #
 
 def get(path: str, params: dict | None = None) -> dict:
-    """Authenticated GET. Bybit V5 signs queryString."""
+    """Authenticated GET. Bybit V5 signs queryString. Retries on 10006."""
     qs = "&".join(f"{k}={v}" for k, v in (params or {}).items())
     url = BASE_URL + path + (("?" + qs) if qs else "")
-    headers = _build_headers(qs)
-    logger.debug(f"GET {url}")
-    resp = _session.get(url, headers=headers, timeout=15)
-    return _handle(resp, url)
+
+    def do():
+        # Rebuild headers on each attempt — X-BAPI-TIMESTAMP must be fresh
+        # to stay within Bybit's recv_window on retry.
+        headers = _build_headers(qs)
+        logger.debug(f"GET {url}")
+        resp = _session.get(url, headers=headers, timeout=15)
+        return _handle(resp, url)
+
+    return _with_rate_limit_retry(do, f"GET {path}")
 
 
 def post(path: str, body: dict) -> dict:
-    """Authenticated POST. Bybit V5 signs raw JSON body."""
+    """Authenticated POST. Bybit V5 signs raw JSON body. Retries on 10006."""
     body_str = json.dumps(body, separators=(",", ":"))  # compact JSON, no spaces
     url      = BASE_URL + path
-    headers  = _build_headers(body_str)
-    logger.debug(f"POST {url}")
-    resp = _session.post(url, headers=headers, data=body_str, timeout=15)
-    return _handle(resp, url)
+
+    def do():
+        headers = _build_headers(body_str)
+        logger.debug(f"POST {url}")
+        resp = _session.post(url, headers=headers, data=body_str, timeout=15)
+        return _handle(resp, url)
+
+    return _with_rate_limit_retry(do, f"POST {path}")
 
 
 def get_public(path: str, params: dict | None = None) -> dict:
-    """Unauthenticated GET for market data."""
+    """Unauthenticated GET for market data. Retries on 10006."""
     qs  = ("?" + "&".join(f"{k}={v}" for k, v in params.items())) if params else ""
     url = BASE_URL + path + qs
-    resp = _session.get(url, timeout=15)
-    return _handle(resp, url)
+
+    def do():
+        resp = _session.get(url, timeout=15)
+        return _handle(resp, url)
+
+    return _with_rate_limit_retry(do, f"GET {path}")

@@ -435,20 +435,24 @@ def place_moving_plan(symbol: str, hold_side: str, qty_str: str,
     to the whole remaining position. This matches the Bitget endpoint's effective
     behaviour (close the rest at trail).
 
-    range_rate: accepts either a Bitget-style percentage (< 1, e.g. "0.10" = 10%)
-    or an absolute price distance (≥ 1). Bybit's API expects absolute price.
+    range_rate: Bitget-flavoured percentage value, always interpreted as a percent.
+      Strategies pass it as the integer-percent convention from config_s*.py:
+        S2_TRAILING_RANGE_PCT = 10        → range_rate="10"      → 10%
+        S5_TRAIL_RANGE_PCT    = 0.05      → range_rate="0.0500"  → 5%  (decimal form)
+      We normalise both forms: values ≥ 1 are integer-percent (10 → 0.10),
+      values < 1 are already decimal fractions (0.10 → 0.10). Bybit's V5
+      `trailingStop` field expects an absolute price distance, so we multiply
+      by the trigger to get the price-units distance.
     """
     if _dry_run_skip("place_moving_plan", symbol=symbol, hold=hold_side,
                      trigger=trigger, range_rate=range_rate):
         return
     try:
-        pct = float(range_rate)
+        raw = float(range_rate)
     except (ValueError, TypeError):
-        pct = 0.10
-    if pct < 1:
-        trailing_distance = trigger * pct
-    else:
-        trailing_distance = pct
+        raw = 10.0  # fall back to 10% default
+    pct = raw / 100.0 if raw >= 1 else raw
+    trailing_distance = trigger * pct
 
     bc.post("/v5/position/trading-stop", {
         "category":      CATEGORY,

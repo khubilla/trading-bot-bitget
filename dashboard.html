@@ -1429,6 +1429,12 @@
   <div class="analytics-wrap">
 
     <div class="analytics-controls">
+      <label>Exchange</label>
+      <select id="aSource">
+        <option value="bitget">Bitget</option>
+        <option value="bybit">Bybit</option>
+      </select>
+
       <label>Range</label>
       <select id="aRange">
         <option value="all">All</option>
@@ -1509,6 +1515,7 @@ const Analytics = (() => {
     range:    sessionStorage.getItem('aRange')  || 'all',
     xMode:    sessionStorage.getItem('aXMode')  || 'trade',
     lastN:    parseInt(sessionStorage.getItem('aLastN') || '100', 10),
+    source:   sessionStorage.getItem('aSource') || 'bitget',
     charts:   {},
     selected: {},
   };
@@ -1519,12 +1526,12 @@ const Analytics = (() => {
   }
 
   async function fetchData() {
-    const params = new URLSearchParams({ range: state.range, x: state.xMode });
+    const params = new URLSearchParams({
+      range:  state.range,
+      x:      state.xMode,
+      source: state.source,   // explicit — decoupled from the outer exchange tab
+    });
     if (state.range === 'lastN') params.set('n', state.lastN);
-    // Analytics follows the active exchange; IG has its own analytics elsewhere.
-    if (typeof activeExchange !== 'undefined' && activeExchange === 'bybit') {
-      params.set('source', 'bybit');
-    }
     setStatus('Loading…');
     try {
       const r = await fetch('/api/analytics?' + params.toString(),
@@ -1585,18 +1592,27 @@ const Analytics = (() => {
   }
 
   function wireControls() {
-    const rangeSel = document.getElementById('aRange');
-    const xSel     = document.getElementById('aXMode');
-    const lastN    = document.getElementById('aLastN');
-    const lastWrap = document.getElementById('aLastNWrap');
-    const refresh  = document.getElementById('aRefresh');
+    const sourceSel = document.getElementById('aSource');
+    const rangeSel  = document.getElementById('aRange');
+    const xSel      = document.getElementById('aXMode');
+    const lastN     = document.getElementById('aLastN');
+    const lastWrap  = document.getElementById('aLastNWrap');
+    const refresh   = document.getElementById('aRefresh');
     if (!rangeSel) return;  // Analytics DOM not present (shouldn't happen)
 
+    if (sourceSel) sourceSel.value = state.source;
     rangeSel.value = state.range;
     xSel.value     = state.xMode;
     lastN.value    = state.lastN;
     lastWrap.classList.toggle('visible', state.range === 'lastN');
 
+    if (sourceSel) {
+      sourceSel.addEventListener('change', () => {
+        state.source = sourceSel.value;
+        sessionStorage.setItem('aSource', state.source);
+        fetchData();
+      });
+    }
     rangeSel.addEventListener('change', () => {
       state.range = rangeSel.value;
       sessionStorage.setItem('aRange', state.range);

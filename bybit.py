@@ -379,6 +379,12 @@ def place_market_order(symbol: str, side: str, qty_str: str,
         body["takeProfit"]      = round_price(tp_trigger, symbol)
         body["tpTriggerBy"]     = "MarkPrice"
         body["tpOrderType"]     = "Market"
+    info = sym_info(symbol)
+    logger.info(
+        f"[Bybit][{symbol}] /v5/order/create market {body['side']} qty={qty_str} "
+        f"(min_qty={info.get('min_trade_num')}, qty_step={info.get('qty_step')}, "
+        f"min_notional={info.get('min_notional')}) sl={body.get('stopLoss')} tp={body.get('takeProfit')}"
+    )
     return bc.post("/v5/order/create", body)
 
 
@@ -689,7 +695,13 @@ def place_plan_order(side: str, symbol: str, trigger_price: float,
         body["takeProfit"]   = round_price(tp_price, symbol)
         body["tpTriggerBy"]  = "MarkPrice"
         body["tpOrderType"]  = "Market"
-
+    info = sym_info(symbol)
+    logger.info(
+        f"[Bybit][{symbol}] /v5/order/create plan {body['side']} qty={qty_str} "
+        f"trigger={body['triggerPrice']} (min_qty={info.get('min_trade_num')}, "
+        f"qty_step={info.get('qty_step')}, min_notional={info.get('min_notional')}) "
+        f"sl={body.get('stopLoss')} tp={body.get('takeProfit')}"
+    )
     resp = bc.post("/v5/order/create", body)
     result = resp.get("result") or {}
     order_id = result.get("orderId")

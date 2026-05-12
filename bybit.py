@@ -331,6 +331,10 @@ def place_market_order(symbol: str, side: str, qty_str: str,
         "reduceOnly":  False,
         "positionIdx": 0,        # 0 = one-way mode
     }
+    # Bybit V5 requires tpslMode whenever slOrderType / tpOrderType is set.
+    # "Full" → SL/TP applies to the entire position once filled.
+    if sl_trigger is not None or tp_trigger is not None:
+        body["tpslMode"] = "Full"
     if sl_trigger is not None:
         body["stopLoss"]        = round_price(sl_trigger, symbol)
         body["slTriggerBy"]     = "MarkPrice"
@@ -634,6 +638,9 @@ def place_plan_order(side: str, symbol: str, trigger_price: float,
         "triggerDirection": trig_dir,
         "timeInForce":      "IOC",
         "positionIdx":      0,
+        # Bybit V5: tpslMode required when slOrderType / tpOrderType is set.
+        # "Full" → SL/TP cover the entire position once the trigger fires.
+        "tpslMode":         "Full",
         "stopLoss":         round_price(sl_price, symbol),
         "slTriggerBy":      "MarkPrice",
         "slOrderType":      "Market",

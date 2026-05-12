@@ -934,12 +934,21 @@ class MTFBot:
                             partial_qty = ap["initial_qty"] - float(pos["qty"])
                             mark_now = tr.get_mark_price(sym)
                             side = ap["side"]
-                            price_chg = (mark_now - entry_p) / entry_p if side == "LONG" else (entry_p - mark_now) / entry_p
-                            # Margin for the closed half (approximate from stored trade margin)
+                            # Absolute partial P&L: qty_closed × price_diff (signed by side).
+                            # The earlier formula (margin × price_chg × leverage) double-halved
+                            # because pos["margin"] is synced from the exchange BEFORE this
+                            # block runs and Bybit/Bitget both drop margin to ~half once the
+                            # partial TP fills. Computing from qty and price is independent
+                            # of margin sync timing and correct on both exchanges.
+                            price_diff   = (mark_now - entry_p) if side == "LONG" else (entry_p - mark_now)
+                            partial_pnl  = partial_qty * price_diff
+                            price_chg    = price_diff / entry_p if entry_p else 0
+                            partial_pct  = round(price_chg * ap.get("leverage", 10) * 100, 2)
+                            # half_margin is no longer used for pnl math, but kept for the
+                            # margin-update call below (the stored open-trade margin should
+                            # reflect the remaining position size after partial).
                             _ot = st.get_open_trade(sym)
                             half_margin = float(_ot.get("margin", 0)) * 0.5 if _ot else 0.0
-                            partial_pnl = price_chg * half_margin * ap.get("leverage", 10) if half_margin else 0.0
-                            partial_pct = round(price_chg * ap.get("leverage", 10) * 100, 2)
                             ap["partial_logged"] = True
                             ap["partial_pnl"]    = round(partial_pnl, 4)
                             st.update_position_memory(sym, partial_logged=True)

@@ -815,12 +815,24 @@ def get_history_position(symbol: str,
                          retries: int = 3,
                          retry_delay: float = 1.5) -> dict | None:
     """
-    Find a specific closed position via /v5/position/closed-pnl.
+    Total realized P&L for a closed position via /v5/position/closed-pnl.
+
+    Bybit returns ONE row per close event (partial TP, trailing stop hit,
+    final close, manual reduce, etc.) — so the position's lifetime P&L is the
+    SUM of all rows in the trade's time window. The earlier implementation
+    took only records[0] (most recent) which under-reported any trade that
+    had a partial TP fire — the close row's closedPnl is just the residual
+    after the partial.
+
+    The startTime filter (set to the trade's open_time_iso) constrains the
+    query to rows that belong to this trade. If multiple historical trades
+    exist on the same symbol earlier, they're excluded server-side.
+
     Returns {pnl, exit_price, close_time} or None.
     """
     for attempt in range(retries):
         try:
-            params: dict = {"category": CATEGORY, "symbol": symbol, "limit": "10"}
+            params: dict = {"category": CATEGORY, "symbol": symbol, "limit": "50"}
             if open_time_iso:
                 try:
                     dt = datetime.fromisoformat(open_time_iso)
@@ -832,28 +844,34 @@ def get_history_position(symbol: str,
             if not records:
                 return None
 
-            def _entry_of(r: dict) -> float:
-                v = r.get("avgEntryPrice") or 0
-                try:
-                    return float(v)
-                except (ValueError, TypeError):
-                    return 0.0
+            # When `entry_price` is supplied, narrow to rows whose entry matches
+            # this trade. Bybit reports avgEntryPrice per close row — for a
+            # multi-leg close the same entry value appears on every leg, so we
+            # keep all matching rows, not just the closest one.
+            if entry_price is not None and entry_price > 0:
+                def _entry_of(r: dict) -> float:
+                    try:
+                        return float(r.get("avgEntryPrice") or 0)
+                    except (ValueError, TypeError):
+                        return 0.0
+                tol = max(entry_price * 0.005, 1e-9)   # 0.5% tolerance
+                matched = [r for r in records if abs(_entry_of(r) - entry_price) <= tol]
+                if matched:
+                    records = matched
 
-            if entry_price:
-                records = sorted(records, key=lambda r: abs(_entry_of(r) - entry_price))
-
-            r   = records[0]
-            pnl = float(r.get("closedPnl") or 0)
-            if pnl == 0:
+            total_pnl = sum(float(r.get("closedPnl") or 0) for r in records)
+            if total_pnl == 0:
                 if attempt < retries - 1:
                     logger.debug(f"[Bybit][{symbol}] get_history_position: pnl=0, retrying ({attempt+1}/{retries-1})")
                     _time.sleep(retry_delay)
                     continue
-                logger.warning(f"[Bybit][{symbol}] get_history_position: still 0 after {retries} attempts")
+                logger.warning(f"[Bybit][{symbol}] get_history_position: still 0 after {retries} attempts ({len(records)} rows)")
                 return None
 
-            close_avg = r.get("avgExitPrice")
-            close_ts  = r.get("updatedTime") or r.get("createdTime")
+            # Use the most recent matched row for exit_price + close_time.
+            r0 = records[0]
+            close_avg = r0.get("avgExitPrice")
+            close_ts  = r0.get("updatedTime") or r0.get("createdTime")
             close_dt  = None
             if close_ts:
                 try:
@@ -861,7 +879,7 @@ def get_history_position(symbol: str,
                 except Exception:
                     pass
             return {
-                "pnl":        pnl,
+                "pnl":        total_pnl,
                 "exit_price": float(close_avg) if close_avg else None,
                 "close_time": close_dt,
             }

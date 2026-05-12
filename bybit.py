@@ -74,24 +74,44 @@ def _load_symbol_cache():
     global _sym_cache
     if _sym_cache:
         return
-    data = bc.get_public(
-        "/v5/market/instruments-info",
-        params={"category": CATEGORY},
-    )
-    rows = (data.get("result") or {}).get("list") or []
+    # Bybit returns max 500 contracts per page; paginate via nextPageCursor.
+    # Without this, any symbol alphabetically after the 500th (~SKRUSDT) falls
+    # back to default rounding (qty_step=0.001, tick_size=0.01), corrupting
+    # qty/price for ~half the linear universe.
+    rows: list = []
+    cursor = ""
+    page = 0
+    while True:
+        params = {"category": CATEGORY, "limit": "1000"}
+        if cursor:
+            params["cursor"] = cursor
+        data = bc.get_public("/v5/market/instruments-info", params=params)
+        result = data.get("result") or {}
+        page_rows = result.get("list") or []
+        rows.extend(page_rows)
+        cursor = result.get("nextPageCursor") or ""
+        page += 1
+        if not cursor or not page_rows or page >= 20:  # 20-page safety cap (~20k symbols)
+            break
     for s in rows:
         symbol = s.get("symbol")
         if not symbol:
             continue
         lot   = s.get("lotSizeFilter")  or {}
         price = s.get("priceFilter")    or {}
-        qty_step  = float(lot.get("qtyStep")       or "0.001")
-        min_qty   = float(lot.get("minOrderQty")   or "0.001")
-        tick_size = float(price.get("tickSize")    or "0.01")
+        qty_step     = float(lot.get("qtyStep")          or "0.001")
+        min_qty      = float(lot.get("minOrderQty")      or "0.001")
+        tick_size    = float(price.get("tickSize")       or "0.01")
+        # Bybit V5 also enforces a minimum *notional* value per order (qty × price ≥ N).
+        # When equity × trade_size_pct × leverage is small, the qty-derived-from-notional
+        # can satisfy minOrderQty but still fail minNotionalValue. round_qty() takes a
+        # mark_price arg to handle this.
+        min_notional = float(lot.get("minNotionalValue") or "0")
         _sym_cache[symbol] = {
             "qty_step":      qty_step,
             "min_trade_num": min_qty,
             "tick_size":     tick_size,
+            "min_notional":  min_notional,
             "price_place":   _decimals(tick_size),
             "volume_place":  _decimals(qty_step),
         }
@@ -112,7 +132,8 @@ def sym_info(symbol: str) -> dict:
     _load_symbol_cache()
     return _sym_cache.get(symbol, {
         "qty_step": 0.001, "min_trade_num": 0.001,
-        "tick_size": 0.01, "price_place": 2, "volume_place": 3,
+        "tick_size": 0.01, "min_notional": 0.0,
+        "price_place": 2, "volume_place": 3,
     })
 
 
@@ -123,11 +144,26 @@ def round_price(price: float, symbol: str) -> str:
     return f"{rounded:.{info['price_place']}f}"
 
 
-def round_qty(qty: float, symbol: str) -> str:
+def round_qty(qty: float, symbol: str, mark_price: float | None = None) -> str:
+    """
+    Floor qty to qty_step, then enforce min_trade_num. When `mark_price` is
+    provided AND the symbol has a min_notional, also bump up so that
+    qty × mark_price ≥ min_notional (Bybit V5 rejects orders below this with
+    "Qty invalid").
+
+    Callers that are *splitting* an existing position qty (e.g. half/rest for
+    profit_plan + moving_plan) should NOT pass mark_price — the notional
+    requirement was already satisfied by the original entry order.
+    """
     info = sym_info(symbol)
     step = info["qty_step"]
     qty  = math.floor(qty / step) * step
     qty  = max(qty, info["min_trade_num"])
+    min_notional = info.get("min_notional", 0.0)
+    if mark_price is not None and mark_price > 0 and min_notional > 0:
+        # Smallest qty step that meets min_notional
+        min_qty_notional = math.ceil((min_notional / mark_price) / step) * step
+        qty = max(qty, min_qty_notional)
     return f"{qty:.{info['volume_place']}f}"
 
 

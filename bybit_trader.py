@@ -38,8 +38,8 @@ def _round_price(price: float, symbol: str) -> str:
     return bb.round_price(price, symbol)
 
 
-def _round_qty(qty: float, symbol: str) -> str:
-    return bb.round_qty(qty, symbol)
+def _round_qty(qty: float, symbol: str, mark_price: float | None = None) -> str:
+    return bb.round_qty(qty, symbol, mark_price=mark_price)
 
 
 # ── Market data passthroughs ────────────────────────────────────── #
@@ -176,7 +176,8 @@ def open_long(
     equity   = _get_total_equity() or balance
     mark     = get_mark_price(symbol)
     notional = equity * trade_size_pct * leverage
-    qty      = _round_qty(notional / mark, symbol)
+    # Pass mark so round_qty also enforces Bybit's min_notional (~$5 on many pairs).
+    qty      = _round_qty(notional / mark, symbol, mark_price=mark)
 
     if sl_floor > 0:
         sl_trig_preset = float(_round_price(sl_floor, symbol))
@@ -265,7 +266,8 @@ def open_short(
     equity   = _get_total_equity() or balance
     mark     = get_mark_price(symbol)
     notional = equity * trade_size_pct * leverage
-    qty      = _round_qty(notional / mark, symbol)
+    # Pass mark so round_qty also enforces Bybit's min_notional (~$5 on many pairs).
+    qty      = _round_qty(notional / mark, symbol, mark_price=mark)
 
     if sl_floor > 0:
         sl_trig = float(_round_price(sl_floor, symbol))
@@ -328,7 +330,8 @@ def open_short(
 def scale_in_long(symbol: str, additional_trade_size_pct: float, leverage: int) -> None:
     equity = _get_total_equity() or get_usdt_balance()
     mark   = get_mark_price(symbol)
-    qty    = _round_qty((equity * additional_trade_size_pct * leverage) / mark, symbol)
+    qty    = _round_qty((equity * additional_trade_size_pct * leverage) / mark, symbol,
+                        mark_price=mark)
     if DRY_RUN:
         logger.info(f"[Bybit][DRY_RUN][{symbol}] ➕ scale_in_long qty={qty}")
         return
@@ -339,7 +342,8 @@ def scale_in_long(symbol: str, additional_trade_size_pct: float, leverage: int) 
 def scale_in_short(symbol: str, additional_trade_size_pct: float, leverage: int) -> None:
     equity = _get_total_equity() or get_usdt_balance()
     mark   = get_mark_price(symbol)
-    qty    = _round_qty((equity * additional_trade_size_pct * leverage) / mark, symbol)
+    qty    = _round_qty((equity * additional_trade_size_pct * leverage) / mark, symbol,
+                        mark_price=mark)
     if DRY_RUN:
         logger.info(f"[Bybit][DRY_RUN][{symbol}] ➕ scale_in_short qty={qty}")
         return

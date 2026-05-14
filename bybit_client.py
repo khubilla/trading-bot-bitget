@@ -17,7 +17,14 @@ import json
 import logging
 import requests
 
-from config_bybit import API_KEY, API_SECRET, BASE_URL, RECV_WINDOW
+from config_bybit import (
+    API_KEY_PRIMARY,
+    API_SECRET_PRIMARY,
+    API_KEY_BACKUP,
+    API_SECRET_BACKUP,
+    BASE_URL,
+    RECV_WINDOW,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,32 +62,89 @@ def _with_rate_limit_retry(do_request, describe: str):
 
 # ── Signature ─────────────────────────────────────────────────────── #
 
-def _sign(timestamp: str, payload: str) -> str:
+def _sign(timestamp: str, payload: str, api_key: str, api_secret: str) -> str:
     """
     Bybit V5 signature:
       message = timestamp + api_key + recv_window + payload
       payload = queryString (GET) or raw JSON body (POST)
       sign    = HMAC-SHA256(secret, message).hexdigest()
     """
-    message = timestamp + API_KEY + RECV_WINDOW + payload
+    message = timestamp + api_key + RECV_WINDOW + payload
     mac = hmac.new(
-        API_SECRET.encode("utf-8"),
+        api_secret.encode("utf-8"),
         message.encode("utf-8"),
         digestmod=hashlib.sha256,
     )
     return mac.hexdigest()
 
 
-def _build_headers(payload: str) -> dict:
+def _build_headers(payload: str, api_key: str, api_secret: str) -> dict:
     ts = str(int(time.time() * 1000))
     return {
-        "X-BAPI-API-KEY":     API_KEY,
-        "X-BAPI-SIGN":        _sign(ts, payload),
+        "X-BAPI-API-KEY":     api_key,
+        "X-BAPI-SIGN":        _sign(ts, payload, api_key, api_secret),
         "X-BAPI-TIMESTAMP":   ts,
         "X-BAPI-RECV-WINDOW": RECV_WINDOW,
         "X-BAPI-SIGN-TYPE":   "2",
         "Content-Type":       "application/json",
     }
+
+
+# ── Primary ↔ backup key failover ─────────────────────────────────── #
+#
+# When a request fails with an auth-related Bybit retCode, retry once with
+# the other key. Rate limits and other errors don't trigger failover —
+# swapping keys wouldn't help and could mask real problems.
+#
+# Stickiness: once a key works, all subsequent requests use it until *it*
+# auth-fails. If the other key then works, we flip again. This avoids
+# hammering a broken key on every call. State is process-local, so a
+# restart always begins with the primary key — that's by design (it gives
+# the primary a fresh chance whenever the bot reboots).
+_AUTH_FAILOVER_CODES = ("10003", "10004", "10005", "10010")
+
+_active_key_role = "primary"  # "primary" or "backup"
+
+
+def _has_backup() -> bool:
+    return bool(API_KEY_BACKUP and API_SECRET_BACKUP)
+
+
+def _is_auth_error(err: RuntimeError) -> bool:
+    msg = str(err)
+    return any(f"[{c}]" in msg for c in _AUTH_FAILOVER_CODES)
+
+
+def _creds(role: str):
+    if role == "backup":
+        return API_KEY_BACKUP, API_SECRET_BACKUP
+    return API_KEY_PRIMARY, API_SECRET_PRIMARY
+
+
+def _other(role: str) -> str:
+    return "backup" if role == "primary" else "primary"
+
+
+def _with_auth_failover(do_request, describe: str):
+    """Try the active key; on auth failure try the other key and stick to it."""
+    global _active_key_role
+    active = _active_key_role
+    try:
+        return do_request(*_creds(active))
+    except RuntimeError as e:
+        if not _is_auth_error(e) or not _has_backup():
+            raise
+        fallback = _other(active)
+        logger.warning(
+            f"[Bybit] auth failure on {describe} with {active} key, "
+            f"failing over to {fallback}: {e}"
+        )
+        result = do_request(*_creds(fallback))
+        # Only flip after the fallback actually succeeds; if it raises, the
+        # original active role stays (next request will try it again first).
+        _active_key_role = fallback
+        logger.warning(f"[Bybit] active key is now {fallback} (sticky until next auth failure)")
+        return result
 
 
 # ── Response handling ─────────────────────────────────────────────── #
@@ -163,15 +227,18 @@ def get(path: str, params: dict | None = None) -> dict:
     qs = "&".join(f"{k}={v}" for k, v in (params or {}).items())
     url = BASE_URL + path + (("?" + qs) if qs else "")
 
-    def do():
+    def do(api_key, api_secret):
         # Rebuild headers on each attempt — X-BAPI-TIMESTAMP must be fresh
         # to stay within Bybit's recv_window on retry.
-        headers = _build_headers(qs)
+        headers = _build_headers(qs, api_key, api_secret)
         logger.debug(f"GET {url}")
         resp = _session.get(url, headers=headers, timeout=15)
         return _handle(resp, url)
 
-    return _with_rate_limit_retry(do, f"GET {path}")
+    return _with_rate_limit_retry(
+        lambda: _with_auth_failover(do, f"GET {path}"),
+        f"GET {path}",
+    )
 
 
 def post(path: str, body: dict) -> dict:
@@ -179,13 +246,16 @@ def post(path: str, body: dict) -> dict:
     body_str = json.dumps(body, separators=(",", ":"))  # compact JSON, no spaces
     url      = BASE_URL + path
 
-    def do():
-        headers = _build_headers(body_str)
+    def do(api_key, api_secret):
+        headers = _build_headers(body_str, api_key, api_secret)
         logger.debug(f"POST {url}")
         resp = _session.post(url, headers=headers, data=body_str, timeout=15)
         return _handle(resp, url)
 
-    return _with_rate_limit_retry(do, f"POST {path}")
+    return _with_rate_limit_retry(
+        lambda: _with_auth_failover(do, f"POST {path}"),
+        f"POST {path}",
+    )
 
 
 def get_public(path: str, params: dict | None = None) -> dict:

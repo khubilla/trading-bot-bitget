@@ -15,9 +15,19 @@ if os.path.exists(_env_file):
                 os.environ.setdefault(_k.strip(), _v.strip())
 
 # --- Bybit API Credentials ---
-# Set via environment variables: BYBIT_API_KEY, BYBIT_API_SECRET
-API_KEY    = os.environ.get("BYBIT_API_KEY",    "")
-API_SECRET = os.environ.get("BYBIT_API_SECRET", "")
+# Primary:  BYBIT_API_KEY,        BYBIT_API_SECRET
+# Backup:   BYBIT_API_KEY_BACKUP, BYBIT_API_SECRET_BACKUP  (optional)
+# bybit_client tries primary first; on auth-related failures (retCodes
+# 10003/10004/10005/10010) it retries once with the backup pair. If backup
+# is unset or also fails, the original error propagates.
+API_KEY_PRIMARY    = os.environ.get("BYBIT_API_KEY",           "")
+API_SECRET_PRIMARY = os.environ.get("BYBIT_API_SECRET",        "")
+API_KEY_BACKUP     = os.environ.get("BYBIT_API_KEY_BACKUP",    "")
+API_SECRET_BACKUP  = os.environ.get("BYBIT_API_SECRET_BACKUP", "")
+
+# Aliases for back-compat: anything reading API_KEY/API_SECRET sees the primary.
+API_KEY    = API_KEY_PRIMARY
+API_SECRET = API_SECRET_PRIMARY
 
 # --- Bybit API Base ---
 # Live:    https://api.bybit.com

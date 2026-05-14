@@ -901,6 +901,19 @@ These params live in `config.py` and are imported by `scanner.py`. Changing them
 | `config_ig_gold.py` | GOLD CONFIG dict (instrument params + S5 params) |
 | `config_ig_s5.py` | **Deleted** — absorbed into `config_ig_us30.py` in the multi-instrument migration |
 
+### 5.8 Bybit API Credentials (`config_bybit.py`)
+
+| Key | Env var | Required | Purpose |
+|------|---------|----------|---------|
+| `API_KEY_PRIMARY`    | `BYBIT_API_KEY`           | yes | Primary key used for every request |
+| `API_SECRET_PRIMARY` | `BYBIT_API_SECRET`        | yes | Primary secret |
+| `API_KEY_BACKUP`     | `BYBIT_API_KEY_BACKUP`    | no  | Backup key, used only on auth-failover |
+| `API_SECRET_BACKUP`  | `BYBIT_API_SECRET_BACKUP` | no  | Backup secret |
+| `API_KEY`            | (alias of PRIMARY)        | —   | Back-compat alias; `bybit_bot.py:89` startup check reads this |
+| `API_SECRET`         | (alias of PRIMARY)        | —   | Back-compat alias |
+
+Failover behaviour lives in `bybit_client.py` — see § 6.2.
+
 **Verification commands:**
 
 ```bash
@@ -1044,7 +1057,7 @@ After scale-in, resizes `profit_plan` and `moving_plan` orders to the current to
 **Purpose:** Parallel implementation of the Bitget stack (`bitget_client.py` + `bitget.py` + `trader.py`) for Bybit USDT-perp futures. Same public surface as the Bitget stack so that strategy code reusing names like `import bitget as bg` / `import trader` resolves correctly under sys.modules aliasing.
 
 **Files:**
-- `bybit_client.py` — HMAC-SHA256 auth + HTTP primitives (`get`, `post`, `get_public`). Bybit V5 signing string: `timestamp + api_key + recv_window + payload` (hex digest, NOT base64). Headers: `X-BAPI-*`. Mirror of `bitget_client.py`.
+- `bybit_client.py` — HMAC-SHA256 auth + HTTP primitives (`get`, `post`, `get_public`). Bybit V5 signing string: `timestamp + api_key + recv_window + payload` (hex digest, NOT base64). Headers: `X-BAPI-*`. Mirror of `bitget_client.py`. **Primary ↔ backup key failover (sticky):** each authed request signs with the currently active key pair, starting from `API_KEY_PRIMARY` / `API_SECRET_PRIMARY` at process start. On retCodes 10003/10004/10005/10010 the client retries once with the other key; if that succeeds, the other key becomes active for all subsequent requests until *it* auth-fails. State is held in module-level `_active_key_role` and resets to `"primary"` on every process restart (so a reboot always gives the primary a fresh chance). Rate-limit retry (10006) wraps the failover.
 - `bybit.py` — Endpoint-level wrappers. Same function names as `bitget.py`: `place_pos_tpsl_full`, `place_pos_sl_only`, `place_profit_plan`, `place_moving_plan`, `place_market_order`, `place_plan_order`, `update_position_sl`, `cancel_plan_order`, `cancel_all_orders`, `get_candles`, `fetch_candles_at`, `get_mark_price`, `get_usdt_balance`, `get_total_equity`, `get_all_open_positions`, `get_single_position_entry`, `set_leverage`, `sym_info`, `round_price`, `round_qty`, `get_history_position`, `get_realized_pnl`, `get_order_fill`. Endpoints: `/v5/market/*`, `/v5/order/*`, `/v5/position/*`, `/v5/account/*`.
 - `bybit_trader.py` — High-level trader (`open_long`, `open_short`, `scale_in_long`, `scale_in_short`, `place_limit_long`, `place_limit_short`, `cancel_order`, `get_order_fill`, `update_position_sl`). Same public surface as `trader.py`. Honours `config_bybit.DRY_RUN` — when True, all order-placement calls log the intended action and return a simulated fill instead of hitting `/v5/order/create`.
 - `bybit_scanner.py` — Parallel of `scanner.py`. Endpoint: `GET /v5/market/tickers?category=linear`. Field names differ (`turnover24h`, `price24hPcnt`, `bid1Size`/`ask1Size` instead of Bitget's `quoteVolume`/`change24h`/`bidSz`).

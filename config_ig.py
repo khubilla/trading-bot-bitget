@@ -13,11 +13,14 @@ Usage:
 import os
 from pathlib import Path
 
-from config_ig_us30  import CONFIG as _US30
-from config_ig_us100 import CONFIG as _US100
-from config_ig_gold  import CONFIG as _GOLD
+from config_ig_us30   import CONFIG as _US30
+from config_ig_us100  import CONFIG as _US100
+from config_ig_gold   import CONFIG as _GOLD
+from config_ig_eurusd import CONFIG as _EURUSD
+from config_ig_gbpusd import CONFIG as _GBPUSD
+from config_ig_usdjpy import CONFIG as _USDJPY
 
-INSTRUMENTS = [_US30, _US100, _GOLD]
+INSTRUMENTS = [_US30, _US100, _GOLD, _EURUSD, _GBPUSD, _USDJPY]
 
 # Load .env from project root
 _env_file = Path(__file__).parent / ".env"

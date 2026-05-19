@@ -26,6 +26,24 @@ _RESOLUTION = {
     "1m":  "MINUTE",
 }
 
+
+# ── Per-instrument precision helpers ─────────────────────────── #
+def _instrument_for_epic(epic: str) -> dict:
+    """Look up instrument config by epic. Falls back to first instrument
+    for backward compat with helpers that pass an unknown epic."""
+    for inst in config_ig.INSTRUMENTS:
+        if inst.get("epic") == epic:
+            return inst
+    return config_ig.INSTRUMENTS[0]
+
+
+def _decimals_for_epic(epic: str) -> int:
+    return _instrument_for_epic(epic).get("price_decimals", 1)
+
+
+def _min_distance_for_epic(epic: str) -> float:
+    return _instrument_for_epic(epic).get("min_deal_distance", 1.0)
+
 # ── Candle cache ─────────────────────────────────────────────── #
 # Keyed by (epic, interval, limit). Value: (fetched_at, DataFrame).
 # TTL = one candle period so we re-fetch at most once per bar.
@@ -425,6 +443,7 @@ def _place_order(epic: str, direction: str, sl_price: float,
                  currency: str = None) -> dict:
     if currency is None:
         currency = config_ig.INSTRUMENTS[0]["currency"]
+    dec = _decimals_for_epic(epic)
     body = {
         "epic":            epic,
         "expiry":          "-",
@@ -432,8 +451,8 @@ def _place_order(epic: str, direction: str, sl_price: float,
         "size":            size,
         "orderType":       "MARKET",
         "timeInForce":     "FILL_OR_KILL",
-        "stopLevel":       round(sl_price, 1) if sl_price else None,
-        "limitLevel":      round(tp_price, 1) if tp_price else None,
+        "stopLevel":       round(sl_price, dec) if sl_price else None,
+        "limitLevel":      round(tp_price, dec) if tp_price else None,
         "currencyCode":    currency,
         "forceOpen":       True,
         "guaranteedStop":  False,
@@ -493,16 +512,21 @@ def partial_close(deal_id: str, size: float, direction: str) -> bool:
         return False
 
 
-def update_sl(deal_id: str, new_sl: float, new_tp: float = None) -> bool:
-    """Update stop loss (and optionally limit) on an open position."""
+def update_sl(deal_id: str, new_sl: float, new_tp: float = None,
+              epic: str = None) -> bool:
+    """Update stop loss (and optionally limit) on an open position.
+    Pass `epic` so the SL/TP are rounded to the instrument's price decimals.
+    Without `epic`, falls back to first instrument's decimals (legacy)."""
+    dec = _decimals_for_epic(epic) if epic else _decimals_for_epic(
+        config_ig.INSTRUMENTS[0].get("epic", ""))
     body: dict = {
-        "stopLevel":             round(new_sl, 1),
+        "stopLevel":             round(new_sl, dec),
         "trailingStop":          False,
         "trailingStopDistance":  None,
         "guaranteedStop":        False,
     }
     if new_tp is not None:
-        body["limitLevel"] = round(new_tp, 1)
+        body["limitLevel"] = round(new_tp, dec)
     try:
         resp = _get_session().put(f"/positions/otc/{deal_id}", body=body, version="2")
         deal_ref = resp.get("dealReference", "")
@@ -530,15 +554,17 @@ def _place_working_order(epic: str, direction: str, limit_price: float,
     """
     if currency is None:
         currency = config_ig.INSTRUMENTS[0]["currency"]
-    level = round(limit_price, 1)
+    dec      = _decimals_for_epic(epic)
+    min_dist = _min_distance_for_epic(epic)
+    level = round(limit_price, dec)
     # Use distances (relative to trigger level) rather than absolute levels —
     # more reliable across instrument types and avoids spread-related rejections.
     if direction == "SELL":
-        stop_dist  = round(sl_price - level, 1)
-        limit_dist = round(level - tp_price, 1)
+        stop_dist  = round(sl_price - level, dec)
+        limit_dist = round(level - tp_price, dec)
     else:
-        stop_dist  = round(level - sl_price, 1)
-        limit_dist = round(tp_price - level, 1)
+        stop_dist  = round(level - sl_price, dec)
+        limit_dist = round(tp_price - level, dec)
     body = {
         "epic":           epic,
         "direction":      direction,
@@ -546,8 +572,8 @@ def _place_working_order(epic: str, direction: str, limit_price: float,
         "level":          level,
         "type":           "LIMIT",
         "timeInForce":    "GOOD_TILL_CANCELLED",
-        "stopDistance":   max(stop_dist,  1.0),
-        "limitDistance":  max(limit_dist, 1.0),
+        "stopDistance":   max(stop_dist,  min_dist),
+        "limitDistance":  max(limit_dist, min_dist),
         "currencyCode":   currency,
         "expiry":         "-",
         "forceOpen":      True,

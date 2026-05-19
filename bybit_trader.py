@@ -114,7 +114,12 @@ def cancel_all_orders(symbol: str):
 
 
 def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0) -> bool:
-    """Resize partial-TP + trailing stop after scale-in. Delegates to bybit.refresh_plan_exits."""
+    """Resize partial-TP + trailing stop after scale-in. Delegates to bybit.refresh_plan_exits.
+
+    Note: on Bybit, the trailing-stop placement inside this function clears the
+    position's stopLoss. The caller (bot._do_scale_in) must call
+    update_position_sl again after this returns to re-establish the SL.
+    """
     if DRY_RUN:
         logger.info(f"[Bybit][DRY_RUN][{symbol}] refresh_plan_exits hold={hold_side} "
                     f"trigger={new_trail_trigger}")

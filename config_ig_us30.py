@@ -20,6 +20,11 @@ CONFIG = {
     "htf_limit":   50,
     "m15_limit":   100,
 
+    # Order precision & expiry (per-instrument, used by ig_client + ig_bot)
+    "price_decimals":       1,     # SL/TP/trigger rounded to this many decimals
+    "min_deal_distance":    1.0,   # min stopDistance / limitDistance sent to IG
+    "pending_expiry_hours": 4,     # GTC limit auto-cancel after this many hours
+
     # S5 strategy parameters
     "s5_enabled":                    True,
     "s5_daily_ema_fast":             10,

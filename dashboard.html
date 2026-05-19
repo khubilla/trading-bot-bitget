@@ -1040,6 +1040,7 @@
 <nav class="top-tabs">
   <div class="tab active" data-view="live">Live</div>
   <div class="tab"        data-view="analytics">Analytics</div>
+  <div class="tab"        data-view="shadow">Shadow</div>
 </nav>
 <div class="view view-live">
 
@@ -1480,6 +1481,84 @@
   </div><!-- /.analytics-wrap -->
 </div>
 
+<div class="view view-shadow hidden">
+  <div class="analytics-wrap">
+
+    <div class="analytics-controls">
+      <label>Exchange</label>
+      <select id="shSource">
+        <option value="bitget">Bitget</option>
+        <option value="bybit" selected>Bybit</option>
+      </select>
+      <button id="shRefresh">Refresh</button>
+      <span id="shStatus" style="opacity:0.6; font-size:12px; margin-left:auto;"></span>
+    </div>
+
+    <p style="opacity:0.7; font-size:13px; max-width: 900px; margin: 0 0 16px;">
+      <strong>Shadow tracker</strong> — virtual trades the bot would have taken if all market-sentiment gates were ignored.
+      Pure observability; no real orders. Each shadow position is tracked through SL/TP using live prices.
+      Compare these results against the live trades to gauge the value of the sentiment filter.
+    </p>
+
+    <!-- Totals row -->
+    <div id="shTotals" class="sh-totals" style="display:grid; grid-template-columns: repeat(7, minmax(0,1fr)); gap: 8px; margin-bottom: 16px;"></div>
+
+    <!-- Per-strategy + sentiment -->
+    <div style="display:grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-bottom: 16px;">
+      <div>
+        <h3 style="font-size:13px; opacity:0.75; margin: 0 0 6px;">By strategy</h3>
+        <div id="shByStrategy"></div>
+      </div>
+      <div>
+        <h3 style="font-size:13px; opacity:0.75; margin: 0 0 6px;">Sentiment at entry</h3>
+        <div id="shBySentiment"></div>
+      </div>
+    </div>
+
+    <!-- Recent virtual trades -->
+    <h3 style="font-size:13px; opacity:0.75; margin: 0 0 6px;">Recent virtual trades (newest first)</h3>
+    <div id="shRecent" style="overflow-x:auto; margin-bottom: 16px;"></div>
+
+    <!-- Scale-in events -->
+    <h3 style="font-size:13px; opacity:0.75; margin: 0 0 6px;">Sentiment-blocked scale-in events</h3>
+    <div id="shScaleIns" style="overflow-x:auto;"></div>
+
+  </div>
+</div>
+
+<style>
+  .sh-stat-card {
+    background: var(--bg1);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .sh-stat-card .lab { font-size: 11px; opacity: 0.6; text-transform: uppercase; letter-spacing: 0.5px; }
+  .sh-stat-card .val { font-size: 18px; font-weight: 600; margin-top: 2px; }
+  .sh-stat-card .val.pos { color: #4ade80; }
+  .sh-stat-card .val.neg { color: #f87171; }
+  table.sh-table {
+    width: 100%; border-collapse: collapse; font-size: 12px;
+    background: var(--bg1); border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+  }
+  table.sh-table th, table.sh-table td {
+    padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border);
+  }
+  table.sh-table th { background: var(--bg); font-weight: 500; opacity: 0.8; }
+  table.sh-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.sh-table td.pos { color: #4ade80; }
+  table.sh-table td.neg { color: #f87171; }
+  table.sh-table tr:last-child td { border-bottom: none; }
+  .sh-pill {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-size: 11px; background: var(--bg); border: 1px solid var(--border);
+  }
+  .sh-pill.long  { color: #4ade80; border-color: #1f5e36; }
+  .sh-pill.short { color: #f87171; border-color: #6b1d1d; }
+  .sh-pill.win   { color: #4ade80; }
+  .sh-pill.loss  { color: #f87171; }
+</style>
+
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <script>
 // ── Top-level tab switching (Live / Analytics) ────────────────────
@@ -1488,6 +1567,7 @@
   const views = {
     live:      document.querySelector('.view-live'),
     analytics: document.querySelector('.view-analytics'),
+    shadow:    document.querySelector('.view-shadow'),
   };
   const saved = sessionStorage.getItem('topTab') || 'live';
 
@@ -1501,10 +1581,188 @@
     if (name === 'analytics' && typeof window.onAnalyticsShown === 'function') {
       window.onAnalyticsShown();
     }
+    if (name === 'shadow' && typeof window.onShadowShown === 'function') {
+      window.onShadowShown();
+    }
   }
 
   tabs.forEach(t => t.addEventListener('click', () => activate(t.dataset.view)));
   activate(saved);
+})();
+
+// ── Shadow tab ────────────────────────────────────────────────────
+(function initShadow() {
+  const $    = (id) => document.getElementById(id);
+  const fmt  = (n, d=2) => (n === null || n === undefined || n === '') ? '—' :
+                            (typeof n === 'number' ? n.toFixed(d) : n);
+  const fmtPct = (n, d=2) => (n === null || n === undefined || n === '') ? '—' : (Number(n).toFixed(d) + '%');
+  const fmtTime = (s) => {
+    if (!s) return '—';
+    try { return new Date(s).toLocaleString(); } catch (_) { return s; }
+  };
+  const cls   = (n) => (Number(n) > 0 ? 'pos' : Number(n) < 0 ? 'neg' : '');
+
+  function statCard(lab, val, klass='') {
+    return `<div class="sh-stat-card"><div class="lab">${lab}</div><div class="val ${klass}">${val}</div></div>`;
+  }
+
+  function renderTotals(t) {
+    const pnlCls = cls(t.total_pnl);
+    $('shTotals').innerHTML = [
+      statCard('Opens',      t.opens),
+      statCard('Closed',     t.closes),
+      statCard('Wins',       t.wins,   t.wins > 0 ? 'pos' : ''),
+      statCard('Losses',     t.losses, t.losses > 0 ? 'neg' : ''),
+      statCard('Still open', t.still_open),
+      statCard('Win rate',   fmtPct(t.win_rate, 1)),
+      statCard('Sim PnL',    fmt(t.total_pnl, 2) + ' USDT', pnlCls),
+    ].join('');
+  }
+
+  function renderByStrategy(rows) {
+    if (!rows.length) { $('shByStrategy').innerHTML = '<div style="opacity:0.6;font-size:12px;">no data</div>'; return; }
+    const body = rows.map(r => `
+      <tr>
+        <td>${r.strategy}</td>
+        <td class="num">${r.opens}</td>
+        <td class="num">${r.closed}</td>
+        <td class="num">${r.wins}</td>
+        <td class="num">${r.losses}</td>
+        <td class="num">${r.still_open}</td>
+        <td class="num">${fmtPct(r.win_rate, 1)}</td>
+        <td class="num ${cls(r.pnl)}">${fmt(r.pnl, 2)}</td>
+      </tr>`).join('');
+    $('shByStrategy').innerHTML = `
+      <table class="sh-table">
+        <thead><tr>
+          <th>Strategy</th><th class="num">Opens</th><th class="num">Closed</th>
+          <th class="num">W</th><th class="num">L</th><th class="num">Open</th>
+          <th class="num">Win %</th><th class="num">Sim PnL</th>
+        </tr></thead>
+        <tbody>${body}</tbody>
+      </table>`;
+  }
+
+  function renderBySentiment(obj) {
+    const entries = Object.entries(obj || {});
+    if (!entries.length) { $('shBySentiment').innerHTML = '<div style="opacity:0.6;font-size:12px;">no data</div>'; return; }
+    const body = entries.map(([k, v]) => `<tr><td>${k}</td><td class="num">${v}</td></tr>`).join('');
+    $('shBySentiment').innerHTML = `
+      <table class="sh-table">
+        <thead><tr><th>Sentiment</th><th class="num">Opens</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>`;
+  }
+
+  function renderRecent(rows) {
+    if (!rows.length) { $('shRecent').innerHTML = '<div style="opacity:0.6;font-size:12px;">no data yet</div>'; return; }
+    const body = rows.map(r => {
+      const sideCls = r.side === 'LONG' ? 'long' : r.side === 'SHORT' ? 'short' : '';
+      const resCls  = r.result === 'WIN' ? 'win' : r.result === 'LOSS' ? 'loss' : '';
+      const pnl = r.pnl ? Number(r.pnl) : null;
+      return `
+        <tr>
+          <td>${fmtTime(r.timestamp)}</td>
+          <td>${r.action || ''}</td>
+          <td>${r.strategy || ''}</td>
+          <td>${r.symbol || ''}</td>
+          <td><span class="sh-pill ${sideCls}">${r.side || ''}</span></td>
+          <td class="num">${fmt(Number(r.entry), 6)}</td>
+          <td class="num">${fmt(Number(r.sl), 6)}</td>
+          <td class="num">${fmt(Number(r.tp), 6)}</td>
+          <td class="num">${r.exit_price ? fmt(Number(r.exit_price), 6) : '—'}</td>
+          <td>${r.result ? `<span class="sh-pill ${resCls}">${r.result}</span>` : '—'}</td>
+          <td class="num ${pnl !== null ? cls(pnl) : ''}">${pnl !== null ? fmt(pnl, 2) : '—'}</td>
+          <td>${r.exit_reason || ''}</td>
+          <td style="opacity:0.7">${r.blocked_reason || ''}</td>
+        </tr>`;
+    }).join('');
+    $('shRecent').innerHTML = `
+      <table class="sh-table">
+        <thead><tr>
+          <th>Time</th><th>Action</th><th>Strat</th><th>Symbol</th><th>Side</th>
+          <th class="num">Entry</th><th class="num">SL</th><th class="num">TP</th>
+          <th class="num">Exit</th><th>Result</th><th class="num">PnL</th>
+          <th>Exit Reason</th><th>Blocked Reason</th>
+        </tr></thead>
+        <tbody>${body}</tbody>
+      </table>`;
+  }
+
+  function renderScaleIns(rows) {
+    if (!rows.length) { $('shScaleIns').innerHTML = '<div style="opacity:0.6;font-size:12px;">no scale-in events recorded</div>'; return; }
+    const body = rows.map(r => `
+      <tr>
+        <td>${fmtTime(r.timestamp)}</td>
+        <td>${r.strategy || ''}</td>
+        <td>${r.symbol || ''}</td>
+        <td><span class="sh-pill ${r.side==='LONG'?'long':r.side==='SHORT'?'short':''}">${r.side || ''}</span></td>
+        <td class="num">${fmt(Number(r.price), 6)}</td>
+        <td>${r.blocked_sentiment || ''}</td>
+        <td style="opacity:0.7">${r.real_trade_id || ''}</td>
+      </tr>`).join('');
+    $('shScaleIns').innerHTML = `
+      <table class="sh-table">
+        <thead><tr>
+          <th>Time</th><th>Strat</th><th>Symbol</th><th>Side</th>
+          <th class="num">Mark</th><th>Sentiment</th><th>Real Trade ID</th>
+        </tr></thead>
+        <tbody>${body}</tbody>
+      </table>`;
+  }
+
+  function shAuthHeaders() {
+    const key = localStorage.getItem('dashboard_api_key') || '';
+    return key ? { 'Authorization': 'Bearer ' + key } : {};
+  }
+
+  async function load() {
+    const src = $('shSource').value;
+    sessionStorage.setItem('shSource', src);
+    $('shStatus').textContent = 'Loading…';
+    try {
+      const r = await fetch(`/api/shadow?source=${encodeURIComponent(src)}`, {
+        cache: 'no-store',
+        headers: shAuthHeaders(),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json();
+      if (!d.exists) {
+        $('shTotals').innerHTML = '';
+        $('shByStrategy').innerHTML = '';
+        $('shBySentiment').innerHTML = '';
+        $('shRecent').innerHTML = '';
+        $('shScaleIns').innerHTML = '';
+        $('shStatus').textContent = `No shadow data yet at ${d.csv_path}`;
+        return;
+      }
+      renderTotals(d.totals);
+      renderByStrategy(d.by_strategy);
+      renderBySentiment(d.by_sentiment);
+      renderRecent(d.recent);
+      renderScaleIns(d.scale_ins || []);
+      $('shStatus').textContent = `${d.csv_path} · refreshed ${new Date().toLocaleTimeString()}`;
+    } catch (e) {
+      $('shStatus').textContent = `Error: ${e.message}`;
+    }
+  }
+
+  // Restore previous source choice and wire events.
+  const saved = sessionStorage.getItem('shSource');
+  if (saved) $('shSource').value = saved;
+  $('shSource').addEventListener('change', load);
+  $('shRefresh').addEventListener('click', load);
+
+  // Auto-refresh every 30s while the Shadow tab is the active view.
+  let _shTimer = null;
+  function startTimer() {
+    if (_shTimer) return;
+    _shTimer = setInterval(() => {
+      if (!document.querySelector('.view-shadow').classList.contains('hidden')) load();
+    }, 30_000);
+  }
+
+  window.onShadowShown = () => { load(); startTimer(); };
 })();
 
 // ── Analytics tab ─────────────────────────────────────────────────
@@ -1866,6 +2124,15 @@ function renderAnalyticsDetail(s, payload, idx) {
 </script>
 
 <script>
+// ── Exchange state (hoisted) ───────────────────────────────
+// Declared here at the top of this script block so `poll()` (defined further
+// below and invoked immediately on script load) can read it without hitting
+// the TDZ. The `let activeExchange = 'bitget'` further down was previously
+// after `poll()`'s first call, which made every page load throw an
+// "Uncaught (in promise) ReferenceError: Cannot access 'activeExchange'
+// before initialization" — silent unless DevTools was open.
+var activeExchange = 'bitget';
+
 // ── Auth ───────────────────────────────────────────────────
 function _authKey() {
   return localStorage.getItem('dashboard_api_key') || '';
@@ -4195,7 +4462,8 @@ document.addEventListener('keydown', e => {
 // poll() immediately so the panel refreshes without waiting 3s.
 //
 // IG has its own #ig-panel (different data shape — single position).
-let activeExchange = 'bitget';
+// (`activeExchange` is declared at the top of this script block to avoid TDZ
+// errors when poll() runs on initial load — see comment up there.)
 
 function switchExchange(ex) {
   activeExchange = ex;

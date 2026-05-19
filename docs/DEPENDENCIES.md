@@ -71,6 +71,7 @@
 - `strategies/s5.py` — evaluate_s5 (called by both Bitget and IG)
 - `config_s5.py` — S5 parameters (Bitget only; IG now uses per-instrument CONFIG dicts)
 - `paper_trader.py` — simulation engine (used by Bitget bot only in paper mode)
+- `shadow_tracker.py` — sentiment-blocked virtual trade tracker. Records the trades the bot would have taken if all sentiment gates were ignored, then tracks each virtual position through SL/TP using live prices. Used by both Bitget and Bybit via `bot.py` hooks. No real orders ever fire from this layer. Output files are per-bot (see § 4.5).
 
 **Bot-specific strategy modules (Bitget only):**
 - `strategies/s1.py` — evaluate_s1 plus its private helpers (check_daily_trend, detect_consolidation, check_ltf_long/short, check_exit)
@@ -97,6 +98,10 @@ ig_bot.py → _log_trade → ig_trades.csv → optimize_ig.py
           → _save_state → ig_state.json (position persistence, no state.py module)
 
 paper_trader.py → paper_state.json (internal simulation state)
+
+shadow_tracker.py → shadow_state.json / shadow_trades.csv / shadow_scale_ins.csv
+                  (Bitget: shadow_*; Bybit: bybit_shadow_*)
+                  Pure observability — captures sentiment-blocked virtual trades
 ```
 
 ---
@@ -777,6 +782,57 @@ python -c "import json; print(json.load(open('ig_state.json')))"
 grep -n "ig_state.json" dashboard.py
 ```
 
+### 4.5 Shadow Tracker Files (`shadow_*` / `bybit_shadow_*`)
+
+Produced by `shadow_tracker.py` to record what trades the bot would have taken
+if all market-sentiment gates were ignored. **Pure observability** — never
+influences live orders or state.
+
+| File | Purpose | Producer | Consumer |
+|------|---------|----------|----------|
+| `shadow_state.json` (Bitget) / `bybit_shadow_state.json` (Bybit) | In-flight virtual positions; rehydrated at startup so tracking survives restarts | `shadow_tracker.set_files` + `open_virtual`/`tick` (atomic write via tempfile + `os.replace`) | `shadow_tracker._load_state` only |
+| `shadow_trades.csv` / `bybit_shadow_trades.csv` | Append-only audit log of virtual entries and closes | `shadow_tracker._write_row` | Analyst (manual) — optionally `optimize.py` later |
+| `shadow_scale_ins.csv` / `bybit_shadow_scale_ins.csv` | Event log of sentiment-blocked scale-ins on real positions (no PnL) | `shadow_tracker.scale_in_event` | Analyst (manual) |
+
+**shadow_state.json schema** (v1):
+
+```json
+{
+  "version":    1,
+  "updated_at": "ISO 8601",
+  "open": {
+    "SHADOW-S2-BTCUSDT-1778654471699": {
+      "trade_id":       "SHADOW-S2-BTCUSDT-1778654471699",
+      "strategy":       "S2",
+      "symbol":         "BTCUSDT",
+      "side":           "LONG",
+      "entry":          100.0,
+      "sl":             95.0,
+      "tp":             110.0,
+      "leverage":       10,
+      "margin":         40.0,
+      "opened_at":      "ISO 8601",
+      "snapshot":       { "snap_sentiment": "BEARISH", ... },
+      "blocked_reason": "S2 sentiment=BEARISH"
+    }
+  }
+}
+```
+
+**shadow_trades.csv columns** — mirror `bot._TRADE_FIELDS` (bot.py lines 140-166)
+exactly, **plus one extra column** at the end: `blocked_reason`. Actions used:
+`{strategy}_LONG`, `{strategy}_SHORT`, `{strategy}_CLOSE`.
+
+**shadow_scale_ins.csv columns:** `timestamp, real_trade_id, strategy, symbol, side, price, blocked_sentiment`.
+
+**Cross-bot isolation:** the file paths are set in each bot's config
+(`config.py` → `shadow_*`, `config_bybit.py` → `bybit_shadow_*`). Bybit's
+`sys.modules["config"] = config_bybit` aliasing in `bybit_bot.py` ensures
+`bot.py`'s `config.SHADOW_*` reads resolve to the bybit paths automatically.
+
+**Disabling:** set `SHADOW_TRACKING_ENABLED = False` in the relevant config.
+When false, none of the bot.py hooks fire and no files are written.
+
 ---
 
 ## 5. Config Dependencies
@@ -824,6 +880,11 @@ CONFIG = {
     "daily_limit":   int,
     "htf_limit":     int,
     "m15_limit":     int,
+
+    # Order precision & expiry (per-instrument; used by ig_client + ig_bot)
+    "price_decimals":       int,   # 1 for indices, 3 for JPY pairs, 5 for major FX
+    "min_deal_distance":    float, # 1.0 for indices, 0.01 for JPY, 0.0001 for FX
+    "pending_expiry_hours": int,   # GTC limit auto-cancel window (4 indices, 48 FX)
 
     # S5 strategy parameters (lowercase versions of S5_* names)
     "s5_enabled":                    bool,
@@ -898,7 +959,11 @@ These params live in `config.py` and are imported by `scanner.py`. Changing them
 |------|------|
 | `config_ig.py` | Registry: imports instrument configs, exposes `INSTRUMENTS` list + shared settings |
 | `config_ig_us30.py` | US30 CONFIG dict (instrument params + S5 params) |
-| `config_ig_gold.py` | GOLD CONFIG dict (instrument params + S5 params) |
+| `config_ig_us100.py` | US100 CONFIG dict (instrument params + S5 params, grid-tuned 2026-04-30) |
+| `config_ig_gold.py` | GOLD CONFIG dict (instrument params + S5 params, grid-tuned 2026-04-07) |
+| `config_ig_eurusd.py` | EUR/USD CONFIG dict (instrument params + S5 params, US30 baseline — pending backtest tune) |
+| `config_ig_gbpusd.py` | GBP/USD CONFIG dict (instrument params + S5 params, US30 baseline — pending backtest tune) |
+| `config_ig_usdjpy.py` | USD/JPY CONFIG dict (instrument params + S5 params, US30 baseline — pending backtest tune; 2-decimal price) |
 | `config_ig_s5.py` | **Deleted** — absorbed into `config_ig_us30.py` in the multi-instrument migration |
 
 ### 5.8 Bybit API Credentials (`config_bybit.py`)
@@ -913,6 +978,27 @@ These params live in `config.py` and are imported by `scanner.py`. Changing them
 | `API_SECRET`         | (alias of PRIMARY)        | —   | Back-compat alias |
 
 Failover behaviour lives in `bybit_client.py` — see § 6.2.
+
+### 5.7 Shadow Tracker Config (Bitget + Bybit)
+
+Defined in both `config.py` and `config_bybit.py` so each bot writes to its
+own files. The Bybit `sys.modules["config"]` aliasing means `bot.py`'s
+`config.SHADOW_*` references resolve to whichever config is active.
+
+| Key | Type | Bitget default | Bybit default |
+|-----|------|----------------|---------------|
+| `SHADOW_TRACKING_ENABLED` | bool | `True` | `True` |
+| `SHADOW_STATE_FILE` | path | `shadow_state.json` | `bybit_shadow_state.json` |
+| `SHADOW_TRADES_CSV` | path | `shadow_trades.csv` | `bybit_shadow_trades.csv` |
+| `SHADOW_SCALE_INS_CSV` | path | `shadow_scale_ins.csv` | `bybit_shadow_scale_ins.csv` |
+
+Reading sites:
+- `bot.MTFBot.__init__` — calls `shadow_tracker.set_files(...)` once at startup
+- `bot.MTFBot.run` — gated tick block uses `config.SHADOW_TRACKING_ENABLED`
+- `bot.MTFBot._evaluate_pair` — calls `_shadow_check_pair` for sentiment-blocked entries
+- `bot.MTFBot.handle_pending_tick` scale-in gate — calls `shadow_tracker.scale_in_event`
+- `strategies/s6.py:handle_pending_tick` — calls `shadow_tracker.open_virtual` on cancel
+
 
 **Verification commands:**
 
@@ -1067,6 +1153,50 @@ After scale-in, resizes `profit_plan` and `moving_plan` orders to the current to
 **Candle interval mapping:** Bybit uses minute integers + `D`/`W` (e.g. `60` for 1H, `240` for 4H, `D` for daily); the Bitget format (`1H`, `4H`, `1D`) is mapped at the top of `bybit.py` via `_INTERVAL_MAP`.
 
 **One-way mode only:** All position/order calls pass `positionIdx=0`. Hedge mode is not supported.
+
+**Post-close order cleanup (May 2026 bugfix):**
+When the bot detects a position has closed (normal close path, startup
+reconcile, or orphan reconcile in `bot.py`), it now calls
+`tr.cancel_all_orders(sym)` to sweep any leftover reduce-only conditional
+orders the exchange did not auto-clean. Position-level SL/TP/trailing are
+auto-cancelled by both exchanges when size hits 0, but standalone
+conditionals (Bybit's `place_profit_plan` via `/v5/order/create` with
+`triggerPrice`+`reduceOnly`) can linger and clutter the UI until manually
+cancelled.
+
+`bybit.cancel_all_orders` was widened in the same fix to call
+`/v5/order/cancel-all` twice — once with `orderFilter=Order` (regular
+orders) and once with `orderFilter=StopOrder` (conditional orders) — because
+the default filter only covers regular orders. PAPER_MODE skips the call
+(paper_trader has no real exchange orders). Idempotent on Bitget — the
+exchange already auto-cancels plan orders on position close, so the explicit
+call is a no-op safety net there.
+
+**Full-mode trading-stop SL preservation (Bybit-specific, May 2026 bugfix):**
+`/v5/position/trading-stop` with `tpslMode="Full"` is a REPLACE operation — any
+of `takeProfit` / `stopLoss` / `trailingStop` not present in the request body
+is cleared to 0. `bybit.place_pos_sl_only`, `bybit.update_position_sl`, and
+`bybit.place_moving_plan` all post to this same endpoint.
+
+Before the fix, calling `place_moving_plan` immediately after `place_pos_sl_only`
+(every S1/S2/S3/S4/S6 entry, and every scale-in via `refresh_plan_exits`)
+silently deactivated the SL that had just been set. Confirmed by inspecting
+`/v5/order/history` for closed S4 trades — every `StopLoss` order showed
+`orderStatus=Deactivated`, and positions closed exclusively via TrailingStop.
+
+**Fix location:** `bybit.place_moving_plan` ([bybit.py](../bybit.py)) now
+reads the position's current `stopLoss` via `/v5/position/list` and re-sends
+it inside the trading-stop body. Self-contained — callers (`strategies/s*.py`
+exit primitives, `bybit.refresh_plan_exits`, `bot._do_scale_in`) require no
+changes. Adds one extra read per `place_moving_plan` call. Failure to read
+the SL is logged and the call proceeds (best-effort; no worse than pre-fix
+behaviour).
+
+**Bitget equivalent:** `bitget.place_moving_plan` posts to
+`/api/v2/mix/order/place-tpsl-order` — a *separate* endpoint from
+`place-pos-tpsl` (the position-level SL/TP setter). Bitget's place-tpsl-order
+does NOT touch position-level SL, so no preservation is needed. The Bitget
+code path is unaffected; the SL preservation is a Bybit-only concern.
 
 **Imported by:** None directly. `bybit_bot.py` installs sys.modules aliases (`bitget` → `bybit`, `trader` → `bybit_trader`, `scanner` → `bybit_scanner`) so when strategies do `import bitget as bg` or `import trader` they transparently get the Bybit equivalents. See § 10.5 (sys.modules aliasing).
 
@@ -1290,6 +1420,19 @@ python -c "import json; s=json.load(open('state_paper.json')); print(list(s['pai
 # IG bot only has ig_state.json (no state_paper.json equivalent)
 ls -lh ig_state.json 2>/dev/null || echo "IG state file not found (normal if bot hasn't run)"
 ```
+
+#### shadow_trades.csv vs trades_paper.csv vs trades.csv
+
+| File | Purpose | When written | Real money? |
+|------|---------|--------------|-------------|
+| `trades.csv` | Live trade log (Bitget) | Every real OPEN/CLOSE/PARTIAL | **Yes** |
+| `trades_paper.csv` | Full paper-mode trade log | When bot runs with `--paper` | No (simulated) |
+| `shadow_trades.csv` | Sentiment-blocked virtual trades | Always (when `SHADOW_TRACKING_ENABLED`); only when sentiment would have blocked a real trade | No (observability only) |
+
+The shadow tracker runs **alongside** live or paper mode; it's not a third
+mode. Its rows never represent trades the bot actually placed — they
+represent trades it would have placed if the sentiment filter were off.
+See §§ 2 and 4.5. Bybit equivalents: `bybit_trades.csv`, `bybit_shadow_trades.csv`.
 
 ### 10.2 Similar Parameter Names Across Strategies
 

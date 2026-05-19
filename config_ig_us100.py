@@ -20,6 +20,11 @@ CONFIG = {
     "htf_limit":   50,
     "m15_limit":   100,
 
+    # Order precision & expiry (per-instrument, used by ig_client + ig_bot)
+    "price_decimals":       1,
+    "min_deal_distance":    1.0,
+    "pending_expiry_hours": 4,
+
     # S5 strategy parameters (optimized via grid search 2026-04-30)
     # Backtest result: 4 fills, 50% WR, -3 pts (near breakeven)
     # Key changes from US30 baseline: ob_lookback 40→30, min_rr 1.0→1.2

@@ -103,6 +103,7 @@ _REQUIRED_INSTRUMENT_KEYS = {
     "contract_size", "partial_size", "point_value",
     "session_start", "session_end",
     "daily_limit", "htf_limit", "m15_limit",
+    "price_decimals", "min_deal_distance", "pending_expiry_hours",
     "s5_enabled", "s5_daily_ema_fast", "s5_daily_ema_med", "s5_daily_ema_slow",
     "s5_htf_bos_lookback", "s5_ltf_interval", "s5_ob_lookback",
     "s5_ob_min_impulse", "s5_ob_min_range_pct", "s5_choch_lookback",
@@ -745,8 +746,9 @@ class IGBot:
             return
 
         # 10. Place limit working order
-        sl   = round(sl, 1)
-        tp   = round(tp, 1) if tp else round(trigger + abs(trigger - sl) if side == "LONG" else trigger - abs(trigger - sl), 1)
+        dec  = instrument["price_decimals"]
+        sl   = round(sl, dec)
+        tp   = round(tp, dec) if tp else round(trigger + abs(trigger - sl) if side == "LONG" else trigger - abs(trigger - sl), dec)
         contract_size = instrument["contract_size"]
         try:
             if side == "LONG":
@@ -765,7 +767,7 @@ class IGBot:
             "tp":       tp,
             "trigger":  trigger,
             "size":     contract_size,
-            "expires":  time.time() + 4 * 3600,
+            "expires":  time.time() + instrument["pending_expiry_hours"] * 3600,
         }
         self._save_state()
         logger.info(
@@ -785,10 +787,10 @@ class IGBot:
             logger.warning(f"[{name}] [S5] risk=0, skipping")
             return
 
-        tp1 = round(mark + risk if sig == "LONG" else mark - risk, 1)
-        # Round SL/TP to nearest whole point (US30 convention)
-        sl  = round(sl, 1)
-        tp  = round(tp, 1) if tp else tp1
+        dec = instrument["price_decimals"]
+        tp1 = round(mark + risk if sig == "LONG" else mark - risk, dec)
+        sl  = round(sl, dec)
+        tp  = round(tp, dec) if tp else tp1
 
         trade_id   = uuid.uuid4().hex[:8]
 
@@ -832,14 +834,14 @@ class IGBot:
             "trade_id":           trade_id,
             "side":               sig,
             "qty":                contract_size,
-            "entry":              round(entry, 1),
+            "entry":              round(entry, dec),
             "sl":                 sl,
             "tp":                 tp,
-            "snap_entry_trigger": round(trigger, 1),
+            "snap_entry_trigger": round(trigger, dec),
             "snap_sl":            sl,
             "snap_rr":            rr,
-            "snap_s5_ob_low":     round(ob_low, 1),
-            "snap_s5_ob_high":    round(ob_high, 1),
+            "snap_s5_ob_low":     round(ob_low, dec),
+            "snap_s5_ob_high":    round(ob_high, dec),
             "snap_s5_tp":         tp,
         }, paper=self.paper)
 
@@ -971,7 +973,7 @@ class IGBot:
         # Apply same exec buffer as Bitget (0.5% slippage for non-guaranteed stops)
         sl_exec = sl * 0.995 if side == "LONG" else sl * 1.005
         risk = abs(fill_price - sl_exec)
-        tp1  = round(fill_price + risk if side == "LONG" else fill_price - risk, 1)
+        tp1  = round(fill_price + risk if side == "LONG" else fill_price - risk, instrument["price_decimals"])
 
         trade_id = uuid.uuid4().hex[:8]
 
@@ -999,19 +1001,20 @@ class IGBot:
 
         rr = round(abs(tp - fill_price) / risk, 2) if risk > 0 else 0
 
+        dec = instrument["price_decimals"]
         _log_trade(f"S5_{side}", {
             "symbol":             name,
             "trade_id":           trade_id,
             "side":               side,
             "qty":                size,
-            "entry":              round(fill_price, 1),
+            "entry":              round(fill_price, dec),
             "sl":                 sl,
             "tp":                 tp,
-            "snap_entry_trigger": round(trigger, 1),
+            "snap_entry_trigger": round(trigger, dec),
             "snap_sl":            sl,
             "snap_rr":            rr,
-            "snap_s5_ob_low":     round(ob_low, 1),
-            "snap_s5_ob_high":    round(ob_high, 1),
+            "snap_s5_ob_low":     round(ob_low, dec),
+            "snap_s5_ob_high":    round(ob_high, dec),
             "snap_s5_tp":         tp,
         }, paper=self.paper)
 
@@ -1094,7 +1097,7 @@ class IGBot:
                 return
             partial_pnl = _calc_partial_pnl(pos, mark, instrument)
             # Move SL to breakeven
-            ig.update_sl(pos["deal_id"], pos["entry"])
+            ig.update_sl(pos["deal_id"], pos["entry"], epic=instrument["epic"])
             pos["sl"]           = pos["entry"]
             pos["partial_done"] = True
             pos["current_qty"]  = pos["initial_qty"] - instrument["partial_size"]
@@ -1105,7 +1108,7 @@ class IGBot:
             "trade_id":    pos["trade_id"],
             "side":        pos["side"],
             "qty":         instrument["partial_size"],
-            "entry":       round(pos["entry"], 1),
+            "entry":       round(pos["entry"], instrument["price_decimals"]),
             "pnl":         round(partial_pnl, 2),
             "result":      "WIN" if partial_pnl >= 0 else "LOSS",
             "exit_reason": "PARTIAL_TP",
@@ -1130,13 +1133,14 @@ class IGBot:
             if cs_df.empty or len(cs_df) < 3:
                 return
 
+            dec = instrument["price_decimals"]
             if pos["side"] == "LONG":
                 raw      = find_swing_low_target(cs_df, mark, lookback=instrument["s5_swing_lookback"])
-                new_sl   = round(raw * (1 - instrument["s5_sl_buffer_pct"]), 1) if raw else None
+                new_sl   = round(raw * (1 - instrument["s5_sl_buffer_pct"]), dec) if raw else None
                 improves = new_sl is not None and new_sl > pos["sl"]
             else:
                 raw      = find_swing_high_target(cs_df, mark, lookback=instrument["s5_swing_lookback"])
-                new_sl   = round(raw * (1 + instrument["s5_sl_buffer_pct"]), 1) if raw else None
+                new_sl   = round(raw * (1 + instrument["s5_sl_buffer_pct"]), dec) if raw else None
                 improves = new_sl is not None and new_sl < pos["sl"]
 
             if not improves:
@@ -1146,7 +1150,7 @@ class IGBot:
                 self._paper.update_sl(new_sl)
                 self._positions[name]["sl"] = new_sl
             else:
-                if ig.update_sl(pos["deal_id"], new_sl):
+                if ig.update_sl(pos["deal_id"], new_sl, epic=instrument["epic"]):
                     pos["sl"] = new_sl
                     self._save_state()
 
@@ -1188,7 +1192,7 @@ class IGBot:
             "trade_id":    pos["trade_id"],
             "side":        pos["side"],
             "qty":         pos["current_qty"],
-            "entry":       round(pos["entry"], 1),
+            "entry":       round(pos["entry"], instrument["price_decimals"]),
             "pnl":         round(realized, 2),
             "result":      result,
             "exit_reason": exit_reason,
@@ -1268,7 +1272,7 @@ class IGBot:
             "trade_id":    pos["trade_id"],
             "side":        pos["side"],
             "qty":         pos["current_qty"],
-            "entry":       round(pos["entry"], 1),
+            "entry":       round(pos["entry"], instrument["price_decimals"]),
             "pnl":         round(realized, 2),
             "result":      result,
             "exit_reason": "SESSION_END",

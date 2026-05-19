@@ -33,9 +33,12 @@ from config_ig import INSTRUMENTS
 _CACHE_DIR  = Path("data/ig_cache")
 _ET         = pytz.timezone("America/New_York")
 _YF_SYMBOLS = {
-    "US30":  "^DJI",
-    "US100": "^IXIC",  # NASDAQ Composite
-    "GOLD":  "GC=F",
+    "US30":   "^DJI",
+    "US100":  "^IXIC",  # NASDAQ Composite
+    "GOLD":   "GC=F",
+    "EURUSD": "EURUSD=X",
+    "GBPUSD": "GBPUSD=X",
+    "USDJPY": "USDJPY=X",
 }
 _YF_PERIODS   = {"1D": "10y",  "1H": "2y",  "15m": "60d"}
 _YF_INTERVALS = {"1D": "1d",   "1H": "1h",  "15m": "15m"}
@@ -354,7 +357,7 @@ def run_instrument(instrument: dict,
                     "tp":      tp,
                     "ob_low":  ob_low,
                     "ob_high": ob_high,
-                    "expires": ts + 4 * 3_600_000,   # 4h in ms
+                    "expires": ts + instrument.get("pending_expiry_hours", 4) * 3_600_000,
                 }
                 state = "PENDING"
 

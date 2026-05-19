@@ -511,6 +511,15 @@ def place_moving_plan(symbol: str, hold_side: str, qty_str: str,
       values < 1 are already decimal fractions (0.10 → 0.10). Bybit's V5
       `trailingStop` field expects an absolute price distance, so we multiply
       by the trigger to get the price-units distance.
+
+    SL preservation: Bybit V5 /v5/position/trading-stop with tpslMode="Full"
+    REPLACES the entire TP/SL/TS config — fields not included are cleared.
+    Without preservation, this call would wipe the position's stopLoss
+    (previously set by place_pos_sl_only or update_position_sl). We read the
+    current stopLoss from /v5/position/list and re-send it in the same body
+    so it survives the REPLACE. Self-contained: callers don't need to know
+    about this quirk. Best-effort — if the position read fails or returns no
+    SL, we proceed without it (preserving prior behaviour).
     """
     if _dry_run_skip("place_moving_plan", symbol=symbol, hold=hold_side,
                      trigger=trigger, range_rate=range_rate):
@@ -522,14 +531,42 @@ def place_moving_plan(symbol: str, hold_side: str, qty_str: str,
     pct = raw / 100.0 if raw >= 1 else raw
     trailing_distance = trigger * pct
 
-    bc.post("/v5/position/trading-stop", {
+    body = {
         "category":      CATEGORY,
         "symbol":        symbol,
         "positionIdx":   0,
         "trailingStop":  round_price(trailing_distance, symbol),
         "activePrice":   round_price(trigger, symbol),
         "tpslMode":      "Full",
-    })
+    }
+
+    # Preserve the current stopLoss across this REPLACE. /v5/position/list
+    # returns "stopLoss" as a string price ("0" / "" / missing when unset).
+    try:
+        _pos = bc.get("/v5/position/list",
+                      params={"category": CATEGORY, "symbol": symbol})
+        for _p in (_pos.get("result") or {}).get("list") or []:
+            if str(_p.get("symbol")) != symbol:
+                continue
+            _sl_str = (_p.get("stopLoss") or "").strip()
+            try:
+                _sl_val = float(_sl_str)
+            except ValueError:
+                _sl_val = 0.0
+            if _sl_val > 0:
+                body["stopLoss"]    = round_price(_sl_val, symbol)
+                body["slTriggerBy"] = "MarkPrice"
+                body["slOrderType"] = "Market"
+            break
+    except Exception as e:
+        # Best-effort — log and proceed. Worst case is the pre-fix behaviour
+        # (SL wiped); not worse than what we had before.
+        logger.warning(
+            f"[Bybit][{symbol}] place_moving_plan: could not read current SL "
+            f"for preservation: {e}"
+        )
+
+    bc.post("/v5/position/trading-stop", body)
 
 
 def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0) -> bool:
@@ -547,6 +584,13 @@ def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0
         new_trail_trigger: if > 0, used as the new partial-TP trigger AND
             trailing-stop activePrice. If 0, the previous order's triggerPrice
             is preserved.
+
+    SL preservation note: place_moving_plan called inside this function posts
+    to /v5/position/trading-stop with tpslMode=Full, which wipes the stopLoss.
+    The caller (bot._do_scale_in) must call update_position_sl AGAIN after
+    this function returns, to re-establish the SL. We do not pass sl_price
+    through here because the caller's existing test contract pins this
+    function's signature.
 
     Returns True on success. Logs and returns False if no existing partial-TP
     conditional is found (cannot infer prior trigger / range), or if all 3
@@ -645,10 +689,14 @@ def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0
         try:
             place_profit_plan(symbol, hold_side, half_qty, trigger)
             _time.sleep(0.5)
+            # NOTE: this call wipes the position's stopLoss on Bybit (Full-mode
+            # trading-stop REPLACE). The caller must re-apply SL after this
+            # function returns. See docstring.
             place_moving_plan(symbol, hold_side, rest_qty_str, trigger, range_rate)
             logger.info(
                 f"[Bybit][{symbol}] ✅ Plan exits refreshed after scale-in: "
-                f"partial_tp={half_qty}@{trigger}, trailing_stop active@{trigger}"
+                f"partial_tp={half_qty}@{trigger}, trailing_stop active@{trigger} "
+                f"(SL must be re-applied by caller)"
             )
             return True
         except Exception as e:
@@ -750,16 +798,31 @@ def cancel_plan_order(symbol: str, order_id: str) -> None:
 
 
 def cancel_all_orders(symbol: str) -> None:
-    """Cancel all open + conditional orders for a symbol."""
+    """Cancel all open regular + conditional reduce-only orders for a symbol.
+
+    Bybit V5 `/v5/order/cancel-all` filters by `orderFilter`. Without one, it
+    only cancels regular orders — conditional/stop orders (where
+    place_profit_plan parks the partial-TP) survive. We issue both calls so
+    nothing is left dangling after a position closes.
+
+    Used by the bot's close-detection path to prevent orphaned reduce-only
+    conditionals from cluttering the Bybit UI (they cannot fill once the
+    position is gone, but Bybit keeps them visible until cancelled).
+    """
     if _dry_run_skip("cancel_all_orders", symbol=symbol):
         return
-    try:
-        bc.post("/v5/order/cancel-all", {
-            "category": CATEGORY,
-            "symbol":   symbol,
-        })
-    except Exception as e:
-        logger.warning(f"[Bybit][{symbol}] cancel orders warn: {e}")
+    for order_filter in ("Order", "StopOrder"):
+        try:
+            bc.post("/v5/order/cancel-all", {
+                "category":    CATEGORY,
+                "symbol":      symbol,
+                "orderFilter": order_filter,
+            })
+        except Exception as e:
+            # 110001 = "order does not exist" — expected when there's nothing
+            # of this filter to cancel. Other errors are logged but don't stop
+            # the second pass.
+            logger.warning(f"[Bybit][{symbol}] cancel-all ({order_filter}) warn: {e}")
 
 
 def get_order_fill(symbol: str, order_id: str) -> dict:

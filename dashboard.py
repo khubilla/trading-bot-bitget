@@ -28,6 +28,12 @@ IG_STATE_FILE  = str(_DATA_DIR / "ig_state.json")
 IG_TRADES_FILE = str(_DATA_DIR / "ig_trades.csv")
 BYBIT_STATE_FILE  = str(_DATA_DIR / "bybit_state.json")
 BYBIT_TRADES_FILE = str(_DATA_DIR / "bybit_trades.csv")
+# Shadow tracker output files (sentiment-blocked virtual trades).
+# See shadow_tracker.py and DEPENDENCIES.md § 4.5.
+SHADOW_TRADES_FILE        = str(_DATA_DIR / "shadow_trades.csv")
+SHADOW_SCALEINS_FILE      = str(_DATA_DIR / "shadow_scale_ins.csv")
+BYBIT_SHADOW_TRADES_FILE  = str(_DATA_DIR / "bybit_shadow_trades.csv")
+BYBIT_SHADOW_SCALEINS_FILE = str(_DATA_DIR / "bybit_shadow_scale_ins.csv")
 PORT       = int(_os.environ.get("PORT", 8081 if PAPER_MODE else 9090))
 app = FastAPI(title="MTF Bot Dashboard" + (" [PAPER]" if PAPER_MODE else ""))
 
@@ -1215,6 +1221,156 @@ def get_bybit_state():
         return JSONResponse(state)
     except Exception as e:
         return JSONResponse({"status": "ERROR", "error": str(e)})
+
+
+# ── Shadow Tracker ───────────────────────────────────────────────── #
+# Aggregated view of sentiment-blocked virtual trades. See
+# shadow_tracker.py and DEPENDENCIES.md § 4.5.
+
+def _shadow_files(source: str) -> tuple[str, str]:
+    """Return (trades_csv, scaleins_csv) for the requested source."""
+    if source == "bybit":
+        return BYBIT_SHADOW_TRADES_FILE, BYBIT_SHADOW_SCALEINS_FILE
+    return SHADOW_TRADES_FILE, SHADOW_SCALEINS_FILE
+
+
+def _summarise_shadow(csv_path: str) -> dict:
+    """Walk the shadow CSV once and produce totals + per-strategy + recent rows."""
+    by_strat: dict[str, dict] = {}
+    by_sent: dict[str, int]   = {}
+    opens: dict[str, dict]    = {}
+    closes: list[dict]        = []
+    recent: list[dict]        = []
+
+    if not os.path.exists(csv_path):
+        return {
+            "exists":      False,
+            "csv_path":    csv_path,
+            "totals":      {"opens": 0, "closes": 0, "wins": 0, "losses": 0,
+                            "still_open": 0, "win_rate": 0.0, "total_pnl": 0.0},
+            "by_strategy": [],
+            "by_sentiment": {},
+            "recent":      [],
+        }
+
+    try:
+        with open(csv_path, newline="") as f:
+            rows = list(csv.DictReader(f))
+    except Exception:
+        rows = []
+
+    for r in rows:
+        action = (r.get("action") or "").strip()
+        tid    = (r.get("trade_id") or "").strip()
+        strat  = (r.get("strategy") or "").strip() or "?"
+        if not tid:
+            continue
+        if action.endswith("_LONG") or action.endswith("_SHORT"):
+            opens[tid] = r
+            sent = (r.get("snap_sentiment") or "?").strip() or "?"
+            by_sent[sent] = by_sent.get(sent, 0) + 1
+            d = by_strat.setdefault(strat, {"opens": 0, "wins": 0, "losses": 0, "pnl": 0.0})
+            d["opens"] += 1
+        elif "_CLOSE" in action:
+            closes.append(r)
+            d = by_strat.setdefault(strat, {"opens": 0, "wins": 0, "losses": 0, "pnl": 0.0})
+            if r.get("result") == "WIN":   d["wins"]   += 1
+            if r.get("result") == "LOSS":  d["losses"] += 1
+            try:
+                d["pnl"] += float(r.get("pnl") or 0.0)
+            except (TypeError, ValueError):
+                pass
+
+    closed_tids = {c.get("trade_id") for c in closes}
+    wins  = sum(d["wins"]   for d in by_strat.values())
+    losses = sum(d["losses"] for d in by_strat.values())
+    total_pnl = sum(d["pnl"] for d in by_strat.values())
+    n_closed = wins + losses
+    n_open   = len(opens)
+    still_open = n_open - len([t for t in opens if t in closed_tids])
+    win_rate = (wins / n_closed * 100.0) if n_closed else 0.0
+
+    # Recent 30 actions for the bottom table
+    for r in rows[-30:]:
+        recent.append({
+            "timestamp":      r.get("timestamp"),
+            "action":         r.get("action"),
+            "trade_id":       r.get("trade_id"),
+            "symbol":         r.get("symbol"),
+            "side":           r.get("side"),
+            "strategy":       r.get("strategy"),
+            "entry":          r.get("entry"),
+            "sl":             r.get("sl"),
+            "tp":             r.get("tp"),
+            "exit_price":     r.get("exit_price"),
+            "result":         r.get("result"),
+            "pnl":            r.get("pnl"),
+            "pnl_pct":        r.get("pnl_pct"),
+            "exit_reason":    r.get("exit_reason"),
+            "snap_sentiment": r.get("snap_sentiment"),
+            "blocked_reason": r.get("blocked_reason"),
+        })
+
+    by_strategy_list = []
+    for s in sorted(by_strat.keys()):
+        d = by_strat[s]
+        closed_s = d["wins"] + d["losses"]
+        by_strategy_list.append({
+            "strategy":   s,
+            "opens":      d["opens"],
+            "closed":     closed_s,
+            "wins":       d["wins"],
+            "losses":     d["losses"],
+            "still_open": d["opens"] - closed_s,
+            "win_rate":   round((d["wins"] / closed_s * 100.0) if closed_s else 0.0, 2),
+            "pnl":        round(d["pnl"], 4),
+        })
+
+    return {
+        "exists":   True,
+        "csv_path": csv_path,
+        "totals": {
+            "opens":      n_open,
+            "closes":     n_closed,
+            "wins":       wins,
+            "losses":     losses,
+            "still_open": still_open,
+            "win_rate":   round(win_rate, 2),
+            "total_pnl":  round(total_pnl, 4),
+        },
+        "by_strategy":  by_strategy_list,
+        "by_sentiment": by_sent,
+        "recent":       list(reversed(recent)),  # newest first
+    }
+
+
+def _load_shadow_scaleins(csv_path: str, limit: int = 30) -> list[dict]:
+    """Return recent scale-in events as list of dicts (newest first)."""
+    if not os.path.exists(csv_path):
+        return []
+    try:
+        with open(csv_path, newline="") as f:
+            rows = list(csv.DictReader(f))
+    except Exception:
+        return []
+    return list(reversed(rows[-limit:]))
+
+
+@app.get("/api/shadow")
+def get_shadow(source: str = "bitget"):
+    """
+    Aggregated shadow-tracker view. Query param `source=bitget|bybit`.
+
+    Returns totals, per-strategy breakdown, sentiment distribution at entry,
+    a recent-events tail, and the scale-in event log. Pure read of the CSVs
+    written by shadow_tracker.py — never writes anything.
+    """
+    src = "bybit" if source == "bybit" else "bitget"
+    trades_csv, scaleins_csv = _shadow_files(src)
+    summary = _summarise_shadow(trades_csv)
+    summary["source"]    = src
+    summary["scale_ins"] = _load_shadow_scaleins(scaleins_csv)
+    return JSONResponse(summary)
 
 
 @app.get("/", response_class=HTMLResponse)

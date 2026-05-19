@@ -198,6 +198,38 @@ def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
     if bot.sentiment and bot.sentiment.direction == "BULLISH":
         logger.info(f"[S6][{symbol}] 🚫 Cancelled — sentiment BULLISH")
         st.add_scan_log(f"[S6][{symbol}] 🚫 Cancelled (BULLISH)", "WARN")
+        # Shadow: record the would-be S6 SHORT entry before popping the
+        # watcher. Use current mark as entry, the watcher's SL, and a
+        # 2R TP so we can observe how this sentiment-cancel would have
+        # performed. Wrapped in try/except — never crashes live flow.
+        if getattr(config, "SHADOW_TRACKING_ENABLED", False):
+            try:
+                import shadow_tracker as _shadow
+                import config_s6 as _cs6
+                _mark = None
+                try:
+                    _mark = tr.get_mark_price(symbol)
+                except Exception:
+                    pass
+                _entry = float(_mark) if _mark else float(sig.get("peak_level", 0) or 0)
+                _sl    = float(sig.get("s6_sl", 0) or 0)
+                if _entry > 0 and _sl > _entry:
+                    _risk = _sl - _entry
+                    _tp   = _entry - _risk * 2.0
+                    _shadow.open_virtual(
+                        "S6", symbol, "SHORT", _entry, _sl, _tp,
+                        getattr(_cs6, "S6_LEVERAGE", 10),
+                        getattr(_cs6, "S6_TRADE_SIZE_PCT", 0.04) * balance,
+                        {
+                            "snap_sentiment":      "BULLISH",
+                            "snap_s6_peak":        round(float(sig.get("peak_level", 0) or 0), 8),
+                            "snap_s6_drop_pct":    sig.get("drop_pct"),
+                            "snap_s6_rsi_at_peak": sig.get("rsi_at_peak"),
+                        },
+                        "S6 cancel sentiment=BULLISH",
+                    )
+            except Exception as _se:
+                logger.warning(f"[SHADOW][S6][{symbol}] cancel-log error: {_se}")
         bot.pending_signals.pop(symbol, None)
         st.save_pending_signals(bot.pending_signals)
         return None

@@ -201,3 +201,46 @@ def test_update_scan_state_s1_writes_under_s1_key():
     assert "S1" in bot._scan_signals["US100"]
     assert bot._scan_signals["US100"]["S1"]["signal"] == "HOLD"
     assert bot._scan_signals["US100"]["S1"]["rsi"] == 55.0
+
+
+def test_load_state_migrates_flat_scan_signals_to_strategy_keyed(tmp_path):
+    """Old flat scan_signals[name] (signal at top) is wrapped as {'S5': old} on load."""
+    import json
+    from unittest.mock import patch
+    state = {
+        "positions": {}, "pending_orders": {},
+        "scan_signals": {
+            "US100": {"signal": "PENDING_LONG", "reason": "x", "ob_low": 100, "ob_high": 110}
+        },
+        "scan_log": [],
+    }
+    state_path = tmp_path / "ig_state.json"
+    state_path.write_text(json.dumps(state))
+    with patch("config_ig.STATE_FILE", str(state_path)), \
+         patch("config_ig.INSTRUMENTS", [{"display_name": "US100", "epic": "TEST"}]):
+        bot = ig_bot.IGBot.__new__(ig_bot.IGBot)
+        bot._positions = {}; bot._pending_orders = {}
+        bot._scan_signals = {}; bot._scan_log = []
+        bot.paper = True; bot._paper = None
+        bot._load_state()
+    assert "S5" in bot._scan_signals["US100"]
+    assert bot._scan_signals["US100"]["S5"]["signal"] == "PENDING_LONG"
+    assert "signal" not in bot._scan_signals["US100"]   # outer dict no longer has flat 'signal'
+
+
+def test_update_scan_state_writes_under_s5_key_in_new_shape():
+    """The S5 _update_scan_state writes under scan_signals[name]['S5']."""
+    bot = ig_bot.IGBot.__new__(ig_bot.IGBot)
+    bot._scan_signals = {}; bot._scan_log = []
+    bot._update_scan_state("US100", "PENDING_LONG", "x", 100.0, 110.0, 105.0, 95.0, 115.0)
+    assert "S5" in bot._scan_signals["US100"]
+    assert bot._scan_signals["US100"]["S5"]["signal"] == "PENDING_LONG"
+
+
+def test_s5_update_preserves_existing_s1_entry():
+    """When S1 wrote first and then S5 updates, both entries coexist."""
+    bot = ig_bot.IGBot.__new__(ig_bot.IGBot)
+    bot._scan_signals = {"US100": {"S1": {"signal": "HOLD"}}}; bot._scan_log = []
+    bot._update_scan_state("US100", "PENDING_LONG", "x", 100.0, 110.0, 105.0, 95.0, 115.0)
+    assert "S1" in bot._scan_signals["US100"]
+    assert "S5" in bot._scan_signals["US100"]

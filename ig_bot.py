@@ -712,6 +712,17 @@ class IGBot:
         self._scan_signals = raw.get("scan_signals", {})
         self._scan_log     = raw.get("scan_log", [])
 
+        # T10: migrate old flat scan_signals[name] (pre-S1) → strategy-keyed {"S5": old}.
+        # An entry is "flat" when it's a dict with 'signal' at the top level (S5 fields)
+        # rather than the new {"S5": ..., "S1": ...} shape.
+        try:
+            for name, entry in list(self._scan_signals.items()):
+                if isinstance(entry, dict) and "signal" in entry and "S5" not in entry and "S1" not in entry:
+                    self._scan_signals[name] = {"S5": entry}
+        except Exception as e:
+            logger.warning(f"scan_signals migration failed; starting fresh: {e}")
+            self._scan_signals = {}
+
     def _get_candles(self, interval: str, limit: int, epic: str | None = None) -> pd.DataFrame:
         """
         Return candles from in-memory cache.  Only calls IG's price history API
@@ -825,7 +836,7 @@ class IGBot:
         bos_ok = "BOS \u2705" in reason or signal in ("PENDING_LONG", "PENDING_SHORT")
         ob_ok  = "OB \u2705"  in reason or signal in ("PENDING_LONG", "PENDING_SHORT")
 
-        self._scan_signals[instrument] = {
+        s5_entry = {
             "signal":        signal,
             "reason":        reason,
             "ema_ok":        ema_ok,
@@ -838,6 +849,15 @@ class IGBot:
             "tp":            tp if tp else None,
             "updated_at":    datetime.now(timezone.utc).isoformat(),
         }
+        # T10: strategy-keyed shape. Migrate any in-place flat entry first.
+        existing = self._scan_signals.get(instrument)
+        if isinstance(existing, dict) and "signal" in existing and "S5" not in existing and "S1" not in existing:
+            self._scan_signals[instrument] = {"S5": existing}
+        elif not isinstance(existing, dict):
+            self._scan_signals[instrument] = {}
+        else:
+            self._scan_signals.setdefault(instrument, {})
+        self._scan_signals[instrument]["S5"] = s5_entry
 
         self._scan_log.insert(0, {
             "ts":         now_et.strftime("%H:%M"),
@@ -848,7 +868,7 @@ class IGBot:
 
     def _update_scan_state_s1(self, instrument_name: str, result: dict) -> None:
         """S1 scan state — written each tick after _S1_ADAPTER.evaluate.
-        Note: this writes to a flat key for now; T10 will harmonize scan_signals to be strategy-keyed."""
+        Writes under self._scan_signals[name]["S1"]. T10 harmonized the shape."""
         now_et = datetime.now(ET)
         sig = result.get("signal", "HOLD")
         entry = {
@@ -863,14 +883,14 @@ class IGBot:
             "updated_at":     datetime.now(timezone.utc).isoformat(),
             "strategy":       "S1",
         }
-        # Stash under a per-instrument-per-strategy key. T10 will move to nested {name: {"S1": ..., "S5": ...}}.
-        self._scan_signals.setdefault(instrument_name, {})
-        # If existing entry is the old flat S5-only shape, preserve it under "S5" key during the partial migration window
-        if isinstance(self._scan_signals[instrument_name], dict) and "signal" in self._scan_signals[instrument_name]:
-            old = self._scan_signals[instrument_name]
-            self._scan_signals[instrument_name] = {"S5": old}
-        if not isinstance(self._scan_signals[instrument_name], dict):
+        # Migrate any in-place flat entry first.
+        existing = self._scan_signals.get(instrument_name)
+        if isinstance(existing, dict) and "signal" in existing and "S5" not in existing and "S1" not in existing:
+            self._scan_signals[instrument_name] = {"S5": existing}
+        elif not isinstance(existing, dict):
             self._scan_signals[instrument_name] = {}
+        else:
+            self._scan_signals.setdefault(instrument_name, {})
         self._scan_signals[instrument_name]["S1"] = entry
 
         self._scan_log.insert(0, {

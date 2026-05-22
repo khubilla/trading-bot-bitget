@@ -4524,49 +4524,91 @@ function renderIGScanner(scanSignals) {
     body.innerHTML = '<div style="color:var(--muted);font-size:10px;padding:8px 0;">No signal data yet — waiting for first scan…</div>';
     return;
   }
-  body.innerHTML = Object.entries(scanSignals).map(([name, ps]) => {
-    const sig = ps.signal || 'HOLD';
-    const badgeSig = sig.startsWith('PENDING') ? 'PENDING' : sig;
-    const cardClass = badgeSig === 'LONG'  ? 'signal-long'
-                    : badgeSig === 'SHORT' ? 'signal-short' : '';
-    const emaOk  = ps.ema_ok;
-    const bosOk  = ps.bos_ok;
-    const obOk   = ps.ob_ok;
-    const limit  = sig.startsWith('PENDING');
-    const obLabel = (ps.ob_low && ps.ob_high)
-      ? `${(+ps.ob_low).toFixed(1)}–${(+ps.ob_high).toFixed(1)} ✓`
-      : (bosOk ? 'Not found' : '—');
-    const reason = (ps.reason || '').replace(/[✅]/g, '✓').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0, 80);
-    const age = ps.updated_at
-      ? (() => { const s = Math.floor((Date.now() - new Date(ps.updated_at)) / 1000);
-                 return s < 60 ? s + 's ago' : Math.floor(s/60) + 'm ago'; })()
-      : '';
+  body.innerHTML = Object.entries(scanSignals).map(([name, entry]) => {
+    // T10: scan_signals is now {name: {S5: {...}, S1: {...}}}. Tolerate the old flat shape too
+    // for backward compat with in-memory state during a rolling deploy.
+    const isFlat = entry && typeof entry === 'object' && 'signal' in entry && !('S5' in entry) && !('S1' in entry);
+    const ps5 = isFlat ? entry : (entry && entry.S5) || null;
+    const ps1 = isFlat ? null  : (entry && entry.S1) || null;
     const nameSafe = name.replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    return `<div class="pair-card ${cardClass}">
-      <div class="pair-top">
-        <div class="pair-name">${nameSafe}</div>
-        <span class="pair-sig-badge ${badgeSig}">${badgeSig}</span>
-      </div>
-      <div class="pair-checks">
-        <div class="pair-check">
-          <span class="check-label">Daily EMA</span>
-          <span class="check-val ${emaOk ? 'pass' : 'muted'}">${emaOk ? 'Bias ✓' : 'No bias'}</span>
+
+    const renderS5 = (ps) => {
+      if (!ps) return '';
+      const sig = ps.signal || 'HOLD';
+      const badgeSig = sig.startsWith('PENDING') ? 'PENDING' : sig;
+      const cardClass = badgeSig === 'LONG'  ? 'signal-long'
+                      : badgeSig === 'SHORT' ? 'signal-short' : '';
+      const emaOk  = ps.ema_ok;
+      const bosOk  = ps.bos_ok;
+      const obOk   = ps.ob_ok;
+      const limit  = sig.startsWith('PENDING');
+      const obLabel = (ps.ob_low && ps.ob_high)
+        ? `${(+ps.ob_low).toFixed(1)}–${(+ps.ob_high).toFixed(1)} ✓`
+        : (bosOk ? 'Not found' : '—');
+      const reason = (ps.reason || '').replace(/[✅]/g, '✓').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0, 80);
+      const age = ps.updated_at
+        ? (() => { const s = Math.floor((Date.now() - new Date(ps.updated_at)) / 1000);
+                   return s < 60 ? s + 's ago' : Math.floor(s/60) + 'm ago'; })()
+        : '';
+      return `<div class="pair-card ${cardClass}">
+        <div class="pair-top">
+          <div class="pair-name">${nameSafe} <span style="font-size:10px;color:var(--muted);">S5</span></div>
+          <span class="pair-sig-badge ${badgeSig}">${badgeSig}</span>
         </div>
-        <div class="pair-check">
-          <span class="check-label">1H BOS</span>
-          <span class="check-val ${!emaOk ? 'muted' : bosOk ? 'pass' : 'muted'}">${!emaOk ? '—' : bosOk ? 'Confirmed ✓' : 'Not broken'}</span>
+        <div class="pair-checks">
+          <div class="pair-check">
+            <span class="check-label">Daily EMA</span>
+            <span class="check-val ${emaOk ? 'pass' : 'muted'}">${emaOk ? 'Bias ✓' : 'No bias'}</span>
+          </div>
+          <div class="pair-check">
+            <span class="check-label">1H BOS</span>
+            <span class="check-val ${!emaOk ? 'muted' : bosOk ? 'pass' : 'muted'}">${!emaOk ? '—' : bosOk ? 'Confirmed ✓' : 'Not broken'}</span>
+          </div>
+          <div class="pair-check">
+            <span class="check-label">15m OB</span>
+            <span class="check-val ${!bosOk ? 'muted' : obOk ? 'pass' : 'muted'}">${!bosOk ? '—' : obLabel}</span>
+          </div>
+          <div class="pair-check">
+            <span class="check-label">Limit Order</span>
+            <span class="check-val ${!obOk ? 'muted' : limit ? 'warn' : 'muted'}">${!obOk ? '—' : limit ? 'Watching…' : 'None'}</span>
+          </div>
         </div>
-        <div class="pair-check">
-          <span class="check-label">15m OB</span>
-          <span class="check-val ${!bosOk ? 'muted' : obOk ? 'pass' : 'muted'}">${!bosOk ? '—' : obLabel}</span>
+        <div class="pair-reason">${reason}${age ? ' · ' + age : ''}</div>
+      </div>`;
+    };
+
+    const renderS1 = (ps) => {
+      if (!ps) return '';
+      const sig = ps.signal || 'HOLD';
+      const cardClass = sig === 'LONG'  ? 'signal-long'
+                      : sig === 'SHORT' ? 'signal-short' : '';
+      const rsi   = ps.rsi != null ? (+ps.rsi).toFixed(1) : '—';
+      const adx   = ps.adx != null ? (+ps.adx).toFixed(1) : '—';
+      const atr   = ps.atr != null ? (+ps.atr).toFixed(4) : '—';
+      const box   = (ps.box_high && ps.box_low)
+        ? `${(+ps.box_low).toFixed(1)}–${(+ps.box_high).toFixed(1)}`
+        : '—';
+      const reason = (ps.reason || '').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0, 80);
+      const age = ps.updated_at
+        ? (() => { const s = Math.floor((Date.now() - new Date(ps.updated_at)) / 1000);
+                   return s < 60 ? s + 's ago' : Math.floor(s/60) + 'm ago'; })()
+        : '';
+      return `<div class="pair-card ${cardClass}">
+        <div class="pair-top">
+          <div class="pair-name">${nameSafe} <span style="font-size:10px;color:var(--muted);">S1</span></div>
+          <span class="pair-sig-badge ${sig}">${sig}</span>
         </div>
-        <div class="pair-check">
-          <span class="check-label">Limit Order</span>
-          <span class="check-val ${!obOk ? 'muted' : limit ? 'warn' : 'muted'}">${!obOk ? '—' : limit ? 'Watching…' : 'None'}</span>
+        <div class="pair-checks">
+          <div class="pair-check"><span class="check-label">3m RSI</span><span class="check-val">${rsi}</span></div>
+          <div class="pair-check"><span class="check-label">Daily ADX</span><span class="check-val">${adx}</span></div>
+          <div class="pair-check"><span class="check-label">ATR</span><span class="check-val">${atr}</span></div>
+          <div class="pair-check"><span class="check-label">3m Box</span><span class="check-val">${box}</span></div>
         </div>
-      </div>
-      <div class="pair-reason">${reason}${age ? ' · ' + age : ''}</div>
-    </div>`;
+        <div class="pair-reason">${reason}${age ? ' · ' + age : ''}</div>
+      </div>`;
+    };
+
+    return renderS5(ps5) + renderS1(ps1);
   }).join('');
 }
 

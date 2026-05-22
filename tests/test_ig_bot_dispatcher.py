@@ -147,3 +147,57 @@ def test_monitor_dispatches_legacy_untagged_position_to_s5():
          patch.object(bot, "_save_state"):
         bot._tick_instrument(_instrument(), dt.datetime.now(zoneinfo.ZoneInfo("America/New_York")))
     mock_mon.assert_called_once()
+
+
+def test_s1_adapter_exists_and_named():
+    a = ig_bot._S1_ADAPTER
+    assert a.name == "S1"
+    assert a.enabled_key == "s1_enabled"
+    for m in ("evaluate", "handle_signal", "monitor_position", "update_scan_state"):
+        assert callable(getattr(a, m))
+
+
+def test_enabled_strategies_includes_s1_when_flag_true():
+    bot = ig_bot.IGBot.__new__(ig_bot.IGBot)
+    names = [a.name for a in bot._enabled_strategies({"s5_enabled": False, "s1_enabled": True})]
+    assert names == ["S1"]
+
+
+def test_enabled_strategies_returns_both_when_both_true():
+    bot = ig_bot.IGBot.__new__(ig_bot.IGBot)
+    names = [a.name for a in bot._enabled_strategies({"s5_enabled": True, "s1_enabled": True})]
+    assert names == ["S5", "S1"]   # S5 first per CONFIG dispatch order
+
+
+def test_adapter_for_s1_returns_s1_adapter():
+    bot = ig_bot.IGBot.__new__(ig_bot.IGBot)
+    assert bot._adapter_for("S1") is ig_bot._S1_ADAPTER
+
+
+def test_s1_evaluate_returns_hold_on_empty_daily():
+    """When daily df is empty, S1 returns HOLD without trying 3m fetch."""
+    bot = ig_bot.IGBot.__new__(ig_bot.IGBot)
+    bot._candle_cache = {}
+    bot._current_instrument = None
+    instrument = {
+        "epic": "TEST.EPIC", "display_name": "TEST",
+        "s1_enabled": True, "s1_daily_ema_slow": 20,
+        "daily_limit": 100, "htf_limit": 50, "m3_limit": 30,
+    }
+    import pandas as pd
+    from unittest.mock import patch
+    with patch.object(bot, "_get_candles", return_value=pd.DataFrame()):
+        result = ig_bot._S1_ADAPTER.evaluate(bot, instrument)
+    assert result["signal"] == "HOLD"
+    assert "candle fetch empty" in result["reason"]
+
+
+def test_update_scan_state_s1_writes_under_s1_key():
+    bot = ig_bot.IGBot.__new__(ig_bot.IGBot)
+    bot._scan_signals = {}; bot._scan_log = []
+    result = {"signal": "HOLD", "reason": "no setup", "rsi": 55.0, "adx": 22.0,
+              "box_high": 0.0, "box_low": 0.0, "atr": 1.2}
+    bot._update_scan_state_s1("US100", result)
+    assert "S1" in bot._scan_signals["US100"]
+    assert bot._scan_signals["US100"]["S1"]["signal"] == "HOLD"
+    assert bot._scan_signals["US100"]["S1"]["rsi"] == 55.0

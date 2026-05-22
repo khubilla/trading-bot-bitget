@@ -27,7 +27,11 @@ from config_s1 import (
 # Default candle interval for S1 event snapshots (open/partial/close/scale_in).
 SNAPSHOT_INTERVAL = LTF_INTERVAL  # "3m"
 from indicators import calculate_adx, calculate_ema, calculate_rsi
-from tools import check_htf
+from tools import (
+    check_htf,
+    find_swing_high_target, find_swing_low_target,
+    find_swing_low_after_ref, find_swing_high_after_ref,
+)
 
 logger = logging.getLogger(__name__)
 Signal   = Literal["LONG", "SHORT", "HOLD", "PENDING_LONG", "PENDING_SHORT"]
@@ -514,3 +518,58 @@ def compute_s1_tp_atr(direction: str, entry: float, atr_value: float, cfg: dict)
     """TP1 (50% partial) trigger at entry ± tp_atr_mult × ATR (IG path)."""
     delta = cfg["s1_tp_atr_mult"] * atr_value
     return entry + delta if direction == "LONG" else entry - delta
+
+
+def maybe_trail_sl_ig(instrument: dict, pos: dict, ig_mod, candles_df,
+                      mark_price: float) -> None:
+    """
+    IG-aware structural swing trail for S1.
+
+    Mirrors maybe_trail_sl's logic but reads CONFIG from `instrument`, calls
+    ig_mod.update_sl, and mutates pos["sl"] / pos["swing_trail_ref"] directly.
+    Caller is responsible for persisting state.
+
+    LONG:  once mark >= swing_trail_ref, find swing low formed after ref candle,
+           step SL up to swing_low * (1 - buffer); reset ref to next swing high.
+    SHORT: mirror.
+
+    No-op when instrument["s1_use_swing_trail"] is False or candles_df is short.
+    """
+    if not instrument.get("s1_use_swing_trail", False):
+        return
+    if candles_df is None or len(candles_df) < 3:
+        return
+
+    lookback = instrument["s1_swing_lookback"]
+    buffer   = instrument["s1_sl_buffer_pct"]
+    side     = pos["side"]
+
+    try:
+        if side == "LONG":
+            ref = pos.get("swing_trail_ref")
+            if ref is None:
+                pos["swing_trail_ref"] = find_swing_high_target(candles_df, mark_price, lookback=lookback)
+                return
+            if mark_price >= ref:
+                raw = find_swing_low_after_ref(candles_df, mark_price, ref, lookback=lookback)
+                if raw:
+                    swing_sl = raw * (1 - buffer)
+                    if swing_sl > pos.get("sl", 0) and ig_mod.update_sl(pos["deal_id"], swing_sl):
+                        pos["sl"] = swing_sl
+                        pos["swing_trail_ref"] = find_swing_high_target(candles_df, mark_price, lookback=lookback)
+                        logger.info(f"[S1][IG] Swing trail: SL -> {swing_sl:.5f}")
+        else:  # SHORT
+            ref = pos.get("swing_trail_ref")
+            if ref is None:
+                pos["swing_trail_ref"] = find_swing_low_target(candles_df, mark_price, lookback=lookback)
+                return
+            if mark_price <= ref:
+                raw = find_swing_high_after_ref(candles_df, mark_price, ref, lookback=lookback)
+                if raw:
+                    swing_sl = raw * (1 + buffer)
+                    if swing_sl < pos.get("sl", float("inf")) and ig_mod.update_sl(pos["deal_id"], swing_sl):
+                        pos["sl"] = swing_sl
+                        pos["swing_trail_ref"] = find_swing_low_target(candles_df, mark_price, lookback=lookback)
+                        logger.info(f"[S1][IG] Swing trail: SL -> {swing_sl:.5f}")
+    except Exception as e:
+        logger.error(f"S1 IG swing trail error: {e}")

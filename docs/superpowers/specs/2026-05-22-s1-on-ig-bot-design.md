@@ -101,7 +101,10 @@ Added to `strategies/s1.py`. Called only when `cfg is not None`:
 
 ```python
 def compute_s1_sl_atr(direction, entry, box_high, box_low, atr_value, cfg):
-    """Structural SL with ATR cap. Floor = box ± buffer; cap = entry ± atr_mult × ATR."""
+    """Structural SL with ATR cap.
+    LONG:  SL = max(entry − atr_mult·ATR, box_low  · (1 − buffer))   # tighter of the two
+    SHORT: SL = min(entry + atr_mult·ATR, box_high · (1 + buffer))   # tighter of the two
+    """
     sl_buffer = cfg["s1_sl_buffer_pct"]
     if direction == "LONG":
         return max(entry - cfg["s1_sl_atr_mult"] * atr_value,
@@ -138,10 +141,12 @@ Each `config_ig_*.py` instrument CONFIG dict gains:
 
 ```python
 # Strategy enablement
+# NOTE: s1_enabled ships as False per the rollout sequence in §9.
+# The True value below is the post-paper-validation target state.
 "s5_enabled": True,
-"s1_enabled": True,
+"s1_enabled": False,   # flip to True per instrument after paper validation
 
-# 3m candle limit (S1; lazy-fetched)
+# 3m candle limit (S1; lazy-fetched, covers ~25 needed for swing + consolidation + buffer)
 "m3_limit": 30,
 
 # ── S1 params ────────────────────────────────────

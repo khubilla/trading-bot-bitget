@@ -45,3 +45,105 @@ def test_adapter_for_unknown_strategy_returns_s5_legacy_fallback():
     bot = ig_bot.IGBot.__new__(ig_bot.IGBot)
     # Unknown names fall back to S5 for legacy positions
     assert bot._adapter_for("LEGACY_UNTAGGED") is ig_bot._S5_ADAPTER
+
+
+from unittest.mock import MagicMock, patch
+import datetime as dt
+import zoneinfo
+
+
+def _make_bot():
+    bot = ig_bot.IGBot.__new__(ig_bot.IGBot)
+    bot._positions = {}
+    bot._pending_orders = {}
+    bot._candle_cache = {}
+    bot._current_instrument = None
+    bot.paper = True
+    bot._scan_signals = {}
+    bot._scan_log = []
+    return bot
+
+
+def _instrument(s5=True, **extra):
+    base = {
+        "epic": "TEST.EPIC", "display_name": "TEST",
+        "s5_enabled": s5,
+        "session_start": (0, 0), "session_end": (23, 59),
+    }
+    base.update(extra)
+    return base
+
+
+def test_dispatcher_calls_handle_signal_only_on_non_hold():
+    """When evaluate returns HOLD, handle_signal is NOT called; update_scan_state IS."""
+    bot = _make_bot()
+    a = MagicMock(spec=ig_bot._StrategyAdapter)
+    a.name, a.enabled_key = "S5", "s5_enabled"
+    a.evaluate.return_value = {"signal": "HOLD", "reason": "x"}
+    with patch.object(bot, "_enabled_strategies", return_value=[a]), \
+         patch("ig_bot._in_trading_window", return_value=True), \
+         patch.object(bot, "_save_state"):
+        bot._tick_instrument(_instrument(), dt.datetime.now(zoneinfo.ZoneInfo("America/New_York")))
+    a.evaluate.assert_called_once()
+    a.update_scan_state.assert_called_once()
+    a.handle_signal.assert_not_called()
+
+
+def test_dispatcher_first_non_hold_wins():
+    """When first adapter returns non-HOLD, second adapter never evaluates."""
+    bot = _make_bot()
+    a1 = MagicMock(spec=ig_bot._StrategyAdapter)
+    a1.name, a1.enabled_key = "S5", "s5_enabled"
+    a1.evaluate.return_value = {"signal": "PENDING_LONG", "reason": "x"}
+    a2 = MagicMock(spec=ig_bot._StrategyAdapter)
+    a2.name, a2.enabled_key = "S1", "s1_enabled"
+    with patch.object(bot, "_enabled_strategies", return_value=[a1, a2]), \
+         patch("ig_bot._in_trading_window", return_value=True), \
+         patch.object(bot, "_save_state"):
+        bot._tick_instrument(_instrument(), dt.datetime.now(zoneinfo.ZoneInfo("America/New_York")))
+    a1.evaluate.assert_called_once()
+    a1.handle_signal.assert_called_once()
+    a2.evaluate.assert_not_called()
+    a2.handle_signal.assert_not_called()
+
+
+def test_dispatcher_continues_when_first_returns_hold():
+    """When first adapter returns HOLD, second adapter IS evaluated."""
+    bot = _make_bot()
+    a1 = MagicMock(spec=ig_bot._StrategyAdapter)
+    a1.name, a1.enabled_key = "S5", "s5_enabled"
+    a1.evaluate.return_value = {"signal": "HOLD", "reason": "no setup"}
+    a2 = MagicMock(spec=ig_bot._StrategyAdapter)
+    a2.name, a2.enabled_key = "S1", "s1_enabled"
+    a2.evaluate.return_value = {"signal": "HOLD", "reason": "no setup"}
+    with patch.object(bot, "_enabled_strategies", return_value=[a1, a2]), \
+         patch("ig_bot._in_trading_window", return_value=True), \
+         patch.object(bot, "_save_state"):
+        bot._tick_instrument(_instrument(), dt.datetime.now(zoneinfo.ZoneInfo("America/New_York")))
+    a1.evaluate.assert_called_once()
+    a2.evaluate.assert_called_once()
+    a1.handle_signal.assert_not_called()
+    a2.handle_signal.assert_not_called()
+
+
+def test_monitor_dispatches_via_pos_strategy_tag():
+    """When pos has strategy='S5', _S5_ADAPTER.monitor_position is called via the adapter."""
+    bot = _make_bot()
+    bot._positions["TEST"] = {"strategy": "S5", "side": "LONG", "deal_id": "x"}
+    # Patch _monitor_position so we can verify it's called via the adapter delegation
+    with patch.object(bot, "_monitor_position") as mock_mon, \
+         patch("ig_bot._in_trading_window", return_value=True), \
+         patch.object(bot, "_save_state"):
+        bot._tick_instrument(_instrument(), dt.datetime.now(zoneinfo.ZoneInfo("America/New_York")))
+    mock_mon.assert_called_once()
+
+
+def test_monitor_dispatches_legacy_untagged_position_to_s5():
+    """A position without 'strategy' field falls back to S5 monitor dispatch."""
+    bot = _make_bot()
+    bot._positions["TEST"] = {"side": "LONG", "deal_id": "x"}    # no strategy tag
+    with patch.object(bot, "_monitor_position") as mock_mon, \
+         patch("ig_bot._in_trading_window", return_value=True), \
+         patch.object(bot, "_save_state"):
+        bot._tick_instrument(_instrument(), dt.datetime.now(zoneinfo.ZoneInfo("America/New_York")))
+    mock_mon.assert_called_once()

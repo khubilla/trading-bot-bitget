@@ -370,6 +370,15 @@ class _StrategyAdapter:
         """Side-effects: place orders, update bot._positions / bot._pending_orders, persist state."""
         raise NotImplementedError
 
+    def update_scan_state(self, bot, instrument: dict, result: dict) -> None:
+        """Persist the latest evaluate() result into bot._scan_signals. Always called after evaluate,
+        regardless of signal — keeps the dashboard fresh."""
+        raise NotImplementedError
+
+    def monitor_position(self, bot, instrument: dict, pos: dict) -> None:
+        """Per-tick monitoring while a position is open. Dispatched by pos['strategy']."""
+        raise NotImplementedError
+
 
 class _S5Adapter(_StrategyAdapter):
     name        = "S5"
@@ -414,11 +423,9 @@ class _S5Adapter(_StrategyAdapter):
         ob_low  = result["ob_low"]
         ob_high = result["ob_high"]
 
-        # Persist scan state first (matches existing behavior — always updates regardless of signal)
-        bot._update_scan_state(name, sig, result["reason"], ob_low, ob_high, trigger, sl, tp)
-        bot._save_state()
-
         if sig not in ("PENDING_LONG", "PENDING_SHORT"):
+            # T8: dispatcher should not call handle_signal on HOLD signals. Defensive.
+            logger.error(f"[{name}] [S5] handle_signal called with non-PENDING signal {sig!r} — skipping")
             return
 
         mark = ig.get_mark_price(epic)
@@ -458,6 +465,19 @@ class _S5Adapter(_StrategyAdapter):
             f"[{name}] [S5] {side} limit order placed | trigger={trigger:.1f} | "
             f"SL={sl:.1f} | TP={tp:.1f} | deal_id={deal_id}"
         )
+
+    def update_scan_state(self, bot, instrument: dict, result: dict) -> None:
+        name = instrument["display_name"]
+        bot._update_scan_state(
+            name, result.get("signal", "HOLD"), result.get("reason", ""),
+            result.get("ob_low"), result.get("ob_high"),
+            result.get("trigger"), result.get("sl"), result.get("tp"),
+        )
+        bot._save_state()
+
+    def monitor_position(self, bot, instrument: dict, pos: dict) -> None:
+        # Delegate to IGBot's existing monitor (no S5-specific extraction in T8 — T11 may revisit)
+        bot._monitor_position(instrument)
 
 
 _S5_ADAPTER = _S5Adapter()
@@ -817,9 +837,10 @@ class IGBot:
             self._session_end_close(instrument)
             return
 
-        # 2. Monitor open position (always, even outside entry window)
+        # 2. Monitor open position (dispatched by pos['strategy'] tag; legacy positions fall back to S5)
         if pos:
-            self._monitor_position(instrument)
+            adapter = self._adapter_for(pos.get("strategy", "S5"))
+            adapter.monitor_position(self, instrument, pos)
 
         # 3. Outside session window or weekend → no new entries
         if not _in_trading_window(now):
@@ -839,14 +860,18 @@ class IGBot:
                 self._check_pending_order(mark)
             return
 
-        # 5. Evaluate enabled strategies (T7: S5 only; T8 will widen to S1+S5 in dispatch order)
+        # 5. Walk enabled strategies in CONFIG order — first non-HOLD wins.
+        any_evaluated = False
         for adapter in self._enabled_strategies(instrument):
             result = adapter.evaluate(self, instrument)
-            adapter.handle_signal(self, instrument, result)
-            # Note: T8 will change this to "return on first non-HOLD"; for now, S5 is the only
-            # adapter, so calling handle_signal unconditionally preserves current behavior
-            # (the existing code unconditionally called _update_scan_state regardless of signal).
-            return
+            adapter.update_scan_state(self, instrument, result)
+            any_evaluated = True
+            if result.get("signal", "HOLD") not in ("HOLD",):
+                adapter.handle_signal(self, instrument, result)
+                return
+        # No non-HOLD signal: scan state already persisted by update_scan_state for each adapter
+        if any_evaluated:
+            self._save_state()
 
     # ── Open trade ─────────────────────────────────────────────── #
 

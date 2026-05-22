@@ -36,7 +36,7 @@ ExitFlag = Literal["EXIT", "HOLD"]
 
 # ── Daily Trend Filter (ADX-based) ────────────────────────── #
 
-def check_daily_trend(daily_df: pd.DataFrame, direction: str) -> tuple[bool, float, float]:
+def check_daily_trend(daily_df: pd.DataFrame, direction: str, cfg: dict | None = None) -> tuple[bool, float, float]:
     """
     Replaces EMA filter. Uses ADX to confirm trending (not sideways).
 
@@ -45,8 +45,17 @@ def check_daily_trend(daily_df: pd.DataFrame, direction: str) -> tuple[bool, flo
       SHORT: ADX > ADX_TREND_THRESHOLD AND last daily close < EMA20 and RSI < DAILY_RSI_SHORT_TRESH
 
     Returns (passes, adx_value, daily_rsi)
+    cfg: optional per-instrument CONFIG dict (IG path). When None, reads from config_s1 module (Bitget path).
     """
-    from config_s1 import ADX_TREND_THRESHOLD, DAILY_EMA_SLOW, DAILY_RSI_LONG_THRESH, DAILY_RSI_SHORT_THRESH
+    if cfg is not None:
+        ADX_TREND_THRESHOLD    = cfg["s1_adx_trend_threshold"]
+        DAILY_EMA_SLOW         = cfg["s1_daily_ema_slow"]
+        DAILY_RSI_LONG_THRESH  = cfg["s1_daily_rsi_long_thresh"]
+        DAILY_RSI_SHORT_THRESH = cfg["s1_daily_rsi_short_thresh"]
+        RSI_PERIOD_LOCAL       = cfg["s1_rsi_period"]
+    else:
+        from config_s1 import ADX_TREND_THRESHOLD, DAILY_EMA_SLOW, DAILY_RSI_LONG_THRESH, DAILY_RSI_SHORT_THRESH
+        RSI_PERIOD_LOCAL = RSI_PERIOD
 
     if len(daily_df) < 30:
         logger.debug("  Daily trend: not enough candles")
@@ -55,7 +64,7 @@ def check_daily_trend(daily_df: pd.DataFrame, direction: str) -> tuple[bool, flo
     closes  = daily_df["close"].astype(float)
     adx_res = calculate_adx(daily_df)
     adx_val = float(adx_res["adx"].iloc[-1])
-    rsi_res = calculate_rsi(closes, RSI_PERIOD)
+    rsi_res = calculate_rsi(closes, RSI_PERIOD_LOCAL)
     rsi_val = float(rsi_res.iloc[-1])
     ema20   = float(calculate_ema(closes, DAILY_EMA_SLOW).iloc[-1])
     price   = float(closes.iloc[-1])
@@ -114,23 +123,36 @@ def detect_consolidation(
 
 # ── LTF Entry ─────────────────────────────────────────────── #
 
-def check_ltf_long(ltf_df: pd.DataFrame) -> tuple[bool, float, float, float]:
-    if len(ltf_df) < RSI_PERIOD + CONSOLIDATION_CANDLES + 3:
+def check_ltf_long(ltf_df: pd.DataFrame, cfg: dict | None = None) -> tuple[bool, float, float, float]:
+    if cfg is not None:
+        RSI_PERIOD_LOCAL        = cfg["s1_rsi_period"]
+        RSI_LONG_THRESH_LOCAL   = cfg["s1_rsi_long_thresh"]
+        CONSOLIDATION_CANDLES_LOCAL   = cfg["s1_consolidation_candles"]
+        CONSOLIDATION_RANGE_PCT_LOCAL = cfg["s1_consolidation_range_pct"]
+        BREAKOUT_BUFFER_PCT_LOCAL     = cfg["s1_breakout_buffer_pct"]
+    else:
+        RSI_PERIOD_LOCAL        = RSI_PERIOD
+        RSI_LONG_THRESH_LOCAL   = RSI_LONG_THRESH
+        CONSOLIDATION_CANDLES_LOCAL   = CONSOLIDATION_CANDLES
+        CONSOLIDATION_RANGE_PCT_LOCAL = CONSOLIDATION_RANGE_PCT
+        BREAKOUT_BUFFER_PCT_LOCAL     = BREAKOUT_BUFFER_PCT
+
+    if len(ltf_df) < RSI_PERIOD_LOCAL + CONSOLIDATION_CANDLES_LOCAL + 3:
         return False, 50.0, 0.0, 0.0
 
     closes  = ltf_df["close"].astype(float)
-    rsi_ser = calculate_rsi(closes, RSI_PERIOD)
+    rsi_ser = calculate_rsi(closes, RSI_PERIOD_LOCAL)
     rsi_val = float(rsi_ser.iloc[-1])
 
-    if rsi_val <= RSI_LONG_THRESH:
+    if rsi_val <= RSI_LONG_THRESH_LOCAL:
         return False, rsi_val, 0.0, 0.0
 
     # Check consolidation on candles BEFORE the last closed candle.
     # This prevents the breakout candle from polluting the consolidation window.
     # With CONSOLIDATION_CANDLES=2: window = ltf_df.iloc[-4:-2] (positions -4, -3)
-    consolidation_window = ltf_df.iloc[-(CONSOLIDATION_CANDLES + 2):-2]
+    consolidation_window = ltf_df.iloc[-(CONSOLIDATION_CANDLES_LOCAL + 2):-2]
 
-    if len(consolidation_window) < CONSOLIDATION_CANDLES:
+    if len(consolidation_window) < CONSOLIDATION_CANDLES_LOCAL:
         return False, rsi_val, 0.0, 0.0
 
     box_high = float(consolidation_window["high"].max())
@@ -141,43 +163,56 @@ def check_ltf_long(ltf_df: pd.DataFrame) -> tuple[bool, float, float, float]:
         return False, rsi_val, 0.0, 0.0
 
     range_pct = (box_high - box_low) / mid
-    if range_pct > CONSOLIDATION_RANGE_PCT:
-        logger.debug(f"  Consolidation ❌ range={range_pct*100:.3f}% > {CONSOLIDATION_RANGE_PCT*100}%")
+    if range_pct > CONSOLIDATION_RANGE_PCT_LOCAL:
+        logger.debug(f"  Consolidation ❌ range={range_pct*100:.3f}% > {CONSOLIDATION_RANGE_PCT_LOCAL*100}%")
         return False, rsi_val, box_high, box_low
 
     # Check RSI was in zone throughout the consolidation window
-    window_rsi = rsi_ser.iloc[-(CONSOLIDATION_CANDLES + 2):-2]
-    if not (window_rsi > RSI_LONG_THRESH).all():
-        logger.debug(f"  Consolidation ❌ RSI not > {RSI_LONG_THRESH} throughout (min={window_rsi.min():.1f})")
+    window_rsi = rsi_ser.iloc[-(CONSOLIDATION_CANDLES_LOCAL + 2):-2]
+    if not (window_rsi > RSI_LONG_THRESH_LOCAL).all():
+        logger.debug(f"  Consolidation ❌ RSI not > {RSI_LONG_THRESH_LOCAL} throughout (min={window_rsi.min():.1f})")
         return False, rsi_val, box_high, box_low
 
     logger.debug(f"  Consolidation ✓ range={range_pct*100:.3f}% H={box_high} L={box_low}")
 
     # Check if last CLOSED candle broke out above the box
     last_closed = float(ltf_df["close"].iloc[-2])
-    if last_closed > box_high * (1 + BREAKOUT_BUFFER_PCT):
+    if last_closed > box_high * (1 + BREAKOUT_BUFFER_PCT_LOCAL):
         return True, rsi_val, box_high, box_low
 
     return False, rsi_val, box_high, box_low
 
 
-def check_ltf_short(ltf_df: pd.DataFrame) -> tuple[bool, float, float, float]:
-    if len(ltf_df) < RSI_PERIOD + CONSOLIDATION_CANDLES + 3:
+def check_ltf_short(ltf_df: pd.DataFrame, cfg: dict | None = None) -> tuple[bool, float, float, float]:
+    if cfg is not None:
+        RSI_PERIOD_LOCAL        = cfg["s1_rsi_period"]
+        RSI_SHORT_THRESH_LOCAL  = cfg["s1_rsi_short_thresh"]
+        CONSOLIDATION_CANDLES_LOCAL   = cfg["s1_consolidation_candles"]
+        CONSOLIDATION_RANGE_PCT_LOCAL = cfg["s1_consolidation_range_pct"]
+        BREAKOUT_BUFFER_PCT_LOCAL     = cfg["s1_breakout_buffer_pct"]
+    else:
+        RSI_PERIOD_LOCAL        = RSI_PERIOD
+        RSI_SHORT_THRESH_LOCAL  = RSI_SHORT_THRESH
+        CONSOLIDATION_CANDLES_LOCAL   = CONSOLIDATION_CANDLES
+        CONSOLIDATION_RANGE_PCT_LOCAL = CONSOLIDATION_RANGE_PCT
+        BREAKOUT_BUFFER_PCT_LOCAL     = BREAKOUT_BUFFER_PCT
+
+    if len(ltf_df) < RSI_PERIOD_LOCAL + CONSOLIDATION_CANDLES_LOCAL + 3:
         return False, 50.0, 0.0, 0.0
 
     closes  = ltf_df["close"].astype(float)
-    rsi_ser = calculate_rsi(closes, RSI_PERIOD)
+    rsi_ser = calculate_rsi(closes, RSI_PERIOD_LOCAL)
     rsi_val = float(rsi_ser.iloc[-1])
 
-    if rsi_val >= RSI_SHORT_THRESH:
+    if rsi_val >= RSI_SHORT_THRESH_LOCAL:
         return False, rsi_val, 0.0, 0.0
 
     # Check consolidation on candles BEFORE the last closed candle.
     # This prevents the breakout candle from polluting the consolidation window.
     # With CONSOLIDATION_CANDLES=2: window = ltf_df.iloc[-4:-2] (positions -4, -3)
-    consolidation_window = ltf_df.iloc[-(CONSOLIDATION_CANDLES + 2):-2]
+    consolidation_window = ltf_df.iloc[-(CONSOLIDATION_CANDLES_LOCAL + 2):-2]
 
-    if len(consolidation_window) < CONSOLIDATION_CANDLES:
+    if len(consolidation_window) < CONSOLIDATION_CANDLES_LOCAL:
         return False, rsi_val, 0.0, 0.0
 
     box_high = float(consolidation_window["high"].max())
@@ -188,21 +223,21 @@ def check_ltf_short(ltf_df: pd.DataFrame) -> tuple[bool, float, float, float]:
         return False, rsi_val, 0.0, 0.0
 
     range_pct = (box_high - box_low) / mid
-    if range_pct > CONSOLIDATION_RANGE_PCT:
-        logger.debug(f"  Consolidation ❌ range={range_pct*100:.3f}% > {CONSOLIDATION_RANGE_PCT*100}%")
+    if range_pct > CONSOLIDATION_RANGE_PCT_LOCAL:
+        logger.debug(f"  Consolidation ❌ range={range_pct*100:.3f}% > {CONSOLIDATION_RANGE_PCT_LOCAL*100}%")
         return False, rsi_val, box_high, box_low
 
     # Check RSI was in zone throughout the consolidation window
-    window_rsi = rsi_ser.iloc[-(CONSOLIDATION_CANDLES + 2):-2]
-    if not (window_rsi < RSI_SHORT_THRESH).all():
-        logger.debug(f"  Consolidation ❌ RSI not < {RSI_SHORT_THRESH} throughout (max={window_rsi.max():.1f})")
+    window_rsi = rsi_ser.iloc[-(CONSOLIDATION_CANDLES_LOCAL + 2):-2]
+    if not (window_rsi < RSI_SHORT_THRESH_LOCAL).all():
+        logger.debug(f"  Consolidation ❌ RSI not < {RSI_SHORT_THRESH_LOCAL} throughout (max={window_rsi.max():.1f})")
         return False, rsi_val, box_high, box_low
 
     logger.debug(f"  Consolidation ✓ range={range_pct*100:.3f}% H={box_high} L={box_low}")
 
     # Check if last CLOSED candle broke out below the box
     last_closed = float(ltf_df["close"].iloc[-2])
-    if last_closed < box_low * (1 - BREAKOUT_BUFFER_PCT):
+    if last_closed < box_low * (1 - BREAKOUT_BUFFER_PCT_LOCAL):
         return True, rsi_val, box_high, box_low
 
     return False, rsi_val, box_high, box_low
@@ -242,32 +277,37 @@ def evaluate_s1(
     ltf_df: pd.DataFrame,
     daily_df: pd.DataFrame,
     allowed_direction: str,
+    cfg: dict | None = None,
 ) -> tuple[Signal, float, float, float, float, float]:
     """
     Returns (signal, rsi, box_high, box_low, adx, daily_rsi)
     allowed_direction: "BULLISH" | "BEARISH"
+    cfg: optional per-instrument CONFIG dict (IG path). When None, reads from config_s1 module (Bitget path).
     """
-    from config_s1 import S1_ENABLED
+    if cfg is not None:
+        S1_ENABLED = cfg["s1_enabled"]
+    else:
+        from config_s1 import S1_ENABLED
     if not S1_ENABLED:
         return "HOLD", 50.0, 0.0, 0.0, 0.0, 0.0
 
     bull_htf, bear_htf = check_htf(htf_df)
 
     if bull_htf and allowed_direction == "BULLISH":
-        trend_ok, adx, daily_rsi = check_daily_trend(daily_df, "LONG")
+        trend_ok, adx, daily_rsi = check_daily_trend(daily_df, "LONG", cfg=cfg)
         if not trend_ok:
             return "HOLD", 50.0, 0.0, 0.0, adx, daily_rsi
-        valid, rsi, bh, bl = check_ltf_long(ltf_df)
+        valid, rsi, bh, bl = check_ltf_long(ltf_df, cfg=cfg)
         if valid:
             logger.info(f"[S1][{symbol}] ✅ LONG | RSI={rsi:.1f} ADX={adx:.1f} Daily RSI={daily_rsi:.1f}")
             return "LONG", rsi, bh, bl, adx, daily_rsi
         return "HOLD", rsi, bh, bl, adx, daily_rsi
 
     if bear_htf and allowed_direction == "BEARISH":
-        trend_ok, adx, daily_rsi = check_daily_trend(daily_df, "SHORT")
+        trend_ok, adx, daily_rsi = check_daily_trend(daily_df, "SHORT", cfg=cfg)
         if not trend_ok:
             return "HOLD", 50.0, 0.0, 0.0, adx, daily_rsi
-        valid, rsi, bh, bl = check_ltf_short(ltf_df)
+        valid, rsi, bh, bl = check_ltf_short(ltf_df, cfg=cfg)
         if valid:
             logger.info(f"[S1][{symbol}] ✅ SHORT | RSI={rsi:.1f} ADX={adx:.1f} Daily RSI={daily_rsi:.1f}")
             return "SHORT", rsi, bh, bl, adx, daily_rsi

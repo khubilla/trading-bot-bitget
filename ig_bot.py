@@ -1166,6 +1166,7 @@ class IGBot:
             "snap_s5_ob_low":     round(ob_low, dec),
             "snap_s5_ob_high":    round(ob_high, dec),
             "snap_s5_tp":         tp,
+            "snap_strategy":      "S5",
         }, paper=self.paper)
 
         logger.info(
@@ -1341,6 +1342,7 @@ class IGBot:
             "snap_s5_ob_low":     round(ob_low, dec),
             "snap_s5_ob_high":    round(ob_high, dec),
             "snap_s5_tp":         tp,
+            "snap_strategy":      "S5",
         }, paper=self.paper)
 
         logger.info(
@@ -1438,6 +1440,7 @@ class IGBot:
             "pnl":         round(partial_pnl, 2),
             "result":      "WIN" if partial_pnl >= 0 else "LOSS",
             "exit_reason": "PARTIAL_TP",
+            "snap_strategy": "S5",
         }, paper=self.paper)
 
         logger.info(
@@ -1522,6 +1525,7 @@ class IGBot:
             "pnl":         round(realized, 2),
             "result":      result,
             "exit_reason": exit_reason,
+            "snap_strategy": "S5",
         }, paper=self.paper)
 
         logger.info(
@@ -1602,6 +1606,7 @@ class IGBot:
             "pnl":         round(realized, 2),
             "result":      result,
             "exit_reason": "SESSION_END",
+            "snap_strategy": "S5",
         }, paper=self.paper)
 
         logger.info(

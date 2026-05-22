@@ -35,7 +35,7 @@
                     ┌─────────────────────────────────────┐
                     │  indicators.py      ← SHARED TOOLS  │
                     │  tools.py           ← SHARED TOOLS  │
-                    │  strategies/s1.py   ← Bitget only   │
+                    │  strategies/s1.py   ← BOTH bots     │
                     │  strategies/s2.py   ← Bitget only   │
                     │  strategies/s3.py   ← Bitget only   │
                     │  strategies/s4.py   ← Bitget only   │
@@ -48,7 +48,8 @@
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                      IG BOT (ig_bot.py)                     │
-│  Multi-instrument CFD · S5 only                            │
+│  Multi-instrument CFD · S1 + S5 strategies                 │
+│  (one position per instrument across both strategies)       │
 │  Instruments: US30 (IX.D.DOW) + GOLD (CS.D.CFDGOLD)       │
 │  Each tick: loops over INSTRUMENTS, one position per epic   │
 │  Output: ig_state.json, ig_trades.csv                      │
@@ -66,15 +67,15 @@
 ### Shared Code Contract
 
 **Files shared between bots:**
-- `indicators.py` — pure numeric indicators (EMA, RSI, ADX, stoch, MACD). No config deps.
-- `tools.py` — generic tool helpers (swing highs/lows, order blocks, FVG, support/resistance, HTF check, candle geometry). No config deps, no strategy rules.
+- `indicators.py` — pure numeric indicators (EMA, RSI, ADX, stoch, MACD, ATR). No config deps.
+- `tools.py` — generic tool helpers (swing highs/lows, order blocks, FVG, support/resistance, HTF check, candle geometry, nearest daily S/R clearance). No config deps, no strategy rules.
+- `strategies/s1.py` — evaluate_s1 (called by both Bitget and IG via `cfg=` param); IG-specific helpers: `compute_s1_sl_atr`, `compute_s1_tp_atr`, `maybe_trail_sl_ig`
 - `strategies/s5.py` — evaluate_s5 (called by both Bitget and IG)
 - `config_s5.py` — S5 parameters (Bitget only; IG now uses per-instrument CONFIG dicts)
 - `paper_trader.py` — simulation engine (used by Bitget bot only in paper mode)
 - `shadow_tracker.py` — sentiment-blocked virtual trade tracker. Records the trades the bot would have taken if all sentiment gates were ignored, then tracks each virtual position through SL/TP using live prices. Used by both Bitget and Bybit via `bot.py` hooks. No real orders ever fire from this layer. Output files are per-bot (see § 4.5).
 
 **Bot-specific strategy modules (Bitget only):**
-- `strategies/s1.py` — evaluate_s1 plus its private helpers (check_daily_trend, detect_consolidation, check_ltf_long/short, check_exit)
 - `strategies/s2.py` — evaluate_s2
 - `strategies/s3.py` — evaluate_s3
 - `strategies/s4.py` — evaluate_s4
@@ -84,9 +85,10 @@
 **Separation rules:**
 - Each strategy file owns its own entry/exit logic. Strategies do NOT import from each other.
 - Only `indicators.py` and `tools.py` are shared between strategies.
-- Changes to shared files (indicators.py, tools.py, strategies/s5.py) require testing BOTH bots.
+- Changes to shared files (indicators.py, tools.py, strategies/s1.py, strategies/s5.py) require testing BOTH bots.
 - Bitget and IG must work independently (no cross-bot state).
 - config_s5 changes affect Bitget only; IG uses `cfg=instrument` param to `evaluate_s5()`.
+- config_s1 changes affect Bitget only; IG uses `cfg=instrument` param to `evaluate_s1()`.
 
 ### Data Flow
 
@@ -112,12 +114,12 @@ shadow_tracker.py → shadow_state.json / shadow_trades.csv / shadow_scale_ins.c
 
 The old monolithic `strategy.py` has been split into:
 
-- `indicators.py` — pure indicators (EMA, RSI, ADX, stoch, MACD). No config deps.
-- `tools.py` — generic structure/pattern helpers (swing targets, order blocks, FVG, support/resistance, HTF check, candle geometry `body_pct`/`upper_wick`/`body_size`). No config deps.
+- `indicators.py` — pure indicators (EMA, RSI, ADX, stoch, MACD, ATR). No config deps. Key new addition: `calculate_atr(df, period=14)` — returns a pandas Series of Average True Range values; consumed by `strategies/s1.py` (IG ATR-based SL/TP path) and `backtest_ig.py`.
+- `tools.py` — generic structure/pattern helpers (swing targets, order blocks, FVG, support/resistance, HTF check, candle geometry `body_pct`/`upper_wick`/`body_size`). No config deps. Key new addition: `nearest_daily_sr_clearance(daily_df, direction, lookback=60, swing_window=3)` — returns the distance from current price to the nearest daily S/R level in ATR-multiples; consumed by `strategies/s1.py` (IG path `evaluate_s1`) and `backtest_ig.py`.
 - `strategies/s1.py`..`strategies/s7.py` — one file per strategy. Each file owns its entry/exit rules and imports only from `indicators.py`, `tools.py`, and its own `config_sN.py`. Strategies do NOT import from each other. (Exception: `strategies/s7.py` imports `_place_partial_trail_exits` from `strategies/s4.py` to reuse the shared exit primitive.)
 
 **Shared by all three bots (Bitget, IG, Bybit):**
-- `indicators.py`, `tools.py`, `strategies/s5.py`
+- `indicators.py`, `tools.py`, `strategies/s1.py`, `strategies/s5.py`
 
 **Shared by Bitget AND Bybit (via sys.modules aliasing — see § 10.5):**
 - `strategies/s1.py`, `s2.py`, `s3.py`, `s4.py`, `s6.py`, `s7.py`
@@ -125,10 +127,10 @@ The old monolithic `strategy.py` has been split into:
 
 **Used by:**
 - `bot.py` (Bitget bot, also reused by Bybit via aliasing) — imports evaluate_s1..evaluate_s7 from respective strategy modules
-- `ig_bot.py` (IG bot) — imports evaluate_s5 from `strategies.s5`
+- `ig_bot.py` (IG bot) — imports evaluate_s5 from `strategies.s5`; imports evaluate_s1 (via `_S1Adapter`) from `strategies.s1`
 - `bybit_bot.py` (Bybit bot) — installs sys.modules aliases then runs `bot.MTFBot().run()`
 - `backtest.py` — imports indicators + `strategies.s1.detect_consolidation`
-- `backtest_ig.py` — imports evaluate_s5 from `strategies.s5`
+- `backtest_ig.py` — imports evaluate_s5 from `strategies.s5`; imports evaluate_s1 from `strategies.s1` when `--strategy` is `s1` or `both`
 - `startup_recovery.py` — imports evaluate_s5 from `strategies.s5`
 - `dashboard.py`, `trade_dna.py` — lazy-import indicators and individual evaluate_sN functions
 
@@ -222,6 +224,41 @@ grep -n "from config_s5 import" strategies/s5.py
 # Check IG imports
 grep -n "evaluate_s5\|calculate_ema" ig_bot.py | head -5
 ```
+
+#### evaluate_s1()
+
+**Signature:**
+```python
+def evaluate_s1(
+    symbol: str,
+    htf_df: pd.DataFrame,
+    ltf_df: pd.DataFrame,
+    daily_df: pd.DataFrame,
+    allowed_direction: str,
+    cfg: dict | None = None,
+) -> tuple[Signal, float, float, float, float, float]:
+```
+
+**Consumers:**
+- `bot.py` (Bitget) — calls without `cfg`
+- `backtest.py` — calls without `cfg`
+- `ig_bot.py` (IG via `_S1Adapter`) — calls with `cfg=instrument`
+- `backtest_ig.py` — calls with `cfg=instrument` when `--strategy` is `s1` or `both`
+
+**Contract:** When `cfg is not None`, all parameters read from cfg keys (`s1_enabled`, `s1_adx_trend_threshold`, `s1_daily_ema_slow`, `s1_daily_rsi_long_thresh`, `s1_daily_rsi_short_thresh`, `s1_rsi_period`, `s1_rsi_long_thresh`, `s1_rsi_short_thresh`, `s1_consolidation_candles`, `s1_consolidation_range_pct`, `s1_breakout_buffer_pct`, `s1_atr_period`, `s1_sr_clearance_atr_mult`). When `cfg is None`, late imports from `config_s1` module. Tuple shape is identical in both paths.
+
+**Side effect (IG path only):** `cfg["_last_atr"]` is set to the computed daily ATR value so the caller's `handle_signal` can use it for ATR-based SL/TP without recomputing. `cfg["_last_sr_clearance_long_atr"]` and `cfg["_last_sr_clearance_short_atr"]` similarly carry the S/R clearance in ATR-multiples.
+
+#### compute_s1_sl_atr, compute_s1_tp_atr, maybe_trail_sl_ig (IG path)
+
+New helpers in `strategies/s1.py`:
+- `compute_s1_sl_atr(direction, entry, box_high, box_low, atr_value, cfg)`: structural SL with ATR cap (LONG floor / SHORT ceiling).
+- `compute_s1_tp_atr(direction, entry, atr_value, cfg)`: TP1 at entry ± `s1_tp_atr_mult × ATR`.
+- `maybe_trail_sl_ig(instrument, pos, ig_mod, candles_df, mark_price)`: IG-aware structural swing trail mirroring Bitget's `maybe_trail_sl` but calling `ig_mod.update_sl(deal_id, new_sl)` and mutating `pos["sl"]` / `pos["swing_trail_ref"]` directly.
+
+These three are called only by `ig_bot._S1Adapter` and `backtest_ig.py` S1 path.
+
+---
 
 #### evaluate_s6()
 
@@ -618,7 +655,7 @@ head -1 trades_paper.csv | tr ',' '\n' | wc -l
 - `optimize_ig.py` line 43: "Load completed trades from ig_trades.csv"
 - Sends closed trades to Claude API for S5 parameter optimization
 
-**Columns (20 fields):**
+**Columns (28 fields):**
 
 ```csv
 timestamp, trade_id, action, symbol,
@@ -626,13 +663,33 @@ side, qty, entry, sl, tp,
 snap_entry_trigger, snap_sl, snap_rr,
 snap_s5_ob_low, snap_s5_ob_high, snap_s5_tp,
 result, pnl, exit_reason,
-session_date, mode
+session_date, mode,
+snap_strategy,
+snap_s1_rsi, snap_s1_adx,
+snap_s1_box_high, snap_s1_box_low,
+snap_s1_atr, snap_s1_sr_clearance_atr,
+exit_price
 ```
 
-`symbol` is at index 3 (after `action`). Column count increased from 19 → 20.
+`symbol` is at index 3 (after `action`). Column count increased from 20 → 28.
+
+**New columns (appended after `mode`):**
+
+| Column | Written on | Source |
+|---|---|---|
+| `snap_strategy` | every event | `"S1"` or `"S5"` |
+| `snap_s1_rsi` | S1_LONG/S1_SHORT | 3m RSI at entry |
+| `snap_s1_adx` | S1_LONG/S1_SHORT | daily ADX at entry |
+| `snap_s1_box_high` | S1_LONG/S1_SHORT | 3m coil box upper |
+| `snap_s1_box_low` | S1_LONG/S1_SHORT | 3m coil box lower |
+| `snap_s1_atr` | S1_LONG/S1_SHORT | daily ATR used for SL/TP sizing |
+| `snap_s1_sr_clearance_atr` | S1_LONG/S1_SHORT | nearest daily S/R clearance in ATR-multiples |
+| `exit_price` | S5_PARTIAL/S1_PARTIAL/CLOSE | mark price at the exit event |
+
+Note: action prefixes now include `S1_LONG`, `S1_SHORT`, `S1_PARTIAL`, `S1_CLOSE` alongside the existing `S5_*` prefixes.
 
 **Key differences from Bitget CSV:**
-- **Fewer columns:** IG only uses S5 strategy, so S1-S4 snapshot fields are omitted
+- **Fewer columns:** IG uses S1 + S5 strategies, so S2-S4/S6/S7 snapshot fields are omitted
 - **Additional fields:** `session_date` (YYYY-MM-DD), `mode` (PAPER | LIVE)
 - **Multi-instrument:** `symbol` column identifies which instrument the trade is for (e.g. "US30", "GOLD")
 - **No leverage/margin:** IG uses fixed position sizing via per-instrument CONFIG dicts
@@ -670,7 +727,7 @@ sed -n '65,72p' ig_bot.py
 # Find _log_trade callers in IG bot
 grep -n "_log_trade" ig_bot.py
 
-# Count columns (should be 20)
+# Count columns (should be 28)
 head -1 ig_trades.csv | tr ',' '\n' | wc -l
 ```
 
@@ -699,7 +756,8 @@ head -1 ig_trades.csv | tr ',' '\n' | wc -l
       "entry": 44200.0,
       "sl": 44100.0,
       "tp": 44400.0,
-      "opened_at": "2026-04-01T10:00:00+00:00"
+      "opened_at": "2026-04-01T10:00:00+00:00",
+      "strategy": "S5"
     },
     "GOLD": null
   },
@@ -714,22 +772,14 @@ head -1 ig_trades.csv | tr ',' '\n' | wc -l
       "tp": 3230.0,
       "trigger": 3195.0,
       "size": 1.0,
-      "expires": 1743500000
+      "expires": 1743500000,
+      "strategy": "S5"
     }
   },
   "scan_signals": {
-    "<DISPLAY_NAME>": {
-      "signal":        "PENDING_LONG | PENDING_SHORT | HOLD",
-      "reason":        "full evaluate_s5 reason string",
-      "ema_ok":        true,
-      "bos_ok":        true,
-      "ob_ok":         false,
-      "ob_low":        null,
-      "ob_high":       null,
-      "entry_trigger": null,
-      "sl":            null,
-      "tp":            null,
-      "updated_at":    "ISO timestamp (UTC)"
+    "US100": {
+      "S5": { "signal": "PENDING_LONG", "reason": "...", "ob_low": null, "ob_high": null, "entry_trigger": null, "sl": null, "tp": null, "updated_at": "ISO timestamp (UTC)" },
+      "S1": { "signal": "HOLD",         "reason": "...", "rsi": null, "adx": null, "box_high": null, "box_low": null, "atr": null, "updated_at": "ISO timestamp (UTC)" }
     }
   },
   "scan_log": [
@@ -748,6 +798,10 @@ On startup, `ig_bot.py` detects the old single-instrument format (has `"position
 - Wraps old `position` value under `positions["US30"]`
 - Wraps old `pending_order` value under `pending_orders["US30"]`
 - Writes migrated state back to file before proceeding
+
+A second migration in `_load_state` handles the `scan_signals` restructuring: old flat entries (where `scan_signals[name]` contains `"signal"` directly at the top level) are unwrapped into `{"S5": old}` on first load. Wrapped in try/except — any failure resets `scan_signals` to `{}` to avoid blocking startup. This is a one-shot migration: once rewritten, the file uses the new strategy-keyed shape permanently.
+
+`positions[name]` and `pending_orders[name]` each gain a `"strategy"` field (`"S5"` or `"S1"`) at open time. `_adapter_for(pos.get("strategy", "S5"))` falls back to S5 for any pre-tag legacy positions lacking the field.
 
 **Breaking scenarios:**
 
@@ -771,6 +825,12 @@ On startup, `ig_bot.py` detects the old single-instrument format (has `"position
 
 7. **Adding a new instrument without the startup migration guard** → Old state file missing the new key causes KeyError
    - Fix: Always access positions/pending_orders with `.get(display_name)` or ensure migration populates all known instruments
+
+8. **Removing or renaming `"strategy"` field in positions/pending_orders** → `_adapter_for()` falls back to S5 for all positions, silently routing S1 positions through the S5 monitor/exit logic
+   - Fix: Update all `ig_bot.py` open_long/open_short writes and `_adapter_for()` lookups in lockstep
+
+9. **Adding a new strategy adapter without updating `_enabled_strategies`** → New strategy never fires even if `s_new_enabled=True`
+   - Fix: Add the adapter to `_enabled_strategies` in `ig_bot.py` startup and document the required CONFIG keys in `_validate_instruments()`
 
 **Verification commands:**
 
@@ -858,7 +918,7 @@ PAPER_MODE        = False
 
 ### 5.2 Per-Instrument CONFIG Shape
 
-Each instrument file (`config_ig_us30.py`, `config_ig_gold.py`, etc.) exports a single flat `CONFIG` dict. All 33 keys are required:
+Each instrument file (`config_ig_us30.py`, `config_ig_gold.py`, etc.) exports a single flat `CONFIG` dict. All S5 keys are always required; S1 keys (see § 5.4) are also present in every file but enforced only when `s1_enabled=True`. The base (non-S1) shape has 33 keys:
 
 ```python
 CONFIG = {
@@ -922,7 +982,40 @@ if missing:
     raise KeyError(f"Instrument config '{inst.get('display_name', '?')}' missing keys: {missing}")
 ```
 
-### 5.4 Adding a New Instrument
+### 5.4 Per-Instrument S1 CONFIG Keys
+
+Each instrument `CONFIG` dict now also includes an S1 parameter block. All S1 keys are required only when `s1_enabled=True`; `_validate_instruments()` enforces them conditionally. Default is `s1_enabled=False` across all six instrument configs.
+
+```python
+# S1 strategy parameters (required when s1_enabled=True)
+"m3_limit":                   int,    # 3m candle fetch limit (e.g. 100)
+"s1_htf_interval":            str,    # e.g. "4H"
+"s1_ltf_interval":            str,    # e.g. "3m"
+"s1_daily_interval":          str,    # e.g. "1D"
+"s1_adx_trend_threshold":     float,  # ADX minimum for trend filter
+"s1_daily_ema_slow":          int,    # Daily slow EMA period
+"s1_daily_rsi_long_thresh":   float,  # Daily RSI max for LONG entries
+"s1_daily_rsi_short_thresh":  float,  # Daily RSI min for SHORT entries
+"s1_rsi_period":              int,    # RSI period on ltf
+"s1_rsi_long_thresh":         float,  # ltf RSI max for LONG
+"s1_rsi_short_thresh":        float,  # ltf RSI min for SHORT
+"s1_consolidation_candles":   int,    # candles in coil window
+"s1_consolidation_range_pct": float,  # coil range threshold (% of price)
+"s1_breakout_buffer_pct":     float,  # entry buffer beyond box edge
+"s1_atr_period":              int,    # ATR period (daily)
+"s1_sl_atr_mult":             float,  # SL = structural ± sl_atr_mult × ATR
+"s1_tp_atr_mult":             float,  # TP1 = entry ± tp_atr_mult × ATR
+"s1_sl_buffer_pct":           float,  # additional SL buffer
+"s1_sr_clearance_atr_mult":   float,  # minimum S/R clearance in ATR units
+"s1_contract_size":           float,  # opening size (may differ from s5 contract_size)
+"s1_partial_size":            float,  # contracts to close at TP1
+"s1_use_swing_trail":         bool,   # enable structural swing trail
+"s1_swing_lookback":          int,    # swing lookback for trail
+```
+
+**Index vs FX defaults:** US30, US100, GOLD use `s1_consolidation_range_pct=0.003` (0.3%) and `s1_breakout_buffer_pct=0.0005` (0.05%). FX pairs (EUR/USD, GBP/USD, USD/JPY) use 10× smaller values (0.0003% / 0.00005%) because price moves are measured in pips. All other S1 defaults match across instruments. Values are placeholders pending backtest grid-search tuning.
+
+### 5.5 Adding a New Instrument
 
 1. Create `config_ig_<name>.py` with the CONFIG dict (copy an existing file, tune values)
 2. Add two lines in `config_ig.py`:
@@ -932,7 +1025,7 @@ if missing:
    ```
 3. No other files need updating — `ig_bot.py` loops over `INSTRUMENTS` dynamically
 
-### 5.5 Bitget Bot — `config.py` Scanner/Liquidity Params
+### 5.6 Bitget Bot — `config.py` Scanner/Liquidity Params
 
 These params live in `config.py` and are imported by `scanner.py`. Changing them affects all strategies, since `scanner.py` produces the `qualified_pairs` list consumed by `bot.py` each scan cycle.
 
@@ -953,20 +1046,21 @@ These params live in `config.py` and are imported by `scanner.py`. Changing them
 - Removing or renaming `LIQUIDITY_CHECK_ENABLED` / `MIN_OB_DEPTH_USDT` → `scanner.py` import fails at startup
 - Setting `MIN_OB_DEPTH_USDT` too high → all pairs filtered, bot sees empty qualified list every cycle
 
-### 5.6 File Inventory
+### 5.7 File Inventory
 
 | File | Role |
 |------|------|
 | `config_ig.py` | Registry: imports instrument configs, exposes `INSTRUMENTS` list + shared settings |
-| `config_ig_us30.py` | US30 CONFIG dict (instrument params + S5 params) |
-| `config_ig_us100.py` | US100 CONFIG dict (instrument params + S5 params, grid-tuned 2026-04-30) |
-| `config_ig_gold.py` | GOLD CONFIG dict (instrument params + S5 params, grid-tuned 2026-04-07) |
-| `config_ig_eurusd.py` | EUR/USD CONFIG dict (instrument params + S5 params, US30 baseline — pending backtest tune) |
-| `config_ig_gbpusd.py` | GBP/USD CONFIG dict (instrument params + S5 params, US30 baseline — pending backtest tune) |
-| `config_ig_usdjpy.py` | USD/JPY CONFIG dict (instrument params + S5 params, US30 baseline — pending backtest tune; 2-decimal price) |
+| `config_ig_us30.py` | US30 CONFIG dict (instrument params + S5 params + S1 params; s1_enabled=False) |
+| `config_ig_us100.py` | US100 CONFIG dict (instrument params + S5 params + S1 params; S5 grid-tuned 2026-04-30; s1_enabled=False) |
+| `config_ig_gold.py` | GOLD CONFIG dict (instrument params + S5 params + S1 params; S5 grid-tuned 2026-04-07; s1_enabled=False) |
+| `config_ig_eurusd.py` | EUR/USD CONFIG dict (instrument params + S5 params + S1 params; FX-scaled consolidation defaults; s1_enabled=False) |
+| `config_ig_gbpusd.py` | GBP/USD CONFIG dict (instrument params + S5 params + S1 params; FX-scaled consolidation defaults; s1_enabled=False) |
+| `config_ig_usdjpy.py` | USD/JPY CONFIG dict (instrument params + S5 params + S1 params; FX-scaled consolidation defaults; s1_enabled=False; 2-decimal price) |
 | `config_ig_s5.py` | **Deleted** — absorbed into `config_ig_us30.py` in the multi-instrument migration |
 
 ### 5.8 Bybit API Credentials (`config_bybit.py`)
+
 
 | Key | Env var | Required | Purpose |
 |------|---------|----------|---------|
@@ -979,7 +1073,7 @@ These params live in `config.py` and are imported by `scanner.py`. Changing them
 
 Failover behaviour lives in `bybit_client.py` — see § 6.2.
 
-### 5.7 Shadow Tracker Config (Bitget + Bybit)
+### 5.9 Shadow Tracker Config (Bitget + Bybit)
 
 Defined in both `config.py` and `config_bybit.py` so each bot writes to its
 own files. The Bybit `sys.modules["config"]` aliasing means `bot.py`'s
@@ -1220,15 +1314,17 @@ Each strategy lives in `strategies/sN.py` and owns:
 
 ### 7.1 Per-strategy public functions
 
-| Strategy | File | Evaluator | Exit computer (LONG) | Exit computer (SHORT) | Internal exit primitive | Swing trail |
-|---|---|---|---|---|---|---|
-| S1 | `strategies/s1.py` | `evaluate_s1` | `compute_and_place_long_exits` | `compute_and_place_short_exits` | `_place_exits` | — |
-| S2 | `strategies/s2.py` | `evaluate_s2` | `compute_and_place_long_exits` | — | `_place_partial_trail_exits` | `maybe_trail_sl` (LONG) |
-| S3 | `strategies/s3.py` | `evaluate_s3` | `compute_and_place_long_exits` | — | `_place_partial_trail_exits` | `maybe_trail_sl` (LONG) |
-| S4 | `strategies/s4.py` | `evaluate_s4` | — | `compute_and_place_short_exits` | `_place_partial_trail_exits` | `maybe_trail_sl` (SHORT) |
-| S5 | `strategies/s5.py` | `evaluate_s5` | `compute_and_place_long_exits` | `compute_and_place_short_exits` | `_place_exits` | `maybe_trail_sl` |
-| S6 | `strategies/s6.py` | `evaluate_s6` | — | `compute_and_place_short_exits` | `_place_partial_trail_exits` | — |
-| S7 | `strategies/s7.py` | `evaluate_s7` | `compute_and_place_long_exits` | `compute_and_place_short_exits` | `_place_partial_trail_exits` (from s4) | `maybe_trail_sl` (LONG + SHORT) |
+| Strategy | Bot | File | Evaluator | Exit computer (LONG) | Exit computer (SHORT) | Internal exit primitive | Swing trail |
+|---|---|---|---|---|---|---|---|
+| S1 | Bitget/Bybit | `strategies/s1.py` | `evaluate_s1` (cfg=None) | `compute_and_place_long_exits` | `compute_and_place_short_exits` | `_place_exits` | — |
+| S1 | IG | `strategies/s1.py` | `evaluate_s1` (cfg=instrument) | `compute_s1_sl_atr` + `compute_s1_tp_atr` via `_S1Adapter.handle_signal` | same | N/A (IG uses ig.open_long/short) | `maybe_trail_sl_ig` |
+| S2 | Bitget/Bybit | `strategies/s2.py` | `evaluate_s2` | `compute_and_place_long_exits` | — | `_place_partial_trail_exits` | `maybe_trail_sl` (LONG) |
+| S3 | Bitget/Bybit | `strategies/s3.py` | `evaluate_s3` | `compute_and_place_long_exits` | — | `_place_partial_trail_exits` | `maybe_trail_sl` (LONG) |
+| S4 | Bitget/Bybit | `strategies/s4.py` | `evaluate_s4` | — | `compute_and_place_short_exits` | `_place_partial_trail_exits` | `maybe_trail_sl` (SHORT) |
+| S5 | Bitget/Bybit | `strategies/s5.py` | `evaluate_s5` (cfg=None) | `compute_and_place_long_exits` | `compute_and_place_short_exits` | `_place_exits` | `maybe_trail_sl` |
+| S5 | IG | `strategies/s5.py` | `evaluate_s5` (cfg=instrument) | via `_S5Adapter.handle_signal` → `ig.open_long` | same | N/A (IG uses ig.open_long/short) | `_S5Adapter.monitor` → `ig.update_sl` |
+| S6 | Bitget/Bybit | `strategies/s6.py` | `evaluate_s6` | — | `compute_and_place_short_exits` | `_place_partial_trail_exits` | — |
+| S7 | Bitget/Bybit | `strategies/s7.py` | `evaluate_s7` | `compute_and_place_long_exits` | `compute_and_place_short_exits` | `_place_partial_trail_exits` (from s4) | `maybe_trail_sl` (LONG + SHORT) |
 
 ### 7.2 `compute_and_place_*_exits(symbol, qty_str, fill, ...) → (ok, sl_trig, trail_trig)`
 
@@ -1568,7 +1664,7 @@ Bitget bot and IG bot log trade actions with different naming conventions:
 | Bot | Action Format | Examples | Notes |
 |-----|---------------|----------|-------|
 | Bitget | `{STRATEGY}_{SIGNAL}` `{STRATEGY}_{LIFECYCLE}` | `S1_LONG` `S5_LONG` `S5_PARTIAL` `S5_CLOSE` | Strategy-prefixed; mixed signal/lifecycle naming |
-| IG | `S5_{LIFECYCLE}` | `S5_LONG` `S5_PARTIAL` `S5_CLOSE` | Only S5; uses same entry names as Bitget |
+| IG | `S5_{LIFECYCLE}` or `S1_{LIFECYCLE}` | `S5_LONG` `S5_PARTIAL` `S5_CLOSE` `S1_LONG` `S1_SHORT` `S1_PARTIAL` `S1_CLOSE` | S5 + S1; same naming convention as Bitget |
 
 **Detailed breakdown:**
 
@@ -1589,13 +1685,19 @@ Lifecycle actions:
 
 **IG ig_trades.csv (ig_bot.py):**
 ```
-Entry actions (S5 only):
-  S5_LONG                 (long entry, ig_bot.py line 482)
-  S5_SHORT                (short entry, ig_bot.py line 482)
+Entry actions (S5):
+  S5_LONG                 (long entry via _S5Adapter.handle_signal)
+  S5_SHORT                (short entry via _S5Adapter.handle_signal)
+
+Entry actions (S1):
+  S1_LONG                 (long entry via _S1Adapter.handle_signal)
+  S1_SHORT                (short entry via _S1Adapter.handle_signal)
 
 Lifecycle actions:
-  S5_PARTIAL              (partial TP hit, ig_bot.py line 571)
-  S5_CLOSE                (full exit, ig_bot.py lines 641, 683)
+  S5_PARTIAL              (partial TP hit — S5 position)
+  S5_CLOSE                (full exit — S5 position)
+  S1_PARTIAL              (partial TP hit — S1 position)
+  S1_CLOSE                (full exit — S1 position)
 ```
 
 **Common mistakes:**
@@ -1638,7 +1740,7 @@ head -1 trades_paper.csv | tr ',' '\n' | wc -l
 
 # Check IG CSV column count
 head -1 ig_trades.csv | tr ',' '\n' | wc -l
-# Expected: 20 columns
+# Expected: 28 columns
 
 # Verify action names are different
 head -20 trades_paper.csv | grep "action" | cut -d, -f1-3
@@ -1708,6 +1810,27 @@ python -c "import bybit_bot; import bot; print('tr =', bot.tr.__name__, '| confi
 - Adding a new config_sN.py without a matching config_bybit_sN.py and a sys.modules alias → Bybit bot silently runs against Bitget's config
 - Renaming a function in `bitget.py` without renaming in `bybit.py` → AttributeError at runtime when a strategy calls the renamed function
 - Importing `bot` at the top of any helper that's imported by `bybit_bot.py` before aliasing completes → swap silently fails
+
+### 10.6 s1_contract_size vs contract_size
+
+- `contract_size` (existing): per-instrument default, used by S5 entries
+- `s1_contract_size` (new): per-strategy override for S1 entries
+
+These can diverge if you want different position sizes for S1 vs S5 on the
+same instrument. The shipping configs default both to matching values.
+
+### 10.7 S1 risk math: Bitget vs IG
+
+- **Bitget path (`cfg=None`):** percentage-based SL (5%) and TP (10%) — see `config_s1.py`
+- **IG path (`cfg=instrument`):** ATR-multiple SL (`s1_sl_atr_mult × daily_ATR`) and TP (`s1_tp_atr_mult × daily_ATR`)
+
+Same `evaluate_s1` function powers both; the divergence is in the helpers
+called *after* signal returns:
+- Bitget: `compute_and_place_long_exits` → `bg.place_pos_sl_only` / `profit_plan` / `moving_plan`
+- IG: `compute_s1_sl_atr` + `compute_s1_tp_atr` → `ig.open_long(sl, tp1, tp)`
+
+The 15% daily S/R clearance gate (Bitget) becomes the ATR-multiple gate
+(IG: `s1_sr_clearance_atr_mult × daily_ATR`) — same intent, different units.
 
 ---
 
@@ -1783,3 +1906,4 @@ head -1 ig_trades.csv
 - 2026-04-28: S7 Post-Pump 1H Darvas Breakdown Short — added strategies/s7.py (evaluate_s7 9-tuple return, detect_darvas_box walking algorithm, queue_pending, handle_pending_tick); added config_s7.py; added S7 fields to Section 4.1 pair_states (s7_signal, s7_reason, s7_box_top, s7_box_low, s7_rsi, s7_rsi_peak, s7_body_pct, s7_div, s7_div_str, s7_sr_clearance_pct); updated Section 2.1 strategies diagram and function list; added evaluate_s7() signature to Section 2.1; updated trades.csv snap fields (snap_box_top, snap_box_low_initial added); updated Section 7.1 strategy table; updated analytics.py STRATEGIES tuple to include S7; updated optimize.py CURRENT_PARAMS and STRATEGY_COLUMNS for S7; added S7 display panel to dashboard.html; ig_bot.py unaffected (S7 is Bitget-only).
 - 2026-04-29: S7 bidirectional — evaluate_s7() gained `allowed_direction` param (BULLISH→LONG, BEARISH→SHORT, NEUTRAL→HOLD); same daily gates (spike+RSI) apply to both directions; LONG fires on 1H close above box_top×(1+S7_ENTRY_BUFFER), SHORT fires on 1H close below box_low×(1−S7_ENTRY_BUFFER); added compute_and_place_long_exits(), compute_paper_trail_long(), LONG branch in maybe_trail_sl(); scale_in_specs() is now direction-aware; bot.py sentiment gate changed from ==BEARISH to !=NEUTRAL; added s7_sr_resistance_pct to Section 4.1 pair_states; s7_signal now accepts LONG; Section 7.1 strategy table updated; paper_trader.py LONG branch tuple gained S7; dashboard.html s7CardHTML handles LONG card class + dynamic SR row label; GENERAL_CONCEPTS.md §7 updated; ig_bot.py unaffected.
 - 2026-05-11: S7 entry fix — replaced the freeze-on-lock walking Darvas algo with `detect_consolidation_box(h1_slice, min_candles=4)` (max-high / min-low over today's closed 1H candles excluding the latest, which is the breakout test). Removed `S7_BOX_CONFIRM_COUNT` from config_s7.py and optimize.py STRATEGY_PARAMS. `handle_pending_tick` now compares the latest closed 1H close against the *buffered* trigger (`box_top × (1+S7_ENTRY_BUFFER)` / `box_low × (1−S7_ENTRY_BUFFER)`) instead of the raw box edge. S7 candidates now route through the pending watcher (`_queue_s7_pending` → `strategies.s7.queue_pending` → `handle_pending_tick` → `_fire_s7`) instead of immediate-fire; `_execute_s7` removed; "S7": dispatcher removed; S7 added to the pending-tick strategy tuple in bot.py. Function rename: `detect_darvas_box` → `detect_consolidation_box` (4-tuple return). Tests: test_s7_darvas.py rewritten for new detector; test_bot_entry_watcher_all.py::test_execute_best_candidate_queues_s7 now asserts the queue path. ig_bot.py unaffected.
+- 2026-05-22: S1 on IG bot — evaluate_s1(cfg=) shared across both bots; ig_trades.csv 20→28 columns (snap_strategy + 6 S1 snap fields + exit_price); ig_state.json scan_signals restructured to strategy-keyed {name: {"S5": ..., "S1": ...}} with one-shot migration in _load_state; positions[name] and pending_orders[name] gained "strategy" field; added _StrategyAdapter / _S5Adapter / _S1Adapter dispatcher pattern in ig_bot.py with first-non-HOLD-wins + adapter monitor dispatch; added S1 block to all 6 config_ig_*.py (s1_enabled=False by default); _validate_instruments enforces S1 keys when s1_enabled=True; backtest_ig.py gained --strategy {s5,s1,both} and --grid s1 flags with 3m-walking loop, per-strategy stats, grid-search ranked-combo report section; new helpers: indicators.calculate_atr, tools.nearest_daily_sr_clearance, strategies.s1.compute_s1_sl_atr / compute_s1_tp_atr / maybe_trail_sl_ig

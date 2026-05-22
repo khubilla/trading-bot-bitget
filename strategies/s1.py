@@ -291,6 +291,26 @@ def evaluate_s1(
     if not S1_ENABLED:
         return "HOLD", 50.0, 0.0, 0.0, 0.0, 0.0
 
+    # IG path: compute daily ATR + S/R clearance setup for downstream exit math + gating
+    atr_val = 0.0
+    sr_clearance_long  = float("inf")
+    sr_clearance_short = float("inf")
+    if cfg is not None:
+        from indicators import calculate_atr
+        from tools import nearest_daily_sr_clearance
+        atr_period = cfg.get("s1_atr_period", 14)
+        atr_series = calculate_atr(daily_df, period=atr_period)
+        atr_val = float(atr_series.iloc[-1]) if len(atr_series) else 0.0
+        cfg["_last_atr"] = atr_val
+        if atr_val <= 0:
+            return "HOLD", 50.0, 0.0, 0.0, 0.0, 0.0
+        sr_mult = cfg.get("s1_sr_clearance_atr_mult", 0.0)
+        if sr_mult > 0:
+            sr_clearance_long  = nearest_daily_sr_clearance(daily_df, direction="LONG")
+            sr_clearance_short = nearest_daily_sr_clearance(daily_df, direction="SHORT")
+            cfg["_last_sr_clearance_long_atr"]  = (sr_clearance_long / atr_val) if atr_val else float("inf")
+            cfg["_last_sr_clearance_short_atr"] = (sr_clearance_short / atr_val) if atr_val else float("inf")
+
     bull_htf, bear_htf = check_htf(htf_df)
 
     if bull_htf and allowed_direction == "BULLISH":
@@ -299,6 +319,9 @@ def evaluate_s1(
             return "HOLD", 50.0, 0.0, 0.0, adx, daily_rsi
         valid, rsi, bh, bl = check_ltf_long(ltf_df, cfg=cfg)
         if valid:
+            if cfg is not None and cfg.get("s1_sr_clearance_atr_mult", 0) > 0:
+                if sr_clearance_long < cfg["s1_sr_clearance_atr_mult"] * atr_val:
+                    return "HOLD", rsi, bh, bl, adx, daily_rsi
             logger.info(f"[S1][{symbol}] ✅ LONG | RSI={rsi:.1f} ADX={adx:.1f} Daily RSI={daily_rsi:.1f}")
             return "LONG", rsi, bh, bl, adx, daily_rsi
         return "HOLD", rsi, bh, bl, adx, daily_rsi
@@ -309,6 +332,9 @@ def evaluate_s1(
             return "HOLD", 50.0, 0.0, 0.0, adx, daily_rsi
         valid, rsi, bh, bl = check_ltf_short(ltf_df, cfg=cfg)
         if valid:
+            if cfg is not None and cfg.get("s1_sr_clearance_atr_mult", 0) > 0:
+                if sr_clearance_short < cfg["s1_sr_clearance_atr_mult"] * atr_val:
+                    return "HOLD", rsi, bh, bl, adx, daily_rsi
             logger.info(f"[S1][{symbol}] ✅ SHORT | RSI={rsi:.1f} ADX={adx:.1f} Daily RSI={daily_rsi:.1f}")
             return "SHORT", rsi, bh, bl, adx, daily_rsi
         return "HOLD", rsi, bh, bl, adx, daily_rsi

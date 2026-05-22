@@ -70,3 +70,38 @@ def test_cfg_path_and_module_path_match():
     sig_module, *_ = evaluate_s1("TEST", htf, ltf, daily, "BULLISH", cfg=None)
     sig_cfg,    *_ = evaluate_s1("TEST", htf, ltf, daily, "BULLISH", cfg=cfg)
     assert sig_module == sig_cfg
+
+
+def test_cfg_path_sets_last_atr_on_cfg():
+    """When cfg is provided and ATR is non-zero, evaluate_s1 sets cfg['_last_atr']."""
+    cfg = _cfg_mirror()
+    cfg["s1_atr_period"] = 14
+    cfg["s1_sr_clearance_atr_mult"] = 0.0     # disable S/R gate
+    daily = _candles_with_trend(200)
+    htf   = _candles_with_trend(60)
+    ltf   = _candles_with_trend(40)
+    result = evaluate_s1("TEST", htf, ltf, daily, "BULLISH", cfg=cfg)
+    assert len(result) == 6                    # tuple shape unchanged
+    assert "_last_atr" in cfg
+    assert cfg["_last_atr"] > 0.0
+
+
+def test_cfg_atr_zero_returns_hold():
+    """When daily ATR is 0 (flat market) and cfg is provided, evaluate_s1 returns HOLD."""
+    cfg = _cfg_mirror()
+    cfg["s1_atr_period"] = 14
+    cfg["s1_sr_clearance_atr_mult"] = 0.0
+    flat = pd.DataFrame({"open": [100]*200, "high": [100]*200, "low": [100]*200,
+                        "close": [100]*200, "volume": [100]*200})
+    sig, *_ = evaluate_s1("TEST", flat, flat, flat, "BULLISH", cfg=cfg)
+    assert sig == "HOLD"
+
+
+def test_cfg_none_does_not_compute_atr():
+    """When cfg is None, evaluate_s1 does NOT set _last_atr anywhere — Bitget path unchanged."""
+    cfg = _cfg_mirror()    # build but pass cfg=None
+    daily = _candles_with_trend(200)
+    htf   = _candles_with_trend(60)
+    ltf   = _candles_with_trend(40)
+    evaluate_s1("TEST", htf, ltf, daily, "BULLISH", cfg=None)
+    assert "_last_atr" not in cfg   # no side effect on cfg when cfg=None

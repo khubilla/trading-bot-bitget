@@ -360,7 +360,11 @@ def nearest_daily_sr_clearance(daily_df, direction: str,
     LONG:  finds the nearest swing high > current close (resistance).
     SHORT: finds the nearest swing low  < current close (support).
 
-    A swing high at index i is high[i] > high[i±k] for k in 1..swing_window.
+    A swing high at index i requires high[i] > high[i+k] for the full
+    swing_window on the right (k in 1..swing_window) and high[i] > high[i-k]
+    for as many bars as exist on the left. Left-edge pivots are valid when
+    they qualify within the available left-side history; the current (last)
+    bar is never a pivot because the right-side check fails.
     A swing low is the mirror with lows.
 
     Returns float('inf') when no qualifying swing is found within `lookback`.

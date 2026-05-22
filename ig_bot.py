@@ -348,6 +348,121 @@ class _PaperState:
             self._save()
 
 
+# ── Strategy Adapters ───────────────────────────────────────── #
+
+
+class _StrategyAdapter:
+    """
+    Per-strategy namespace exposing evaluate / handle_signal.
+
+    Subclasses set `name` and `enabled_key` and implement the methods. Instances
+    are stateless; all state lives on the IGBot instance and the instrument CONFIG.
+    """
+    name: str        = ""    # "S5", "S1", ...
+    enabled_key: str = ""    # CONFIG key gating this strategy on the instrument
+
+    def evaluate(self, bot, instrument: dict) -> dict:
+        """Return a result dict. Must include 'signal' (HOLD or strategy-specific value)
+        and 'reason'. Strategy-specific fields (e.g. ob_low, sl, tp) are included too."""
+        raise NotImplementedError
+
+    def handle_signal(self, bot, instrument: dict, result: dict) -> None:
+        """Side-effects: place orders, update bot._positions / bot._pending_orders, persist state."""
+        raise NotImplementedError
+
+
+class _S5Adapter(_StrategyAdapter):
+    name        = "S5"
+    enabled_key = "s5_enabled"
+
+    def evaluate(self, bot, instrument: dict) -> dict:
+        name = instrument["display_name"]
+        daily_df = bot._get_candles("1D",  instrument["daily_limit"])
+        htf_df   = bot._get_candles("1H",  instrument["htf_limit"])
+        m15_df   = bot._get_candles("15m", instrument["m15_limit"])
+        if daily_df.empty or htf_df.empty or m15_df.empty:
+            logger.warning(f"[{name}] [S5] Candle fetch returned empty — skipping tick")
+            return {"signal": "HOLD", "reason": "candle fetch empty"}
+
+        ema_fast = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_fast"]).iloc[-1])
+        ema_med  = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_med"]).iloc[-1])
+        ema_slow = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_slow"]).iloc[-1])
+        ema_bull = ema_fast > ema_med > ema_slow
+        ema_bear = ema_slow > ema_med > ema_fast
+        if ema_bull:    allowed_direction = "BULLISH"
+        elif ema_bear:  allowed_direction = "BEARISH"
+        else:           allowed_direction = "BULLISH" if ema_fast > ema_slow else "BEARISH"
+
+        epic = instrument["epic"]
+        sig, trigger, sl, tp, ob_low, ob_high, reason = evaluate_s5(
+            epic, daily_df, htf_df, m15_df, allowed_direction, cfg=instrument
+        )
+        logger.info(f"[{name}] [S5] {reason}")
+        return {
+            "signal": sig, "trigger": trigger, "sl": sl, "tp": tp,
+            "ob_low": ob_low, "ob_high": ob_high, "reason": reason,
+        }
+
+    def handle_signal(self, bot, instrument: dict, result: dict) -> None:
+        """Place S5 pending limit order. Verbatim extraction from _tick_instrument."""
+        name = instrument["display_name"]
+        epic = instrument["epic"]
+        sig     = result["signal"]
+        trigger = result["trigger"]
+        sl      = result["sl"]
+        tp      = result["tp"]
+        ob_low  = result["ob_low"]
+        ob_high = result["ob_high"]
+
+        # Persist scan state first (matches existing behavior — always updates regardless of signal)
+        bot._update_scan_state(name, sig, result["reason"], ob_low, ob_high, trigger, sl, tp)
+        bot._save_state()
+
+        if sig not in ("PENDING_LONG", "PENDING_SHORT"):
+            return
+
+        mark = ig.get_mark_price(epic)
+        if mark <= 0:
+            return
+
+        side = "LONG" if sig == "PENDING_LONG" else "SHORT"
+        if not _entry_in_window(side, mark, trigger, instrument):
+            logger.info(f"[{name}] [S5] Skipping limit order — mark {mark:.1f} invalid vs trigger {trigger:.1f}")
+            return
+
+        dec = instrument["price_decimals"]
+        sl  = round(sl, dec)
+        tp  = round(tp, dec) if tp else round(trigger + abs(trigger - sl) if side == "LONG" else trigger - abs(trigger - sl), dec)
+        contract_size = instrument["contract_size"]
+        try:
+            if side == "LONG":
+                deal_id = ig.place_limit_long(epic, trigger, sl, tp, contract_size, currency=instrument["currency"])
+            else:
+                deal_id = ig.place_limit_short(epic, trigger, sl, tp, contract_size, currency=instrument["currency"])
+        except Exception as e:
+            logger.error(f"[{name}] [S5] Failed to place limit {side}: {e}")
+            return
+        bot._pending_orders[name] = {
+            "deal_id":  deal_id,
+            "side":     side,
+            "ob_low":   ob_low,
+            "ob_high":  ob_high,
+            "sl":       sl,
+            "tp":       tp,
+            "trigger":  trigger,
+            "size":     contract_size,
+            "expires":  time.time() + instrument["pending_expiry_hours"] * 3600,
+        }
+        bot._save_state()
+        logger.info(
+            f"[{name}] [S5] {side} limit order placed | trigger={trigger:.1f} | "
+            f"SL={sl:.1f} | TP={tp:.1f} | deal_id={deal_id}"
+        )
+
+
+_S5_ADAPTER = _S5Adapter()
+
+
 # ── Main bot ─────────────────────────────────────────────────── #
 
 class IGBot:
@@ -629,6 +744,30 @@ class IGBot:
         self.running = False
         self._stop_event.set()
 
+    # ── Strategy dispatcher helpers ──────────────────────────── #
+
+    def _enabled_strategies(self, instrument: dict) -> list:
+        """Return strategy adapters enabled on this instrument, in dispatch order.
+
+        Future tasks (T9) will widen the tuple to include _S1_ADAPTER.
+        """
+        out = []
+        for adapter in (_S5_ADAPTER,):
+            if instrument.get(adapter.enabled_key, False):
+                out.append(adapter)
+        return out
+
+    def _adapter_for(self, strategy_name: str):
+        """Return the adapter matching the pos['strategy'] tag.
+
+        Falls back to _S5_ADAPTER for unknown / missing tags (legacy positions
+        written before T11 added the 'strategy' field).
+        """
+        for adapter in (_S5_ADAPTER,):
+            if adapter.name == strategy_name:
+                return adapter
+        return _S5_ADAPTER
+
     # ── Main tick ─────────────────────────────────────────────── #
 
     def _tick(self) -> None:
@@ -700,85 +839,14 @@ class IGBot:
                 self._check_pending_order(mark)
             return
 
-        # 5. Fetch candles (cached — only hits API when new candle has formed)
-        # _get_candles resolves epic from self._current_instrument when not supplied.
-        daily_df = self._get_candles("1D",  instrument["daily_limit"])
-        htf_df   = self._get_candles("1H",  instrument["htf_limit"])
-        m15_df   = self._get_candles("15m", instrument["m15_limit"])
-
-        if daily_df.empty or htf_df.empty or m15_df.empty:
-            logger.warning(f"[{name}] Candle fetch returned empty — skipping tick")
+        # 5. Evaluate enabled strategies (T7: S5 only; T8 will widen to S1+S5 in dispatch order)
+        for adapter in self._enabled_strategies(instrument):
+            result = adapter.evaluate(self, instrument)
+            adapter.handle_signal(self, instrument, result)
+            # Note: T8 will change this to "return on first non-HOLD"; for now, S5 is the only
+            # adapter, so calling handle_signal unconditionally preserves current behavior
+            # (the existing code unconditionally called _update_scan_state regardless of signal).
             return
-
-        # 6. Derive allowed_direction from daily EMA waterfall (must match strategy.py logic)
-        ema_fast = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_fast"]).iloc[-1])
-        ema_med  = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_med"]).iloc[-1])
-        ema_slow = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_slow"]).iloc[-1])
-
-        ema_bull = ema_fast > ema_med > ema_slow
-        ema_bear = ema_slow > ema_med > ema_fast
-
-        if ema_bull:
-            allowed_direction = "BULLISH"
-        elif ema_bear:
-            allowed_direction = "BEARISH"
-        else:
-            allowed_direction = "BULLISH" if ema_fast > ema_slow else "BEARISH"
-
-        # 7. Evaluate S5
-        epic = instrument["epic"]
-        sig, trigger, sl, tp, ob_low, ob_high, reason = evaluate_s5(
-            epic, daily_df, htf_df, m15_df, allowed_direction, cfg=instrument
-        )
-        logger.info(f"[{name}] [S5] {reason}")
-
-        # Update scan state so dashboard always shows latest signal — save regardless of signal
-        self._update_scan_state(name, sig, reason, ob_low, ob_high, trigger, sl, tp)
-        self._save_state()
-
-        if sig not in ("PENDING_LONG", "PENDING_SHORT"):
-            return
-
-        # 8. Get mark price for limit order placement
-        mark = ig.get_mark_price(epic)
-        if mark <= 0:
-            return
-
-        # 9. Guard: reject if mark has already crossed the trigger level
-        side = "LONG" if sig == "PENDING_LONG" else "SHORT"
-        if not _entry_in_window(side, mark, trigger, instrument):
-            logger.info(f"[{name}] [S5] Skipping limit order — mark {mark:.1f} invalid vs trigger {trigger:.1f}")
-            return
-
-        # 10. Place limit working order
-        dec  = instrument["price_decimals"]
-        sl   = round(sl, dec)
-        tp   = round(tp, dec) if tp else round(trigger + abs(trigger - sl) if side == "LONG" else trigger - abs(trigger - sl), dec)
-        contract_size = instrument["contract_size"]
-        try:
-            if side == "LONG":
-                deal_id = ig.place_limit_long(epic, trigger, sl, tp, contract_size, currency=instrument["currency"])
-            else:
-                deal_id = ig.place_limit_short(epic, trigger, sl, tp, contract_size, currency=instrument["currency"])
-        except Exception as e:
-            logger.error(f"[{name}] [S5] Failed to place limit {side}: {e}")
-            return
-        self._pending_orders[name] = {
-            "deal_id":  deal_id,
-            "side":     side,
-            "ob_low":   ob_low,
-            "ob_high":  ob_high,
-            "sl":       sl,
-            "tp":       tp,
-            "trigger":  trigger,
-            "size":     contract_size,
-            "expires":  time.time() + instrument["pending_expiry_hours"] * 3600,
-        }
-        self._save_state()
-        logger.info(
-            f"[{name}] [S5] {side} limit order placed | trigger={trigger:.1f} | "
-            f"SL={sl:.1f} | TP={tp:.1f} | deal_id={deal_id}"
-        )
 
     # ── Open trade ─────────────────────────────────────────────── #
 

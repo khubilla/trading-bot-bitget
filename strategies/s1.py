@@ -459,4 +459,32 @@ def dna_fields(candles: dict) -> dict:
         ema_m3    = calculate_ema(closes_m3, 20)
         out["snap_trend_m3_price_vs_ema"] = price_vs_ema(float(closes_m3.iloc[-1]), float(ema_m3.iloc[-1]))
 
+
+# ── ATR-based exit math (IG path) ───────────────────────── #
+
+def compute_s1_sl_atr(direction: str, entry: float, box_high: float, box_low: float,
+                     atr_value: float, cfg: dict) -> float:
+    """
+    Structural SL with ATR cap (IG path).
+
+    LONG:  SL = max(entry − atr_mult·ATR, box_low  · (1 − buffer))   # tighter of the two
+    SHORT: SL = min(entry + atr_mult·ATR, box_high · (1 + buffer))   # tighter of the two
+
+    cfg supplies s1_sl_atr_mult and s1_sl_buffer_pct.
+    """
+    sl_buffer = cfg["s1_sl_buffer_pct"]
+    if direction == "LONG":
+        atr_floor        = entry - cfg["s1_sl_atr_mult"] * atr_value
+        structural_floor = box_low * (1 - sl_buffer)
+        return max(atr_floor, structural_floor)
+    atr_ceil        = entry + cfg["s1_sl_atr_mult"] * atr_value
+    structural_ceil = box_high * (1 + sl_buffer)
+    return min(atr_ceil, structural_ceil)
+
+
+def compute_s1_tp_atr(direction: str, entry: float, atr_value: float, cfg: dict) -> float:
+    """TP1 (50% partial) trigger at entry ± tp_atr_mult × ATR (IG path)."""
+    delta = cfg["s1_tp_atr_mult"] * atr_value
+    return entry + delta if direction == "LONG" else entry - delta
+
     return out

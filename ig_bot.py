@@ -902,8 +902,36 @@ class IGBot:
         self._scan_log = self._scan_log[:20]
 
     def _maybe_log_partial_s1(self, instrument: dict, pos: dict, mark: float) -> None:
-        """Stub — T12 will implement the partial-TP detection + S1_PARTIAL row."""
-        pass
+        """Log S1_PARTIAL when live qty drops below 75% of initial qty (TP1 hit) and not yet logged.
+
+        Mirrors the S5 partial-TP convention: detect via qty drop rather than price level
+        so it works for both paper-mode synthetic fills and live broker fills.
+        """
+        if pos.get("partial_done"):
+            return
+        try:
+            current = float(pos.get("current_qty", 0))
+            initial = float(pos.get("initial_qty", 0))
+        except (TypeError, ValueError):
+            return
+        if initial <= 0 or current >= initial * 0.75:
+            return
+
+        dec = instrument.get("price_decimals", 2)
+        _log_trade("S1_PARTIAL", {
+            "symbol":        instrument["display_name"],
+            "trade_id":      pos.get("trade_id", ""),
+            "side":          pos["side"],
+            "qty":           round(initial - current, 4),
+            "entry":         pos.get("entry", 0.0),
+            "sl":            pos.get("sl", 0.0),
+            "exit_price":    round(mark, dec) if mark else None,
+            "exit_reason":   "PARTIAL_TP",
+            "snap_strategy": "S1",
+            "mode":          "paper" if self.paper else "live",
+        })
+        pos["partial_done"] = True
+        self._save_state()
 
     def _on_stream_event(self, event_type: str, deal_id: str, fill_price: float) -> None:
         """

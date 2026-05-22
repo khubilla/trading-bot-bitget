@@ -289,3 +289,53 @@ def test_s5_pending_order_tagged_with_strategy():
         ig_bot._S5_ADAPTER.handle_signal(bot, instrument, result)
     po = bot._pending_orders["TEST"]
     assert po.get("strategy") == "S5"
+
+
+def test_maybe_log_partial_s1_logs_when_qty_drops():
+    """S1_PARTIAL row written when current_qty < 75% of initial_qty and not yet logged."""
+    from unittest.mock import patch, MagicMock
+    bot = ig_bot.IGBot.__new__(ig_bot.IGBot)
+    bot.paper = False
+    bot._positions = {}
+    bot._save_state = MagicMock()
+    instrument = {"display_name": "TEST", "epic": "EPIC", "price_decimals": 1}
+    pos = {"side": "LONG", "deal_id": "x", "trade_id": "t1",
+           "initial_qty": 0.04, "current_qty": 0.02, "partial_done": False,
+           "entry": 100.0, "sl": 95.0, "strategy": "S1"}
+    with patch("ig_bot._log_trade") as mock_log:
+        bot._maybe_log_partial_s1(instrument, pos, mark=110.0)
+    mock_log.assert_called_once()
+    args, _ = mock_log.call_args
+    assert args[0] == "S1_PARTIAL"
+    assert args[1]["snap_strategy"] == "S1"
+    assert pos["partial_done"] is True
+
+
+def test_maybe_log_partial_s1_noop_when_already_logged():
+    """When partial_done is True, no further log call."""
+    from unittest.mock import patch, MagicMock
+    bot = ig_bot.IGBot.__new__(ig_bot.IGBot)
+    bot.paper = False
+    bot._save_state = MagicMock()
+    instrument = {"display_name": "TEST", "epic": "EPIC", "price_decimals": 1}
+    pos = {"side": "LONG", "trade_id": "t1",
+           "initial_qty": 0.04, "current_qty": 0.01, "partial_done": True,
+           "entry": 100.0, "sl": 95.0}
+    with patch("ig_bot._log_trade") as mock_log:
+        bot._maybe_log_partial_s1(instrument, pos, mark=110.0)
+    mock_log.assert_not_called()
+
+
+def test_maybe_log_partial_s1_noop_when_qty_unchanged():
+    """When current_qty >= 75% of initial, no log call."""
+    from unittest.mock import patch, MagicMock
+    bot = ig_bot.IGBot.__new__(ig_bot.IGBot)
+    bot.paper = False
+    bot._save_state = MagicMock()
+    instrument = {"display_name": "TEST", "epic": "EPIC", "price_decimals": 1}
+    pos = {"side": "LONG", "trade_id": "t1",
+           "initial_qty": 0.04, "current_qty": 0.035, "partial_done": False,
+           "entry": 100.0, "sl": 95.0}
+    with patch("ig_bot._log_trade") as mock_log:
+        bot._maybe_log_partial_s1(instrument, pos, mark=110.0)
+    mock_log.assert_not_called()

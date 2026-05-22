@@ -65,6 +65,25 @@ def calculate_adx(df: pd.DataFrame, period: int = 14) -> dict:
     return {"adx": adx, "plus_di": plus_di, "minus_di": minus_di}
 
 
+def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """
+    Average True Range, Wilder/EWM-smoothed (matches ADX's internal TR smoothing).
+    Returns a pd.Series aligned to df.index.
+    """
+    high  = df["high"].astype(float)
+    low   = df["low"].astype(float)
+    close = df["close"].astype(float)
+
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+
+    return tr.ewm(span=period, adjust=False).mean()
+
+
 def calculate_stoch(
     df: pd.DataFrame,
     k_period: int = 5,

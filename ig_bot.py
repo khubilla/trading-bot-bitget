@@ -453,6 +453,7 @@ class _S5Adapter(_StrategyAdapter):
         bot._pending_orders[name] = {
             "deal_id":  deal_id,
             "side":     side,
+            "strategy": "S5",
             "ob_low":   ob_low,
             "ob_high":  ob_high,
             "sl":       sl,
@@ -1085,6 +1086,7 @@ class IGBot:
                 trade = self._paper.open(sig, mark, sl, tp1, tp,
                                          contract_size, trade_id, ob_low, ob_high)
                 self._positions[name] = self._paper.position
+                self._positions[name]["strategy"] = "S5"
             else:
                 epic = instrument["epic"]
                 if sig == "LONG":
@@ -1105,6 +1107,7 @@ class IGBot:
                     "opened_at":    _now_et().isoformat(),
                     "ob_low":       ob_low,
                     "ob_high":      ob_high,
+                    "strategy":     "S5",
                 }
                 self._save_state()
         except Exception as e:
@@ -1267,6 +1270,7 @@ class IGBot:
             trade = self._paper.open(side, fill_price, sl, tp1, tp,
                                      size, trade_id, ob_low, ob_high)
             self._positions[name] = self._paper.position
+            self._positions[name]["strategy"] = "S5"
         else:
             self._positions[name] = {
                 "side":         side,
@@ -1282,6 +1286,7 @@ class IGBot:
                 "opened_at":    _now_et().isoformat(),
                 "ob_low":       ob_low,
                 "ob_high":      ob_high,
+                "strategy":     "S5",
             }
             self._save_state()
 
@@ -1376,6 +1381,7 @@ class IGBot:
         if self.paper:
             partial_pnl = self._paper.do_partial(mark, instrument["partial_size"], instrument["point_value"])
             self._positions[name] = self._paper.position
+            self._positions[name].setdefault("strategy", "S5")   # preserve tag through paper-state swap
         else:
             ok = ig.partial_close(pos["deal_id"], instrument["partial_size"], close_dir)
             if not ok:

@@ -44,7 +44,8 @@ def test_update_scan_state_writes_signal_fields(monkeypatch):
         sl=44450.0,
         tp=44210.0,
     )
-    entry = bot._scan_signals["US30"]
+    # T10: scan_signals is now strategy-keyed — S5 fields live under ["S5"]
+    entry = bot._scan_signals["US30"]["S5"]
     assert entry["signal"] == "PENDING_SHORT"
     assert entry["ema_ok"] is True
     assert entry["bos_ok"] is True
@@ -62,9 +63,9 @@ def test_update_scan_state_ema_false_when_flat(monkeypatch):
     bot = _make_bot(monkeypatch)
     bot._update_scan_state("US30", "HOLD", "Daily EMA flat (EMAs not aligned)",
                             0.0, 0.0, 0.0, 0.0, 0.0)
-    assert bot._scan_signals["US30"]["ema_ok"] is False
-    assert bot._scan_signals["US30"]["bos_ok"] is False
-    assert bot._scan_signals["US30"]["ob_ok"]  is False
+    assert bot._scan_signals["US30"]["S5"]["ema_ok"] is False
+    assert bot._scan_signals["US30"]["S5"]["bos_ok"] is False
+    assert bot._scan_signals["US30"]["S5"]["ob_ok"]  is False
 
 
 def test_update_scan_state_bos_ok_but_no_ob(monkeypatch):
@@ -72,9 +73,9 @@ def test_update_scan_state_bos_ok_but_no_ob(monkeypatch):
     bot = _make_bot(monkeypatch)
     bot._update_scan_state("US30", "HOLD", "1H BOS ✅ | No bearish OB found (lookback=10)",
                             0.0, 0.0, 0.0, 0.0, 0.0)
-    assert bot._scan_signals["US30"]["ema_ok"] is True
-    assert bot._scan_signals["US30"]["bos_ok"] is True
-    assert bot._scan_signals["US30"]["ob_ok"]  is False
+    assert bot._scan_signals["US30"]["S5"]["ema_ok"] is True
+    assert bot._scan_signals["US30"]["S5"]["bos_ok"] is True
+    assert bot._scan_signals["US30"]["S5"]["ob_ok"]  is False
 
 
 # ── 2. _scan_log capped at 20, newest first ────────────────────────── #
@@ -146,7 +147,8 @@ def test_startup_restores_scan_fields(monkeypatch):
     monkeypatch.setattr(config_ig, "STATE_FILE", tmp.name)
 
     bot = ig_bot.IGBot(paper=True)
-    assert bot._scan_signals["US30"]["reason"] == "restored"
+    # T10: flat-shape state files migrate to {"S5": old} on load
+    assert bot._scan_signals["US30"]["S5"]["reason"] == "restored"
     assert bot._scan_log[0]["message"] == "restored"
 
 

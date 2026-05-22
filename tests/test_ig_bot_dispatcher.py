@@ -244,3 +244,48 @@ def test_s5_update_preserves_existing_s1_entry():
     bot._update_scan_state("US100", "PENDING_LONG", "x", 100.0, 110.0, 105.0, 95.0, 115.0)
     assert "S1" in bot._scan_signals["US100"]
     assert "S5" in bot._scan_signals["US100"]
+
+
+def test_s5_open_tags_position_with_strategy():
+    """When S5 opens a position via _open_trade live path, pos['strategy']=='S5'."""
+    from unittest.mock import patch, MagicMock
+    bot = ig_bot.IGBot.__new__(ig_bot.IGBot)
+    bot._positions = {}; bot._pending_orders = {}
+    bot._candle_cache = {}; bot._current_instrument = None
+    bot.paper = False
+    bot._save_state = MagicMock()
+    instrument = {
+        "epic": "TEST.EPIC", "display_name": "TEST", "currency": "USD",
+        "contract_size": 0.04, "partial_size": 0.02, "price_decimals": 1,
+        "point_value": 1.0,
+    }
+    with patch("ig_client.open_long", return_value={"deal_id": "x", "entry": 100.0}), \
+         patch("ig_client.open_short", return_value={"deal_id": "x", "entry": 100.0}):
+        bot._open_trade(instrument, "LONG", sl=95.0, tp=110.0,
+                        ob_low=98.0, ob_high=102.0, trigger=100.0, mark=100.0)
+    pos = bot._positions["TEST"]
+    assert pos.get("strategy") == "S5"
+
+
+def test_s5_pending_order_tagged_with_strategy():
+    """_S5_ADAPTER.handle_signal sets pending_orders[name]['strategy']='S5'."""
+    from unittest.mock import patch, MagicMock
+    bot = ig_bot.IGBot.__new__(ig_bot.IGBot)
+    bot._positions = {}; bot._pending_orders = {}
+    bot._candle_cache = {}; bot._current_instrument = None
+    bot.paper = False
+    bot._save_state = MagicMock()
+    bot._update_scan_state = MagicMock()
+    instrument = {
+        "epic": "TEST.EPIC", "display_name": "TEST", "currency": "USD",
+        "contract_size": 0.04, "price_decimals": 1, "pending_expiry_hours": 4,
+        "min_deal_distance": 1.0,
+    }
+    result = {"signal": "PENDING_LONG", "trigger": 100.0, "sl": 95.0, "tp": 110.0,
+              "ob_low": 98.0, "ob_high": 102.0, "reason": "x"}
+    with patch("ig_client.get_mark_price", return_value=99.0), \
+         patch("ig_client.place_limit_long", return_value="deal_x"), \
+         patch("ig_bot._entry_in_window", return_value=True):
+        ig_bot._S5_ADAPTER.handle_signal(bot, instrument, result)
+    po = bot._pending_orders["TEST"]
+    assert po.get("strategy") == "S5"

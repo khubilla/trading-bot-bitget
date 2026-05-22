@@ -459,6 +459,8 @@ def dna_fields(candles: dict) -> dict:
         ema_m3    = calculate_ema(closes_m3, 20)
         out["snap_trend_m3_price_vs_ema"] = price_vs_ema(float(closes_m3.iloc[-1]), float(ema_m3.iloc[-1]))
 
+    return out
+
 
 # ── ATR-based exit math (IG path) ───────────────────────── #
 
@@ -486,5 +488,3 @@ def compute_s1_tp_atr(direction: str, entry: float, atr_value: float, cfg: dict)
     """TP1 (50% partial) trigger at entry ± tp_atr_mult × ATR (IG path)."""
     delta = cfg["s1_tp_atr_mult"] * atr_value
     return entry + delta if direction == "LONG" else entry - delta
-
-    return out

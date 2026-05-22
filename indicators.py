@@ -67,7 +67,12 @@ def calculate_adx(df: pd.DataFrame, period: int = 14) -> dict:
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     """
-    Average True Range, Wilder/EWM-smoothed (matches ADX's internal TR smoothing).
+    Average True Range, EWM-smoothed (matches ADX's internal TR smoothing).
+
+    Note: this is span-based EWM (alpha = 2/(period+1)), not true Wilder/RMA
+    (alpha = 1/period). It is the same convention used by calculate_adx in this
+    module. For RSI's Wilder/RMA smoothing, see calculate_rsi.
+
     Returns a pd.Series aligned to df.index.
     """
     high  = df["high"].astype(float)

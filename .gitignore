@@ -27,3 +27,6 @@ ig_paper_trades.csv
 oracle_provision.py
 *.tmpdata/ig_cache
 backtest_ig_report.html
+bybit_trades.csv
+bybit_state.json
+bybit_bot.log

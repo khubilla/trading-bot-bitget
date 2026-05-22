@@ -690,5 +690,5 @@ def test_main_no_fetch_produces_html(tmp_path, monkeypatch):
     bt.main()
     assert out.exists()
     content = out.read_text()
-    assert "IG S5 Backtest Report" in content
+    assert "IG Backtest Report" in content
     assert "US30" in content

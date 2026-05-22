@@ -121,6 +121,21 @@ _REQUIRED_INSTRUMENT_KEYS = {
 }
 
 
+_S1_REQUIRED_KEYS = {
+    "s1_htf_interval", "s1_ltf_interval", "s1_daily_interval",
+    "s1_adx_trend_threshold", "s1_daily_ema_slow",
+    "s1_daily_rsi_long_thresh", "s1_daily_rsi_short_thresh",
+    "s1_rsi_period", "s1_rsi_long_thresh", "s1_rsi_short_thresh",
+    "s1_consolidation_candles", "s1_consolidation_range_pct",
+    "s1_breakout_buffer_pct",
+    "s1_atr_period", "s1_sl_atr_mult", "s1_tp_atr_mult",
+    "s1_sl_buffer_pct", "s1_sr_clearance_atr_mult",
+    "s1_contract_size", "s1_partial_size",
+    "s1_use_swing_trail", "s1_swing_lookback",
+    "m3_limit",
+}
+
+
 def _validate_instruments() -> None:
     for inst in config_ig.INSTRUMENTS:
         missing = _REQUIRED_INSTRUMENT_KEYS - inst.keys()
@@ -128,6 +143,14 @@ def _validate_instruments() -> None:
             raise KeyError(
                 f"Instrument config '{inst.get('display_name', '?')}' missing keys: {missing}"
             )
+        # T17: S1 keys required only when s1_enabled=True
+        if inst.get("s1_enabled", False):
+            s1_missing = _S1_REQUIRED_KEYS - inst.keys()
+            if s1_missing:
+                raise KeyError(
+                    f"Instrument '{inst.get('display_name', '?')}' has s1_enabled=True "
+                    f"but is missing S1 keys: {sorted(s1_missing)}"
+                )
 
 
 _validate_instruments()

@@ -97,6 +97,12 @@ _TRADE_FIELDS = [
     "snap_s5_ob_low", "snap_s5_ob_high", "snap_s5_tp",
     "result", "pnl", "exit_reason",
     "session_date", "mode",
+    # T13 — S1 columns (additive; existing S5 rows leave these blank)
+    "snap_strategy",
+    "snap_s1_rsi", "snap_s1_adx",
+    "snap_s1_box_high", "snap_s1_box_low",
+    "snap_s1_atr", "snap_s1_sr_clearance_atr",
+    "exit_price",
 ]
 
 _REQUIRED_INSTRUMENT_KEYS = {

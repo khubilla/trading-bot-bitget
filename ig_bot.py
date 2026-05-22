@@ -464,7 +464,12 @@ class IGBot:
             current = getattr(self, "_current_instrument", None)
             epic = current["epic"] if current else config_ig.INSTRUMENTS[0]["epic"]
         cache_key   = (epic, interval)
-        interval_ms = {"1D": 86_400_000, "1H": 3_600_000, "15m": 900_000}.get(interval, 60_000)
+        interval_ms = {
+            "1D":  86_400_000,
+            "1H":  3_600_000,
+            "15m": 900_000,
+            "3m":  180_000,
+        }.get(interval, 60_000)
         now_ms      = int(time.time() * 1000)
         cached      = self._candle_cache.get(cache_key)
 

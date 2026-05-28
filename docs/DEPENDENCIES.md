@@ -73,7 +73,6 @@
 - `strategies/s5.py` — evaluate_s5 (called by both Bitget and IG)
 - `config_s5.py` — S5 parameters (Bitget only; IG now uses per-instrument CONFIG dicts)
 - `paper_trader.py` — simulation engine (used by Bitget bot only in paper mode)
-- `shadow_tracker.py` — sentiment-blocked virtual trade tracker. Records the trades the bot would have taken if all sentiment gates were ignored, then tracks each virtual position through SL/TP using live prices. Used by both Bitget and Bybit via `bot.py` hooks. No real orders ever fire from this layer. Output files are per-bot (see § 4.5).
 
 **Bot-specific strategy modules (Bitget only):**
 - `strategies/s2.py` — evaluate_s2
@@ -100,10 +99,6 @@ ig_bot.py → _log_trade → ig_trades.csv → optimize_ig.py
           → _save_state → ig_state.json (position persistence, no state.py module)
 
 paper_trader.py → paper_state.json (internal simulation state)
-
-shadow_tracker.py → shadow_state.json / shadow_trades.csv / shadow_scale_ins.csv
-                  (Bitget: shadow_*; Bybit: bybit_shadow_*)
-                  Pure observability — captures sentiment-blocked virtual trades
 ```
 
 ---
@@ -842,57 +837,6 @@ python -c "import json; print(json.load(open('ig_state.json')))"
 grep -n "ig_state.json" dashboard.py
 ```
 
-### 4.5 Shadow Tracker Files (`shadow_*` / `bybit_shadow_*`)
-
-Produced by `shadow_tracker.py` to record what trades the bot would have taken
-if all market-sentiment gates were ignored. **Pure observability** — never
-influences live orders or state.
-
-| File | Purpose | Producer | Consumer |
-|------|---------|----------|----------|
-| `shadow_state.json` (Bitget) / `bybit_shadow_state.json` (Bybit) | In-flight virtual positions; rehydrated at startup so tracking survives restarts | `shadow_tracker.set_files` + `open_virtual`/`tick` (atomic write via tempfile + `os.replace`) | `shadow_tracker._load_state` only |
-| `shadow_trades.csv` / `bybit_shadow_trades.csv` | Append-only audit log of virtual entries and closes | `shadow_tracker._write_row` | Analyst (manual) — optionally `optimize.py` later |
-| `shadow_scale_ins.csv` / `bybit_shadow_scale_ins.csv` | Event log of sentiment-blocked scale-ins on real positions (no PnL) | `shadow_tracker.scale_in_event` | Analyst (manual) |
-
-**shadow_state.json schema** (v1):
-
-```json
-{
-  "version":    1,
-  "updated_at": "ISO 8601",
-  "open": {
-    "SHADOW-S2-BTCUSDT-1778654471699": {
-      "trade_id":       "SHADOW-S2-BTCUSDT-1778654471699",
-      "strategy":       "S2",
-      "symbol":         "BTCUSDT",
-      "side":           "LONG",
-      "entry":          100.0,
-      "sl":             95.0,
-      "tp":             110.0,
-      "leverage":       10,
-      "margin":         40.0,
-      "opened_at":      "ISO 8601",
-      "snapshot":       { "snap_sentiment": "BEARISH", ... },
-      "blocked_reason": "S2 sentiment=BEARISH"
-    }
-  }
-}
-```
-
-**shadow_trades.csv columns** — mirror `bot._TRADE_FIELDS` (bot.py lines 140-166)
-exactly, **plus one extra column** at the end: `blocked_reason`. Actions used:
-`{strategy}_LONG`, `{strategy}_SHORT`, `{strategy}_CLOSE`.
-
-**shadow_scale_ins.csv columns:** `timestamp, real_trade_id, strategy, symbol, side, price, blocked_sentiment`.
-
-**Cross-bot isolation:** the file paths are set in each bot's config
-(`config.py` → `shadow_*`, `config_bybit.py` → `bybit_shadow_*`). Bybit's
-`sys.modules["config"] = config_bybit` aliasing in `bybit_bot.py` ensures
-`bot.py`'s `config.SHADOW_*` reads resolve to the bybit paths automatically.
-
-**Disabling:** set `SHADOW_TRACKING_ENABLED = False` in the relevant config.
-When false, none of the bot.py hooks fire and no files are written.
-
 ---
 
 ## 5. Config Dependencies
@@ -1073,26 +1017,6 @@ These params live in `config.py` and are imported by `scanner.py`. Changing them
 
 Failover behaviour lives in `bybit_client.py` — see § 6.2.
 
-### 5.9 Shadow Tracker Config (Bitget + Bybit)
-
-Defined in both `config.py` and `config_bybit.py` so each bot writes to its
-own files. The Bybit `sys.modules["config"]` aliasing means `bot.py`'s
-`config.SHADOW_*` references resolve to whichever config is active.
-
-| Key | Type | Bitget default | Bybit default |
-|-----|------|----------------|---------------|
-| `SHADOW_TRACKING_ENABLED` | bool | `True` | `True` |
-| `SHADOW_STATE_FILE` | path | `shadow_state.json` | `bybit_shadow_state.json` |
-| `SHADOW_TRADES_CSV` | path | `shadow_trades.csv` | `bybit_shadow_trades.csv` |
-| `SHADOW_SCALE_INS_CSV` | path | `shadow_scale_ins.csv` | `bybit_shadow_scale_ins.csv` |
-
-Reading sites:
-- `bot.MTFBot.__init__` — calls `shadow_tracker.set_files(...)` once at startup
-- `bot.MTFBot.run` — gated tick block uses `config.SHADOW_TRACKING_ENABLED`
-- `bot.MTFBot._evaluate_pair` — calls `_shadow_check_pair` for sentiment-blocked entries
-- `bot.MTFBot.handle_pending_tick` scale-in gate — calls `shadow_tracker.scale_in_event`
-- `strategies/s6.py:handle_pending_tick` — calls `shadow_tracker.open_virtual` on cancel
-
 
 **Verification commands:**
 
@@ -1154,19 +1078,21 @@ Thin delegate to `strategies.s1._place_exits` (late import). Places 3 exit order
 ---
 
 #### `_place_s2_exits(symbol, hold_side, qty_str, sl_trig, sl_exec, trail_trigger, trail_range)`
-Thin delegate to `strategies.s2._place_partial_trail_exits` (late import). Places 3 exit orders for S2 (LONG) and S4 (SHORT) strategies:
-1. `place-pos-tpsl` — position-level SL (full position, auto-scales with size changes)
-2. `place-tpsl-order profit_plan` — partial TP at `trail_trigger` for `half_qty`
-3. `place-tpsl-order moving_plan` — trailing stop at `trail_trigger` for `rest_qty`
+Thin delegate to `strategies.s2._place_partial_trail_exits` (late import). Places 2 TP-side exit orders for S2 (LONG) and S4 (SHORT) strategies. SL is **not** re-placed here — it is attached to the entry market order via `presetStopLossPrice` in `open_long`/`open_short`, so the position is protected from the moment it opens:
+1. `place-tpsl-order profit_plan` — partial TP at `trail_trigger` for `half_qty`
+2. `place-tpsl-order moving_plan` — trailing stop at `trail_trigger` for `rest_qty`
 
 **Called from:** `open_long` (S2/S3 path), `open_short` (S4 path)
 
 **Key behaviour:**
 - `half_qty = trader._round_qty(qty / 2, symbol)` — respects `volume_place` (e.g. integer-only symbols like STOUSDT)
 - `rest_qty = trader._round_qty(qty - half, symbol)` — covers true remainder (not a duplicate half)
+- `sl_trig` / `sl_exec` are accepted for backwards-compat and logged only (SL is preset on the entry order)
 - Returns `False` if all 3 retry attempts fail → `tpsl_set=False` in CSV row
 
 **Breaking change:** Changing the `size` format or plan types breaks live exit execution for S2/S4 trades.
+
+**Mirrored in `strategies/s4.py:_place_partial_trail_exits`** (shared by S4 SHORT, S7 LONG, S7 SHORT) — same 2-leg pattern, SL handled by preset on entry. Prior to 2026-05-26 this helper also called `place_pos_sl_only`, which broke S7 LONG when the caller passed an unrounded `sl_floor` (Bitget rejected with `checkBDScale`) — see Section 12 changelog.
 
 ---
 
@@ -1517,18 +1443,14 @@ python -c "import json; s=json.load(open('state_paper.json')); print(list(s['pai
 ls -lh ig_state.json 2>/dev/null || echo "IG state file not found (normal if bot hasn't run)"
 ```
 
-#### shadow_trades.csv vs trades_paper.csv vs trades.csv
+#### trades_paper.csv vs trades.csv
 
 | File | Purpose | When written | Real money? |
 |------|---------|--------------|-------------|
 | `trades.csv` | Live trade log (Bitget) | Every real OPEN/CLOSE/PARTIAL | **Yes** |
 | `trades_paper.csv` | Full paper-mode trade log | When bot runs with `--paper` | No (simulated) |
-| `shadow_trades.csv` | Sentiment-blocked virtual trades | Always (when `SHADOW_TRACKING_ENABLED`); only when sentiment would have blocked a real trade | No (observability only) |
 
-The shadow tracker runs **alongside** live or paper mode; it's not a third
-mode. Its rows never represent trades the bot actually placed — they
-represent trades it would have placed if the sentiment filter were off.
-See §§ 2 and 4.5. Bybit equivalents: `bybit_trades.csv`, `bybit_shadow_trades.csv`.
+Bybit equivalent: `bybit_trades.csv`.
 
 ### 10.2 Similar Parameter Names Across Strategies
 
@@ -1907,3 +1829,4 @@ head -1 ig_trades.csv
 - 2026-04-29: S7 bidirectional — evaluate_s7() gained `allowed_direction` param (BULLISH→LONG, BEARISH→SHORT, NEUTRAL→HOLD); same daily gates (spike+RSI) apply to both directions; LONG fires on 1H close above box_top×(1+S7_ENTRY_BUFFER), SHORT fires on 1H close below box_low×(1−S7_ENTRY_BUFFER); added compute_and_place_long_exits(), compute_paper_trail_long(), LONG branch in maybe_trail_sl(); scale_in_specs() is now direction-aware; bot.py sentiment gate changed from ==BEARISH to !=NEUTRAL; added s7_sr_resistance_pct to Section 4.1 pair_states; s7_signal now accepts LONG; Section 7.1 strategy table updated; paper_trader.py LONG branch tuple gained S7; dashboard.html s7CardHTML handles LONG card class + dynamic SR row label; GENERAL_CONCEPTS.md §7 updated; ig_bot.py unaffected.
 - 2026-05-11: S7 entry fix — replaced the freeze-on-lock walking Darvas algo with `detect_consolidation_box(h1_slice, min_candles=4)` (max-high / min-low over today's closed 1H candles excluding the latest, which is the breakout test). Removed `S7_BOX_CONFIRM_COUNT` from config_s7.py and optimize.py STRATEGY_PARAMS. `handle_pending_tick` now compares the latest closed 1H close against the *buffered* trigger (`box_top × (1+S7_ENTRY_BUFFER)` / `box_low × (1−S7_ENTRY_BUFFER)`) instead of the raw box edge. S7 candidates now route through the pending watcher (`_queue_s7_pending` → `strategies.s7.queue_pending` → `handle_pending_tick` → `_fire_s7`) instead of immediate-fire; `_execute_s7` removed; "S7": dispatcher removed; S7 added to the pending-tick strategy tuple in bot.py. Function rename: `detect_darvas_box` → `detect_consolidation_box` (4-tuple return). Tests: test_s7_darvas.py rewritten for new detector; test_bot_entry_watcher_all.py::test_execute_best_candidate_queues_s7 now asserts the queue path. ig_bot.py unaffected.
 - 2026-05-22: S1 on IG bot — evaluate_s1(cfg=) shared across both bots; ig_trades.csv 20→28 columns (snap_strategy + 6 S1 snap fields + exit_price); ig_state.json scan_signals restructured to strategy-keyed {name: {"S5": ..., "S1": ...}} with one-shot migration in _load_state; positions[name] and pending_orders[name] gained "strategy" field; added _StrategyAdapter / _S5Adapter / _S1Adapter dispatcher pattern in ig_bot.py with first-non-HOLD-wins + adapter monitor dispatch; added S1 block to all 6 config_ig_*.py (s1_enabled=False by default); _validate_instruments enforces S1 keys when s1_enabled=True; backtest_ig.py gained --strategy {s5,s1,both} and --grid s1 flags with 3m-walking loop, per-strategy stats, grid-search ranked-combo report section; new helpers: indicators.calculate_atr, tools.nearest_daily_sr_clearance, strategies.s1.compute_s1_sl_atr / compute_s1_tp_atr / maybe_trail_sl_ig
+- 2026-05-26: S7 partial TP + trailing fix — `strategies/s4.py:_place_partial_trail_exits` no longer calls `bg.place_pos_sl_only` (SL is already attached to the entry market order via `presetStopLossPrice` in `trader.open_long`/`open_short`). Previously, S7 LONG entries on Bitget passed the unrounded `sl_floor` (e.g. `0.503595` for GRASSUSDT) through `trader.py:409` → `_s7_long_exits(symbol, qty, fill, sl_floor, 0)`, which the S4 helper forwarded to `place_pos_sl_only`. Bitget rejected with `checkBDScale checkScale=4`; all 3 retries failed; profit_plan / moving_plan were never placed; the subsequent scale-in `refresh_plan_exits` logged "profit_plan or moving_plan not found — exits unchanged". The helper now mirrors `strategies/s2.py`'s 2-leg version (TP + trail only). `sl_trig`/`sl_exec` params retained for backwards-compat and logging. Callers: `strategies/s4.py:167` (S4 SHORT), `strategies/s7.py:284` (S7 SHORT), `strategies/s7.py:302` (S7 LONG). Updated DEPENDENCIES.md §2.1 description of `_place_s2_exits` accordingly.

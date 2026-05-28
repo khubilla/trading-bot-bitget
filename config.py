@@ -94,13 +94,3 @@ ENHANCED_TRADING_WINDOWS = [
 # profitable (+185%, +103%). Net P&L was only -4.4% across 18 trades.
 REDUCE_TUESDAY_SIZE = False
 # TUESDAY_SIZE_MULTIPLIER = 0.5  # Disabled - not needed with blackout windows
-
-# --- Shadow Tracker (sentiment-blocked virtual trades) ---
-# Records the trades the bot would have taken if all market-sentiment gates
-# were ignored, then tracks each virtual position through SL/TP using live
-# prices. Pure observability — no real orders ever fire from this layer.
-# See shadow_tracker.py and docs/DEPENDENCIES.md § Data Contracts.
-SHADOW_TRACKING_ENABLED = True
-SHADOW_STATE_FILE       = str(_DATA_DIR / "shadow_state.json")
-SHADOW_TRADES_CSV       = str(_DATA_DIR / "shadow_trades.csv")
-SHADOW_SCALE_INS_CSV    = str(_DATA_DIR / "shadow_scale_ins.csv")

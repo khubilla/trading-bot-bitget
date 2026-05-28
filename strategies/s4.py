@@ -130,7 +130,13 @@ def evaluate_s4(
 def _place_partial_trail_exits(symbol: str, hold_side: str, qty_str: str,
                                sl_trig: float, sl_exec: float,
                                trail_trigger: float, trail_range: float) -> bool:
-    """3-leg S4 exits: full SL, 50% partial at trail_trigger, trailing stop on 50%."""
+    """
+    2-leg TP exits (SL already attached via preset on the entry market order):
+    50% partial TP at trail_trigger + 50% trailing stop on the remainder.
+    Shared by S4/S7 wrappers. sl_trig/sl_exec are accepted for backwards-compat
+    and logging only — the SL itself is set by trader.open_long/open_short via
+    presetStopLossPrice on the entry order.
+    """
     import time as _t
     import trader
     import bitget as bg
@@ -141,8 +147,7 @@ def _place_partial_trail_exits(symbol: str, hold_side: str, qty_str: str,
 
     for attempt in range(3):
         try:
-            bg.place_pos_sl_only(symbol, hold_side, sl_trig, sl_exec)
-            _t.sleep(0.5)
+            logger.info(f"[{symbol}] S4/S7 exits: SL already set via preset (trigger={sl_trig:.5f} exec={sl_exec:.5f}), placing TPs only")
             bg.place_profit_plan(symbol, hold_side, half_qty, trail_trigger)
             _t.sleep(0.5)
             bg.place_moving_plan(symbol, hold_side, rest_qty, trail_trigger, range_rate)

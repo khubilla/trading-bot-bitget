@@ -9,6 +9,7 @@ Strategy 2: 30-Day Breakout + 3m Consolidation (long candle, squeeze, 3m coil+br
 """
 
 import time, signal, sys, logging, csv, os, threading, uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -316,20 +317,6 @@ class MTFBot:
         # Rebuild win/loss stats from CSV so header survives restarts
         _rebuild_stats_from_csv(config.TRADE_LOG)
         st.add_scan_log("Bot initialised (S1 + S2 + S3 + S4 + S5 + S6 + S7)", "INFO")
-
-        # ── Shadow Tracker ───────────────────────────────────────── #
-        # Records sentiment-blocked virtual trades. Pure observability;
-        # never places real orders. See shadow_tracker.py.
-        if getattr(config, "SHADOW_TRACKING_ENABLED", False):
-            try:
-                import shadow_tracker
-                shadow_tracker.set_files(
-                    config.SHADOW_STATE_FILE,
-                    config.SHADOW_TRADES_CSV,
-                    config.SHADOW_SCALE_INS_CSV,
-                )
-            except Exception as e:
-                logger.warning(f"[SHADOW] init failed (continuing without tracker): {e}")
 
         logger.info("🤖 Bitget USDT-Futures MTF Bot — Strategy 1 + 2")
         logger.info(f"   Mode         : {'DEMO' if config.DEMO_MODE else '⚡ LIVE'}")
@@ -812,24 +799,6 @@ class MTFBot:
             except Exception as e:
                 logger.error(f"Tick error: {e}", exc_info=True)
                 st.add_scan_log(f"Tick error: {e}", "ERROR")
-            # Shadow tracker tick — close virtuals that hit SL/TP. Cheap
-            # when no virtual positions are open. Failures are logged and
-            # never propagate into the main loop.
-            if getattr(config, "SHADOW_TRACKING_ENABLED", False):
-                try:
-                    import shadow_tracker as _shadow
-                    if _shadow.open_count() > 0:
-                        _prices: dict[str, float] = {}
-                        for _sym in _shadow.open_symbols():
-                            try:
-                                _p = tr.get_mark_price(_sym)
-                                if _p:
-                                    _prices[_sym] = float(_p)
-                            except Exception:
-                                continue
-                        _shadow.tick(_prices)
-                except Exception as e:
-                    logger.warning(f"[SHADOW] tick error: {e}")
             time.sleep(config.POLL_INTERVAL_SEC)
 
     def _tick(self):
@@ -1308,9 +1277,15 @@ class MTFBot:
         self._execute_best_candidate(direction, balance)
 
     def _evaluate_pair(self, symbol: str, allowed_direction: str, balance: float) -> bool:
-        htf_df   = tr.get_candles(symbol, config_s1.HTF_INTERVAL,   limit=15)
-        ltf_df   = tr.get_candles(symbol, config_s1.LTF_INTERVAL,   limit=60)
-        daily_df = tr.get_candles(symbol, config_s1.DAILY_INTERVAL, limit=250)
+        # Parallel fetch — 3 independent public kline reads, IP-rate-limited only.
+        # Bybit allows ~120 req/s, Bitget ~10 req/s; 3 concurrent is well within budget.
+        with ThreadPoolExecutor(max_workers=3) as _pool:
+            _htf_f   = _pool.submit(tr.get_candles, symbol, config_s1.HTF_INTERVAL,   15)
+            _ltf_f   = _pool.submit(tr.get_candles, symbol, config_s1.LTF_INTERVAL,   60)
+            _daily_f = _pool.submit(tr.get_candles, symbol, config_s1.DAILY_INTERVAL, 250)
+            htf_df   = _htf_f.result()
+            ltf_df   = _ltf_f.result()
+            daily_df = _daily_f.result()
 
         if htf_df.empty or ltf_df.empty or daily_df.empty:
             return False
@@ -1484,23 +1459,6 @@ class MTFBot:
             s2_sr_resistance_pct   = sr_res_pct
             s2_sr_resistance_price = None
 
-        # ── Shadow Trade Tracker (sentiment-blocked virtual trades) ─ #
-        # For each sentiment-gated strategy, evaluate it as if sentiment
-        # allowed it and — when the live path was blocked — record a
-        # virtual position. shadow_tracker.tick() (in run() loop) will
-        # close virtuals on SL/TP. Wrapped in try/except so any error
-        # never disrupts live trading.
-        if getattr(config, "SHADOW_TRACKING_ENABLED", False):
-            try:
-                self._shadow_check_pair(
-                    symbol=symbol, close=close, balance=balance,
-                    htf_df=htf_df, ltf_df=ltf_df, daily_df=daily_df, m15_df=m15_df,
-                    rsi_val=rsi_val, adx_val=adx_val,
-                    htf_bull=htf_bull, htf_bear=htf_bear,
-                )
-            except Exception as _se:
-                logger.warning(f"[SHADOW][{symbol}] error: {_se}")
-
         st.update_pair_state(symbol, {
             "rsi": rsi_val, "htf_bull": htf_bull, "htf_bear": htf_bear,
             "signal": s1_sig if s1_sig != "HOLD" else (s2_sig if s2_sig != "HOLD" else (s3_sig if s3_sig != "HOLD" else (s4_sig if s4_sig != "HOLD" else (s7_sig if s7_sig != "HOLD" else ("PENDING" if s5_sig.startswith("PENDING") else (s6_sig if s6_sig != "HOLD" else s5_sig)))))),
@@ -1664,195 +1622,6 @@ class MTFBot:
         # All strategies deferred — executed by _execute_best_candidate()
         return False
 
-    # ── Shadow Tracker — sentiment-blocked virtual trades ────────── #
-
-    def _shadow_check_pair(self, *, symbol: str, close: float, balance: float,
-                           htf_df, ltf_df, daily_df, m15_df,
-                           rsi_val: float, adx_val: float,
-                           htf_bull: bool, htf_bear: bool) -> None:
-        """
-        Run strategies that the live sentiment gate just blocked, and — if
-        any returns a non-HOLD signal — open a virtual shadow position so
-        we can observe how it would have performed. Live trading state is
-        not touched. Safe to call on every pair every tick (cheap guard
-        via shadow_tracker.has_open()).
-        """
-        import shadow_tracker as _shadow
-        if not _shadow.is_enabled():
-            return
-
-        live_dir = self.sentiment.direction
-        snap_base = {
-            "snap_sentiment":     live_dir,
-            "snap_rsi":           round(rsi_val, 1),
-            "snap_adx":           round(adx_val, 1),
-            "snap_htf":           "BULL" if htf_bull else "BEAR" if htf_bear else "NONE",
-            "snap_box_range_pct": None,
-        }
-
-        # ── S2 — live requires BULLISH ─────────────────────────────── #
-        if (config_s2.S2_ENABLED and live_dir != "BULLISH"
-                and not _shadow.has_open(symbol, "S2")):
-            try:
-                _sig, _rsi, _bh, _bl, _ = evaluate_s2(symbol, daily_df)
-                if _sig == "LONG":
-                    _sl = close * (1 - config_s2.S2_STOP_LOSS_PCT)
-                    _tp = close * (1 + config_s2.S2_TAKE_PROFIT_PCT)
-                    _shadow.open_virtual(
-                        "S2", symbol, "LONG", close, _sl, _tp,
-                        config_s2.S2_LEVERAGE,
-                        config_s2.S2_TRADE_SIZE_PCT * balance,
-                        {**snap_base, "snap_daily_rsi": round(_rsi, 1)},
-                        f"S2 sentiment={live_dir}",
-                    )
-            except Exception as e:
-                logger.warning(f"[SHADOW][S2][{symbol}] eval error: {e}")
-
-        # ── S3 — live requires BULLISH (and m15) ───────────────────── #
-        if (config_s3.S3_ENABLED and live_dir != "BULLISH"
-                and m15_df is not None
-                and not _shadow.has_open(symbol, "S3")):
-            try:
-                _sig, _adx, _trig, _sl_h, _ = evaluate_s3(symbol, m15_df, daily_df)
-                if _sig == "LONG" and _trig > 0:
-                    _sl = _sl_h if _sl_h and _sl_h > 0 else _trig * 0.97
-                    _risk = _trig - _sl
-                    if _risk > 0:
-                        _rr = getattr(config_s3, "S3_MIN_RR", 2.5)
-                        _tp = _trig + _risk * _rr
-                        _shadow.open_virtual(
-                            "S3", symbol, "LONG", _trig, _sl, _tp,
-                            config_s3.S3_LEVERAGE,
-                            config_s3.S3_TRADE_SIZE_PCT * balance,
-                            {**snap_base,
-                             "snap_entry_trigger": round(_trig, 8),
-                             "snap_sl":            round(_sl, 8),
-                             "snap_rr":            _rr,
-                             "snap_adx":           round(_adx, 1)},
-                            f"S3 sentiment={live_dir}",
-                        )
-            except Exception as e:
-                logger.warning(f"[SHADOW][S3][{symbol}] eval error: {e}")
-
-        # ── S4 — live requires BEARISH ─────────────────────────────── #
-        if (config_s4.S4_ENABLED and live_dir != "BEARISH"
-                and not _shadow.has_open(symbol, "S4")):
-            try:
-                (_sig, _rsi, _trig, _sl_h, _body, _peak, _div, _div_str, _) = \
-                    evaluate_s4(symbol, daily_df, htf_df)
-                if _sig == "SHORT" and _trig > 0:
-                    _sl = _sl_h if _sl_h and _sl_h > 0 else _trig * 1.03
-                    _risk = _sl - _trig
-                    if _risk > 0:
-                        _tp = _trig - _risk * 2.0
-                        _shadow.open_virtual(
-                            "S4", symbol, "SHORT", _trig, _sl, _tp,
-                            config_s4.S4_LEVERAGE,
-                            config_s4.S4_TRADE_SIZE_PCT * balance,
-                            {**snap_base,
-                             "snap_rsi_peak":       round(_peak, 1) if _peak else None,
-                             "snap_spike_body_pct": round(_body, 4) if _body else None,
-                             "snap_rsi_div":        _div,
-                             "snap_rsi_div_str":    _div_str},
-                            f"S4 sentiment={live_dir}",
-                        )
-            except Exception as e:
-                logger.warning(f"[SHADOW][S4][{symbol}] eval error: {e}")
-
-        # ── S5 — only BEARISH live differs (live evaluates with        #
-        #       allowed=BEARISH; shadow tries BULLISH to surface longs) #
-        if (config_s5.S5_ENABLED and live_dir == "BEARISH"
-                and m15_df is not None
-                and not _shadow.has_open(symbol, "S5")):
-            try:
-                (_sig, _trig, _sl, _tp, _ob_low, _ob_high, _) = \
-                    evaluate_s5(symbol, daily_df, htf_df, m15_df, "BULLISH")
-                if _sig in ("LONG", "PENDING_LONG") and _trig > 0 and _sl > 0 and _tp > 0:
-                    _shadow.open_virtual(
-                        "S5", symbol, "LONG", _trig, _sl, _tp,
-                        config_s5.S5_LEVERAGE,
-                        config_s5.S5_TRADE_SIZE_PCT * balance,
-                        {**snap_base,
-                         "snap_entry_trigger": round(_trig, 8),
-                         "snap_sl":            round(_sl, 8),
-                         "snap_s5_ob_low":     round(_ob_low, 8) if _ob_low else None,
-                         "snap_s5_ob_high":    round(_ob_high, 8) if _ob_high else None,
-                         "snap_s5_tp":         round(_tp, 8)},
-                        f"S5 sentiment={live_dir}",
-                    )
-            except Exception as e:
-                logger.warning(f"[SHADOW][S5][{symbol}] eval error: {e}")
-
-        # ── S7 — live blocked only on NEUTRAL; try both directions ──  #
-        if (config_s7.S7_ENABLED and live_dir == "NEUTRAL"
-                and not _shadow.has_open(symbol, "S7")):
-            try:
-                _h1 = tr.get_candles(symbol, "1H", limit=48)
-                if _h1 is not None and not _h1.empty:
-                    for _try_dir in ("BULLISH", "BEARISH"):
-                        (_sig, _rsi, _box_top, _box_low, _body, _peak, _div, _div_str, _) = \
-                            evaluate_s7(symbol, daily_df, _h1, _try_dir)
-                        if _sig == "LONG" and _box_low > 0:
-                            _sl = _box_low
-                            _risk = close - _sl
-                            if _risk > 0:
-                                _tp = close + _risk * 2.0
-                                _shadow.open_virtual(
-                                    "S7", symbol, "LONG", close, _sl, _tp,
-                                    config_s7.S7_LEVERAGE,
-                                    config_s7.S7_TRADE_SIZE_PCT * balance,
-                                    {**snap_base,
-                                     "snap_rsi_peak":    round(_peak, 1) if _peak else None,
-                                     "snap_spike_body_pct": round(_body, 4) if _body else None,
-                                     "snap_rsi_div":     _div,
-                                     "snap_rsi_div_str": _div_str},
-                                    f"S7 sentiment=NEUTRAL (tried {_try_dir})",
-                                )
-                                break
-                        elif _sig == "SHORT" and _box_top > 0:
-                            _sl = _box_top
-                            _risk = _sl - close
-                            if _risk > 0:
-                                _tp = close - _risk * 2.0
-                                _shadow.open_virtual(
-                                    "S7", symbol, "SHORT", close, _sl, _tp,
-                                    config_s7.S7_LEVERAGE,
-                                    config_s7.S7_TRADE_SIZE_PCT * balance,
-                                    {**snap_base,
-                                     "snap_rsi_peak":    round(_peak, 1) if _peak else None,
-                                     "snap_spike_body_pct": round(_body, 4) if _body else None,
-                                     "snap_rsi_div":     _div,
-                                     "snap_rsi_div_str": _div_str},
-                                    f"S7 sentiment=NEUTRAL (tried {_try_dir})",
-                                )
-                                break
-            except Exception as e:
-                logger.warning(f"[SHADOW][S7][{symbol}] eval error: {e}")
-
-        # ── S1 — on NEUTRAL the live path forces BULLISH; shadow the    #
-        #         BEARISH side (live BULLISH side already trades).      #
-        if (config_s1.S1_ENABLED and self.sentiment.direction == "NEUTRAL"
-                and not _shadow.has_open(symbol, "S1")):
-            try:
-                (_sig, _rsi, _bh, _bl, _adx, _drsi) = evaluate_s1(
-                    symbol, htf_df, ltf_df, daily_df, "BEARISH"
-                )
-                if _sig == "SHORT" and _bh > 0:
-                    _sl = max(close * (1 + config_s1.STOP_LOSS_PCT),
-                              _bh * (1 + config_s1.S1_SL_BUFFER_PCT))
-                    _risk = _sl - close
-                    if _risk > 0:
-                        _tp = close - close * config_s1.TAKE_PROFIT_PCT
-                        _shadow.open_virtual(
-                            "S1", symbol, "SHORT", close, _sl, _tp,
-                            config_s1.LEVERAGE,
-                            config_s1.TRADE_SIZE_PCT * balance,
-                            {**snap_base, "snap_daily_rsi": round(_drsi, 1)},
-                            "S1 sentiment=NEUTRAL",
-                        )
-            except Exception as e:
-                logger.warning(f"[SHADOW][S1][{symbol}] eval error: {e}")
-
     # ── Priority Evaluation (all strategies) ─────────────────────── #
 
     def _execute_best_candidate(self, direction: str, balance: float) -> None:
@@ -1979,23 +1748,6 @@ class MTFBot:
                     f"[{strat}][{sym}] ⏸️ Scale-in skipped — market is "
                     f"{_sentiment.direction} (need {specs['direction']})"
                 )
-                # Shadow: log the sentiment-blocked scale-in event.
-                if getattr(config, "SHADOW_TRACKING_ENABLED", False):
-                    try:
-                        import shadow_tracker as _shadow
-                        _mark_now = None
-                        try:
-                            _mark_now = tr.get_mark_price(sym)
-                        except Exception:
-                            pass
-                        _shadow.scale_in_event(
-                            strategy=strat, symbol=sym, side=ap["side"],
-                            price=float(_mark_now) if _mark_now else 0.0,
-                            real_trade_id=ap.get("trade_id", ""),
-                            blocked_sentiment=_sentiment.direction,
-                        )
-                    except Exception as _se:
-                        logger.warning(f"[SHADOW][{strat}][{sym}] scale-in log error: {_se}")
                 return  # keep scale_in_pending=True; retry next tick
 
             mark_now  = tr.get_mark_price(sym)

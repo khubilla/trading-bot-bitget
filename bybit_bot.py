@@ -24,7 +24,7 @@ import logging
 
 # ── 1. Forbid same-process collisions ──────────────────────────── #
 
-_FORBIDDEN_MODULES = ("bot", "ig_bot")
+_FORBIDDEN_MODULES = ("bot", "ig_bot", "binance_bot")
 for _m in _FORBIDDEN_MODULES:
     if _m in sys.modules:
         raise RuntimeError(

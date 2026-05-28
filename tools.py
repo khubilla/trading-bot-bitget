@@ -349,3 +349,61 @@ def find_bearish_ob(
             ob_idx -= 1
         i = run_start - 1
     return None
+
+
+def nearest_daily_sr_clearance(daily_df, direction: str,
+                               lookback: int = 60, swing_window: int = 3) -> float:
+    """
+    Distance in price units from the current close to the nearest qualifying daily
+    swing pivot in the trade direction.
+
+    LONG:  finds the nearest swing high > current close (resistance).
+    SHORT: finds the nearest swing low  < current close (support).
+
+    A swing high at index i requires high[i] > high[i+k] for the full
+    swing_window on the right (k in 1..swing_window) and high[i] > high[i-k]
+    for as many bars as exist on the left. Left-edge pivots are valid when
+    they qualify within the available left-side history; the current (last)
+    bar is never a pivot because the right-side check fails.
+    A swing low is the mirror with lows.
+
+    Returns float('inf') when no qualifying swing is found within `lookback`.
+    """
+    if daily_df is None or len(daily_df) < swing_window * 2 + 1:
+        return float("inf")
+    df = daily_df.tail(lookback).reset_index(drop=True)
+    closes = df["close"].astype(float)
+    highs  = df["high"].astype(float)
+    lows   = df["low"].astype(float)
+    cur    = float(closes.iloc[-1])
+
+    n = len(df)
+
+    def _is_swing_high(i):
+        # Require full swing_window bars to the right (no right-edge pivots);
+        # allow fewer bars on the left when near the beginning of history.
+        if i + swing_window >= n:
+            return False
+        left_ok  = all(highs.iloc[i] > highs.iloc[i - k]
+                       for k in range(1, min(swing_window, i) + 1))
+        right_ok = all(highs.iloc[i] > highs.iloc[i + k]
+                       for k in range(1, swing_window + 1))
+        return left_ok and right_ok
+
+    def _is_swing_low(i):
+        if i + swing_window >= n:
+            return False
+        left_ok  = all(lows.iloc[i] < lows.iloc[i - k]
+                       for k in range(1, min(swing_window, i) + 1))
+        right_ok = all(lows.iloc[i] < lows.iloc[i + k]
+                       for k in range(1, swing_window + 1))
+        return left_ok and right_ok
+
+    if direction == "LONG":
+        candidates = [float(highs.iloc[i]) for i in range(n)
+                      if _is_swing_high(i) and highs.iloc[i] > cur]
+        return (min(candidates) - cur) if candidates else float("inf")
+
+    candidates = [float(lows.iloc[i]) for i in range(n)
+                  if _is_swing_low(i) and lows.iloc[i] < cur]
+    return (cur - max(candidates)) if candidates else float("inf")

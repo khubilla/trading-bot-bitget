@@ -51,3 +51,50 @@ def test_config_ig_gold_values():
     from config_ig_gold import CONFIG
     assert CONFIG["epic"] == "CS.D.CFDGOLD.BMU.IP"
     assert CONFIG["display_name"] == "GOLD"
+
+
+def test_validate_requires_s1_keys_when_s1_enabled(monkeypatch):
+    """When s1_enabled=True, validator errors on missing S1 keys."""
+    import pytest
+    import ig_bot, config_ig
+    bad = [{
+        "epic": "X.X.X", "display_name": "X", "currency": "USD",
+        "contract_size": 0.01, "partial_size": 0.005, "point_value": 1.0,
+        "session_start": (0, 0), "session_end": (23, 59),
+        "daily_limit": 100, "htf_limit": 50, "m15_limit": 100,
+        "price_decimals": 1, "min_deal_distance": 1.0, "pending_expiry_hours": 4,
+        "s5_enabled": False, "s5_daily_ema_fast": 10, "s5_daily_ema_med": 20, "s5_daily_ema_slow": 50,
+        "s5_htf_bos_lookback": 10, "s5_ltf_interval": "15m", "s5_ob_lookback": 30,
+        "s5_ob_min_impulse": 0.005, "s5_ob_min_range_pct": 0.001, "s5_choch_lookback": 10,
+        "s5_max_entry_buffer": 0.01, "s5_sl_buffer_pct": 0.002, "s5_ob_invalidation_buffer_pct": 0.001,
+        "s5_swing_lookback": 20, "s5_smc_fvg_filter": False, "s5_smc_fvg_lookback": 10,
+        "s5_leverage": 1, "s5_trade_size_pct": 0.1, "s5_min_rr": 1.0,
+        "s5_trail_range_pct": 5, "s5_use_candle_stops": True, "s5_min_sr_clearance": 0.10,
+        "s1_enabled": True,   # but no S1 keys present
+    }]
+    monkeypatch.setattr(config_ig, "INSTRUMENTS", bad)
+    with pytest.raises(KeyError) as exc:
+        ig_bot._validate_instruments()
+    assert "s1_enabled=True" in str(exc.value)
+
+
+def test_validate_accepts_s1_disabled_without_s1_keys(monkeypatch):
+    """When s1_enabled=False, S1 keys are not required."""
+    import ig_bot, config_ig
+    ok = [{
+        "epic": "X.X.X", "display_name": "X", "currency": "USD",
+        "contract_size": 0.01, "partial_size": 0.005, "point_value": 1.0,
+        "session_start": (0, 0), "session_end": (23, 59),
+        "daily_limit": 100, "htf_limit": 50, "m15_limit": 100,
+        "price_decimals": 1, "min_deal_distance": 1.0, "pending_expiry_hours": 4,
+        "s5_enabled": False, "s5_daily_ema_fast": 10, "s5_daily_ema_med": 20, "s5_daily_ema_slow": 50,
+        "s5_htf_bos_lookback": 10, "s5_ltf_interval": "15m", "s5_ob_lookback": 30,
+        "s5_ob_min_impulse": 0.005, "s5_ob_min_range_pct": 0.001, "s5_choch_lookback": 10,
+        "s5_max_entry_buffer": 0.01, "s5_sl_buffer_pct": 0.002, "s5_ob_invalidation_buffer_pct": 0.001,
+        "s5_swing_lookback": 20, "s5_smc_fvg_filter": False, "s5_smc_fvg_lookback": 10,
+        "s5_leverage": 1, "s5_trade_size_pct": 0.1, "s5_min_rr": 1.0,
+        "s5_trail_range_pct": 5, "s5_use_candle_stops": True, "s5_min_sr_clearance": 0.10,
+        "s1_enabled": False,
+    }]
+    monkeypatch.setattr(config_ig, "INSTRUMENTS", ok)
+    ig_bot._validate_instruments()   # no raise

@@ -9,6 +9,7 @@ Strategy 2: 30-Day Breakout + 3m Consolidation (long candle, squeeze, 3m coil+br
 """
 
 import time, signal, sys, logging, csv, os, threading, uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -494,6 +495,14 @@ class MTFBot:
                             )
                     except Exception as e:
                         logger.warning(f"[{strategy}][{sym}] startup close snapshot failed: {e}")
+                    # Sweep leftover orders for symbols whose positions closed
+                    # while the bot was stopped. Same rationale as the live
+                    # close path — reduce-only conditionals (Bybit) can linger.
+                    if not PAPER_MODE:
+                        try:
+                            tr.cancel_all_orders(sym)
+                        except Exception as _ce:
+                            logger.warning(f"[{strategy}][{sym}] startup post-close cancel_all_orders failed: {_ce}")
                     st.clear_position_memory(sym)
                     logger.warning(
                         f"[{strategy}][{sym}] ⚠️  Startup reconcile: close detected | "
@@ -1056,6 +1065,13 @@ class MTFBot:
                             })
                             logger.warning(f"[{ap['strategy']}][{sym}] PnL pending — placeholder written, will reconcile next tick")
                             st.close_trade(sym, "LOSS", 0)  # temporary; overwritten by reconcile
+                            # Sweep leftover orders even on the placeholder path —
+                            # the position is gone on the exchange; reduce-only
+                            # conditionals would otherwise dangle until manual cleanup.
+                            try:
+                                tr.cancel_all_orders(sym)
+                            except Exception as _ce:
+                                logger.warning(f"[{ap['strategy']}][{sym}] post-close cancel_all_orders (pending reconcile) failed: {_ce}")
                             st.clear_position_memory(sym)
                             del self.active_positions[sym]
                             continue
@@ -1110,6 +1126,16 @@ class MTFBot:
                             )
                     except Exception as e:
                         logger.warning(f"[{ap['strategy']}][{sym}] close snapshot failed: {e}")
+                    # Sweep leftover plan/conditional orders on the exchange.
+                    # Position-level SL/TP are auto-cancelled by both exchanges when
+                    # the position hits 0, but standalone reduce-only conditionals
+                    # (Bybit partial-TP via /v5/order/create) can linger and clutter
+                    # the UI. Idempotent — no-op if nothing remains.
+                    if not PAPER_MODE:
+                        try:
+                            tr.cancel_all_orders(sym)
+                        except Exception as _ce:
+                            logger.warning(f"[{ap['strategy']}][{sym}] post-close cancel_all_orders failed: {_ce}")
                     st.clear_position_memory(sym)
                     del self.active_positions[sym]
 
@@ -1188,6 +1214,14 @@ class MTFBot:
                             )
                     except Exception as _e:
                         logger.warning(f"[{_strategy}][{_sym}] orphan close snapshot failed: {_e}")
+                    # Sweep leftover orders. Reached when state.json open_trades
+                    # has a position the live exchange no longer has — same
+                    # cleanup needed as the regular close path.
+                    if not PAPER_MODE:
+                        try:
+                            tr.cancel_all_orders(_sym)
+                        except Exception as _ce:
+                            logger.warning(f"[{_strategy}][{_sym}] orphan post-close cancel_all_orders failed: {_ce}")
                     st.clear_position_memory(_sym)
                     logger.warning(f"[{_strategy}][{_sym}] ⚠️ Orphan reconciled: {_result} PnL={_pnl:+.4f}")
                     st.add_scan_log(f"[{_strategy}][{_sym}] ⚠️ Orphan reconciled: {_result} PnL={_pnl:+.4f}", "WARN")
@@ -1243,9 +1277,15 @@ class MTFBot:
         self._execute_best_candidate(direction, balance)
 
     def _evaluate_pair(self, symbol: str, allowed_direction: str, balance: float) -> bool:
-        htf_df   = tr.get_candles(symbol, config_s1.HTF_INTERVAL,   limit=15)
-        ltf_df   = tr.get_candles(symbol, config_s1.LTF_INTERVAL,   limit=60)
-        daily_df = tr.get_candles(symbol, config_s1.DAILY_INTERVAL, limit=250)
+        # Parallel fetch — 3 independent public kline reads, IP-rate-limited only.
+        # Bybit allows ~120 req/s, Bitget ~10 req/s; 3 concurrent is well within budget.
+        with ThreadPoolExecutor(max_workers=3) as _pool:
+            _htf_f   = _pool.submit(tr.get_candles, symbol, config_s1.HTF_INTERVAL,   15)
+            _ltf_f   = _pool.submit(tr.get_candles, symbol, config_s1.LTF_INTERVAL,   60)
+            _daily_f = _pool.submit(tr.get_candles, symbol, config_s1.DAILY_INTERVAL, 250)
+            htf_df   = _htf_f.result()
+            ltf_df   = _ltf_f.result()
+            daily_df = _daily_f.result()
 
         if htf_df.empty or ltf_df.empty or daily_df.empty:
             return False
@@ -1773,6 +1813,13 @@ class MTFBot:
                             # BUGFIX: Only refresh plan exits after we have a valid new_trig
                             # (was outside the if block, causing it to be called with new_trig=0.0
                             # when API lags and entry_price is still 0)
+                            #
+                            # Bybit SL preservation: bybit.place_moving_plan (called
+                            # inside refresh_plan_exits) auto-reads the position's
+                            # current stopLoss and re-includes it in the trading-stop
+                            # REPLACE call so the SL just set above survives. Bitget
+                            # path is unaffected — its place_moving_plan uses a
+                            # separate endpoint that does not touch position SL.
                             if not tr.refresh_plan_exits(sym, hold_side, new_trig):
                                 logger.warning(f"[{strat}][{sym}] ⚠️ Scale-in exits refresh failed — verify plan orders manually")
                                 st.add_scan_log(f"[{strat}][{sym}] ⚠️ Scale-in exits refresh failed", "WARN")

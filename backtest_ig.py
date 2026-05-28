@@ -1,13 +1,20 @@
 """
-backtest_ig.py — Walk-forward backtest for IG S5 strategy.
+backtest_ig.py — Walk-forward backtest for IG S5 and S1 strategies.
 
 Data source: yfinance (^DJI for US30, GC=F for GOLD)
 Cache: data/ig_cache/<NAME>_<INTERVAL>.parquet
 
+Note: yfinance limits 3m candle history to ~60 days.  For S1 backtests
+the 3m window is therefore short; this is expected and documented here.
+
 Usage:
-    python backtest_ig.py                    # fetch + run all instruments
-    python backtest_ig.py --no-fetch         # use cached parquet only
-    python backtest_ig.py --instrument US30  # single instrument
+    python backtest_ig.py                        # fetch + run all instruments (both strategies)
+    python backtest_ig.py --no-fetch             # use cached parquet only
+    python backtest_ig.py --instrument US30      # single instrument
+    python backtest_ig.py --strategy s5          # S5 only (walk 15m bars, existing behavior)
+    python backtest_ig.py --strategy s1          # S1 only (walk 3m bars)
+    python backtest_ig.py --strategy both        # S5 + S1, 3m walk with 15m boundary check
+    python backtest_ig.py --grid s1              # S1 parameter grid search
     python backtest_ig.py --output my.html
 """
 import argparse
@@ -15,6 +22,7 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from itertools import product
 from pathlib import Path
 
 import pandas as pd
@@ -25,7 +33,8 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).parent))
 
 from strategies.s5 import evaluate_s5
-from indicators import calculate_ema
+from strategies.s1 import evaluate_s1, compute_s1_sl_atr, compute_s1_tp_atr
+from indicators import calculate_ema, calculate_atr
 from config_ig import INSTRUMENTS
 
 # ── Constants ──────────────────────────────────────────────────────── #
@@ -33,12 +42,24 @@ from config_ig import INSTRUMENTS
 _CACHE_DIR  = Path("data/ig_cache")
 _ET         = pytz.timezone("America/New_York")
 _YF_SYMBOLS = {
-    "US30":  "^DJI",
-    "US100": "^IXIC",  # NASDAQ Composite
-    "GOLD":  "GC=F",
+    "US30":   "^DJI",
+    "US100":  "^IXIC",  # NASDAQ Composite
+    "GOLD":   "GC=F",
+    "EURUSD": "EURUSD=X",
+    "GBPUSD": "GBPUSD=X",
+    "USDJPY": "USDJPY=X",
 }
-_YF_PERIODS   = {"1D": "10y",  "1H": "2y",  "15m": "60d"}
-_YF_INTERVALS = {"1D": "1d",   "1H": "1h",  "15m": "15m"}
+_YF_PERIODS   = {"1D": "10y",  "1H": "2y",  "15m": "60d", "3m": "60d"}
+_YF_INTERVALS = {"1D": "1d",   "1H": "1h",  "15m": "15m", "3m": "3m"}
+
+# ── S1 grid search parameter space ────────────────────────────────── #
+
+S1_GRID_PARAMS = {
+    "s1_sl_atr_mult":             [1.0, 1.5, 2.0, 2.5],
+    "s1_tp_atr_mult":             [2.0, 3.0, 4.0, 5.0],
+    "s1_consolidation_range_pct": [0.001, 0.002, 0.003, 0.005],
+    "s1_breakout_buffer_pct":     [0.0002, 0.0005, 0.001],
+}
 
 
 # ── Data fetch ─────────────────────────────────────────────────────── #
@@ -204,6 +225,143 @@ def _slice_windows(i: int, df_1d: pd.DataFrame, df_1h: pd.DataFrame,
     )
 
 
+def _slice_windows_3m(i: int, df_1d: pd.DataFrame, df_1h: pd.DataFrame,
+                      df_3m: pd.DataFrame, instrument: dict) -> tuple:
+    """Slice daily/1H/3m DataFrames for an S1 evaluation at 3m bar i."""
+    bar_ts = int(df_3m.iloc[i]["ts"])
+    daily  = df_1d[df_1d["ts"] <= bar_ts].tail(instrument["daily_limit"])
+    htf    = df_1h[df_1h["ts"] <= bar_ts].tail(instrument["htf_limit"])
+    # For S1 LTF window use the same m15_limit key (it just bounds rows)
+    ltf_limit = instrument.get("m15_limit", 300)
+    ltf    = df_3m.iloc[max(0, i - ltf_limit + 1): i + 1]
+    return (
+        daily.reset_index(drop=True),
+        htf.reset_index(drop=True),
+        ltf.reset_index(drop=True),
+    )
+
+
+def _eval_s1_at_idle(
+    i: int,
+    bar_ts: int,
+    df_1d: pd.DataFrame,
+    df_1h: pd.DataFrame,
+    df_3m: pd.DataFrame,
+    instrument: dict,
+) -> dict | None:
+    """
+    Evaluate S1 signal at 3m bar i.  Returns a pending dict on signal, else None.
+
+    The instrument cfg must have s1_enabled=True; if not, returns None immediately.
+    SL and TP are computed via compute_s1_sl_atr / compute_s1_tp_atr using the ATR
+    stored in cfg["_last_atr"] by evaluate_s1.
+    """
+    if not instrument.get("s1_enabled", False):
+        return None
+
+    daily_df, htf_df, ltf_df = _slice_windows_3m(i, df_1d, df_1h, df_3m, instrument)
+
+    if len(daily_df) < instrument.get("s1_adx_trend_threshold", 25) + 5:
+        return None
+    if htf_df.empty or ltf_df.empty:
+        return None
+
+    # Daily trend direction via EMA crossover (same as S5 path — reuse existing keys)
+    ema_fast = float(calculate_ema(
+        daily_df["close"].astype(float), instrument["s5_daily_ema_fast"]
+    ).iloc[-1])
+    ema_slow = float(calculate_ema(
+        daily_df["close"].astype(float), instrument["s5_daily_ema_slow"]
+    ).iloc[-1])
+    allowed = "BULLISH" if ema_fast > ema_slow else "BEARISH"
+
+    try:
+        sig, _rsi, box_high, box_low, _adx, _drsi = evaluate_s1(
+            instrument["epic"], htf_df, ltf_df, daily_df, allowed, cfg=instrument
+        )
+    except Exception:
+        return None
+
+    if sig not in ("LONG", "SHORT"):
+        return None
+
+    atr_val = instrument.get("_last_atr", 0.0)
+    if atr_val <= 0:
+        return None
+
+    direction = sig   # "LONG" or "SHORT"
+    # Entry = last closed bar close
+    entry = float(df_3m.iloc[i]["close"])
+    sl  = compute_s1_sl_atr(direction, entry, box_high, box_low, atr_val, instrument)
+    tp  = compute_s1_tp_atr(direction, entry, atr_val, instrument)
+    tp1 = tp   # S1 uses ATR-based TP directly (single leg for backtest)
+
+    expires = bar_ts + instrument.get("pending_expiry_hours", 4) * 3_600_000
+
+    return {
+        "strategy": "S1",
+        "side":     direction,
+        "entry":    entry,
+        "sl":       sl,
+        "tp":       tp,
+        "tp1":      tp1,
+        "ob_low":   box_low,
+        "ob_high":  box_high,
+        "trigger":  entry,   # immediate market order semantics for S1
+        "expires":  expires,
+    }
+
+
+def _eval_s5_at_idle(
+    i: int,
+    df_1d: pd.DataFrame,
+    df_1h: pd.DataFrame,
+    df_15m: pd.DataFrame,
+    instrument: dict,
+) -> dict | None:
+    """
+    Evaluate S5 signal at 15m bar i.  Returns a pending dict on signal, else None.
+    Extracted from the original run_instrument IDLE block.
+    """
+    daily_df, htf_df, m15_df = _slice_windows(i, df_1d, df_1h, df_15m, instrument)
+
+    if len(daily_df) < instrument["s5_daily_ema_slow"] + 5:
+        return None
+    if htf_df.empty or m15_df.empty:
+        return None
+
+    ema_fast = float(calculate_ema(
+        daily_df["close"].astype(float), instrument["s5_daily_ema_fast"]
+    ).iloc[-1])
+    ema_slow = float(calculate_ema(
+        daily_df["close"].astype(float), instrument["s5_daily_ema_slow"]
+    ).iloc[-1])
+    allowed = "BULLISH" if ema_fast > ema_slow else "BEARISH"
+
+    try:
+        sig, trigger, sl, tp, ob_low, ob_high, _ = evaluate_s5(
+            instrument["epic"], daily_df, htf_df, m15_df, allowed, cfg=instrument
+        )
+    except Exception:
+        return None
+
+    if sig not in ("PENDING_LONG", "PENDING_SHORT"):
+        return None
+
+    bar_ts = int(df_15m.iloc[i]["ts"])
+    return {
+        "strategy": "S5",
+        "side":     "LONG" if sig == "PENDING_LONG" else "SHORT",
+        "trigger":  trigger,
+        "sl":       sl,
+        "tp":       tp,
+        "tp1":      None,   # computed at fill time (1:1 R:R)
+        "ob_low":   ob_low,
+        "ob_high":  ob_high,
+        "expires":  bar_ts + instrument.get("pending_expiry_hours", 4) * 3_600_000,
+    }
+
+
 def _calc_pnl(trade: dict) -> float:
     """PnL in points. Accounts for 2-leg structure (partial + remainder)."""
     side   = trade["side"]
@@ -240,13 +398,37 @@ def _collect_candles(df_15m: pd.DataFrame, entry_i: int, exit_i: int,
 
 def run_instrument(instrument: dict,
                    df_1d: pd.DataFrame, df_1h: pd.DataFrame,
-                   df_15m: pd.DataFrame) -> dict:
+                   df_15m: pd.DataFrame,
+                   df_3m: pd.DataFrame | None = None,
+                   strategy_mode: str = "s5") -> dict:
     """
-    Walk every 15m bar in chronological order.
+    Walk bars in chronological order.
+
+    strategy_mode:
+      "s5"   — walk 15m bars, evaluate S5 only (original behavior)
+      "s1"   — walk 3m bars, evaluate S1 only (requires df_3m)
+      "both" — walk 3m bars; at 15m boundaries also evaluate S5;
+               first-non-HOLD wins; one position across both strategies
+
     Returns {"instrument": name, "trades": [...], "cancelled": [...]}.
+    Each trade dict includes "strategy": "S1"|"S5".
     """
-    name   = instrument["display_name"]
-    epic   = instrument["epic"]
+    name = instrument["display_name"]
+
+    # For s5-only: keep original 15m walk
+    if strategy_mode == "s5":
+        return _run_s5_loop(instrument, df_1d, df_1h, df_15m, name)
+
+    # For s1 or both: walk 3m bars
+    if df_3m is None or df_3m.empty:
+        return {"instrument": name, "trades": [], "cancelled": []}
+    return _run_3m_loop(instrument, df_1d, df_1h, df_15m, df_3m, name, strategy_mode)
+
+
+def _run_s5_loop(instrument: dict,
+                 df_1d: pd.DataFrame, df_1h: pd.DataFrame,
+                 df_15m: pd.DataFrame, name: str) -> dict:
+    """Original 15m S5 walk loop — unchanged behavior."""
     trades:    list[dict] = []
     cancelled: list[dict] = []
 
@@ -254,21 +436,20 @@ def run_instrument(instrument: dict,
     pending: dict | None = None
     trade:   dict | None = None
 
-    # Skip first daily_limit+10 bars so EMA calculations have enough history
     min_i = instrument["daily_limit"] + 10
 
     for i in range(min_i, len(df_15m)):
         bar = df_15m.iloc[i].to_dict()
         ts  = int(bar["ts"])
 
-        # ── IN_TRADE ──────────────────────────────────────────────── #
+        # ── IN_TRADE ────────────────────────────────────────────── #
         if state == "IN_TRADE":
             action, price = _check_trade(bar, trade, instrument)
 
             if action == "partial_tp":
                 trade["partial_hit"]   = True
                 trade["partial_price"] = price
-                trade["sl_current"]    = trade["entry"]   # break-even
+                trade["sl_current"]    = trade["entry"]
 
             elif action in ("sl", "tp", "session_end"):
                 trade["exit_reason"] = action.upper()
@@ -281,7 +462,7 @@ def run_instrument(instrument: dict,
                 state = "IDLE"
                 trade = None
 
-        # ── PENDING ───────────────────────────────────────────────── #
+        # ── PENDING ─────────────────────────────────────────────── #
         elif state == "PENDING":
             action, fill_price = _check_pending(bar, pending, instrument)
 
@@ -293,6 +474,7 @@ def run_instrument(instrument: dict,
                 tp1   = (entry + (entry - sl)) if side == "LONG" else (entry - (sl - entry))
                 trade = {
                     "instrument":  name,
+                    "strategy":    pending.get("strategy", "S5"),
                     "side":        side,
                     "entry_dt":    datetime.fromtimestamp(ts / 1000, tz=timezone.utc),
                     "entry_i":     i,
@@ -312,6 +494,7 @@ def run_instrument(instrument: dict,
             elif action in ("ob_invalid", "expired", "session_end"):
                 cancelled.append({
                     "instrument": name,
+                    "strategy":   pending.get("strategy", "S5"),
                     "reason":     action.upper(),
                     "dt":         datetime.fromtimestamp(ts / 1000, tz=timezone.utc),
                     "side":       pending["side"],
@@ -319,53 +502,183 @@ def run_instrument(instrument: dict,
                 state   = "IDLE"
                 pending = None
 
-        # ── IDLE ──────────────────────────────────────────────────── #
+        # ── IDLE ────────────────────────────────────────────────── #
         else:
             if not _in_session(ts, instrument):
                 continue
 
-            daily_df, htf_df, m15_df = _slice_windows(i, df_1d, df_1h, df_15m, instrument)
+            sig_dict = _eval_s5_at_idle(i, df_1d, df_1h, df_15m, instrument)
+            if sig_dict is not None:
+                pending = sig_dict
+                state   = "PENDING"
 
-            if len(daily_df) < instrument["s5_daily_ema_slow"] + 5:
+    return {"instrument": name, "trades": trades, "cancelled": cancelled}
+
+
+def _run_3m_loop(instrument: dict,
+                 df_1d: pd.DataFrame, df_1h: pd.DataFrame,
+                 df_15m: pd.DataFrame, df_3m: pd.DataFrame,
+                 name: str, strategy_mode: str) -> dict:
+    """
+    Walk 3m bars.  At 15m boundaries (ts % 900_000 == 0) also evaluates S5 when
+    strategy_mode == "both".  First-non-HOLD signal wins.  One position per instrument.
+
+    S1 signals are filled immediately at the close of the signal bar (market order).
+    S5 signals are filled when the trigger price is touched (limit/stop order).
+    Both trade types use _check_trade / _check_pending for exit management on 3m bars.
+    """
+    trades:    list[dict] = []
+    cancelled: list[dict] = []
+
+    state   = "IDLE"
+    pending: dict | None = None
+    trade:   dict | None = None
+
+    min_i = instrument["daily_limit"] + 10   # same warm-up guard
+
+    for i in range(min_i, len(df_3m)):
+        bar = df_3m.iloc[i].to_dict()
+        ts  = int(bar["ts"])
+
+        # ── IN_TRADE ────────────────────────────────────────────── #
+        if state == "IN_TRADE":
+            action, price = _check_trade(bar, trade, instrument)
+
+            if action == "partial_tp":
+                trade["partial_hit"]   = True
+                trade["partial_price"] = price
+                trade["sl_current"]    = trade["entry"]
+
+            elif action in ("sl", "tp", "session_end"):
+                trade["exit_reason"] = action.upper()
+                trade["exit_price"]  = price
+                trade["exit_dt"]     = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+                trade["pnl_pts"]     = _calc_pnl(trade)
+                trade["pnl_pct"]     = round(trade["pnl_pts"] / trade["entry"] * 100, 3)
+                trade["candles"]     = _collect_candles(df_3m, trade["entry_i"], i)
+                trades.append(trade)
+                state = "IDLE"
+                trade = None
+
+        # ── PENDING ─────────────────────────────────────────────── #
+        elif state == "PENDING":
+            if pending.get("strategy") == "S1":
+                # S1: immediate fill at trigger (market order semantics)
+                if ts > pending["expires"]:
+                    cancelled.append({
+                        "instrument": name,
+                        "strategy":   "S1",
+                        "reason":     "EXPIRED",
+                        "dt":         datetime.fromtimestamp(ts / 1000, tz=timezone.utc),
+                        "side":       pending["side"],
+                    })
+                    state   = "IDLE"
+                    pending = None
+                elif _is_session_end(ts, instrument):
+                    cancelled.append({
+                        "instrument": name,
+                        "strategy":   "S1",
+                        "reason":     "SESSION_END",
+                        "dt":         datetime.fromtimestamp(ts / 1000, tz=timezone.utc),
+                        "side":       pending["side"],
+                    })
+                    state   = "IDLE"
+                    pending = None
+                else:
+                    # Fill immediately on next bar open (simulate as close of signal bar)
+                    entry = pending["entry"]
+                    sl    = pending["sl"]
+                    tp    = pending["tp"]
+                    tp1   = pending.get("tp1", tp)
+                    side  = pending["side"]
+                    trade = {
+                        "instrument":  name,
+                        "strategy":    "S1",
+                        "side":        side,
+                        "entry_dt":    datetime.fromtimestamp(ts / 1000, tz=timezone.utc),
+                        "entry_i":     i,
+                        "trigger":     entry,
+                        "entry":       entry,
+                        "sl":          sl,
+                        "tp":          tp,
+                        "tp1":         tp1,
+                        "ob_low":      pending["ob_low"],
+                        "ob_high":     pending["ob_high"],
+                        "partial_hit": False,
+                        "sl_current":  sl,
+                    }
+                    state   = "IN_TRADE"
+                    pending = None
+            else:
+                # S5 pending in 3m loop: use same check_pending logic
+                action, fill_price = _check_pending(bar, pending, instrument)
+
+                if action == "fill":
+                    entry = fill_price
+                    sl    = pending["sl"]
+                    tp    = pending["tp"]
+                    side  = pending["side"]
+                    tp1   = (entry + (entry - sl)) if side == "LONG" else (entry - (sl - entry))
+                    trade = {
+                        "instrument":  name,
+                        "strategy":    "S5",
+                        "side":        side,
+                        "entry_dt":    datetime.fromtimestamp(ts / 1000, tz=timezone.utc),
+                        "entry_i":     i,
+                        "trigger":     pending["trigger"],
+                        "entry":       entry,
+                        "sl":          sl,
+                        "tp":          tp,
+                        "tp1":         tp1,
+                        "ob_low":      pending["ob_low"],
+                        "ob_high":     pending["ob_high"],
+                        "partial_hit": False,
+                        "sl_current":  sl,
+                    }
+                    state   = "IN_TRADE"
+                    pending = None
+
+                elif action in ("ob_invalid", "expired", "session_end"):
+                    cancelled.append({
+                        "instrument": name,
+                        "strategy":   "S5",
+                        "reason":     action.upper(),
+                        "dt":         datetime.fromtimestamp(ts / 1000, tz=timezone.utc),
+                        "side":       pending["side"],
+                    })
+                    state   = "IDLE"
+                    pending = None
+
+        # ── IDLE ────────────────────────────────────────────────── #
+        else:
+            if not _in_session(ts, instrument):
                 continue
-            if htf_df.empty or m15_df.empty:
-                continue
 
-            ema_fast = float(calculate_ema(
-                daily_df["close"].astype(float), instrument["s5_daily_ema_fast"]
-            ).iloc[-1])
-            ema_slow = float(calculate_ema(
-                daily_df["close"].astype(float), instrument["s5_daily_ema_slow"]
-            ).iloc[-1])
-            allowed = "BULLISH" if ema_fast > ema_slow else "BEARISH"
+            sig_dict = None
 
-            try:
-                sig, trigger, sl, tp, ob_low, ob_high, _ = evaluate_s5(
-                    epic, daily_df, htf_df, m15_df, allowed, cfg=instrument
-                )
-            except Exception:
-                continue
+            # At 15m boundaries, try S5 first (when mode is "both")
+            if strategy_mode == "both" and ts % 900_000 == 0 and not df_15m.empty:
+                # Find the matching 15m bar index
+                m15_idx_mask = df_15m["ts"] == ts
+                if m15_idx_mask.any():
+                    m15_i = int(df_15m.index[m15_idx_mask][0])
+                    sig_dict = _eval_s5_at_idle(m15_i, df_1d, df_1h, df_15m, instrument)
 
-            if sig in ("PENDING_LONG", "PENDING_SHORT"):
-                pending = {
-                    "side":    "LONG" if sig == "PENDING_LONG" else "SHORT",
-                    "trigger": trigger,
-                    "sl":      sl,
-                    "tp":      tp,
-                    "ob_low":  ob_low,
-                    "ob_high": ob_high,
-                    "expires": ts + 4 * 3_600_000,   # 4h in ms
-                }
-                state = "PENDING"
+            # Try S1 if S5 returned nothing (or mode is s1)
+            if sig_dict is None and instrument.get("s1_enabled", False):
+                sig_dict = _eval_s1_at_idle(i, ts, df_1d, df_1h, df_3m, instrument)
+
+            if sig_dict is not None:
+                pending = sig_dict
+                state   = "PENDING"
 
     return {"instrument": name, "trades": trades, "cancelled": cancelled}
 
 
 # ── Stats aggregation ──────────────────────────────────────────────── #
 
-def _compute_stats(result: dict) -> dict:
-    trades    = result["trades"]
-    cancelled = result["cancelled"]
+def _stats_from_trades(trades: list[dict], cancelled: list[dict]) -> dict:
+    """Build a metrics dict from a (possibly filtered) trade + cancelled list."""
     wins      = [t for t in trades if t["pnl_pts"] > 0]
     losses    = [t for t in trades if t["pnl_pts"] <= 0]
     partials  = [t for t in trades if t.get("partial_hit")]
@@ -380,7 +693,6 @@ def _compute_stats(result: dict) -> dict:
     gross_loss    = abs(sum(t["pnl_pts"] for t in losses)) if losses else 0.0
 
     return {
-        "name":          result["instrument"],
         "signals":       total_signals,
         "filled":        len(trades),
         "fill_rate":     round(len(trades) / total_signals * 100, 1) if total_signals else 0.0,
@@ -393,6 +705,24 @@ def _compute_stats(result: dict) -> dict:
         "avg_loss_pts":  round(-gross_loss / len(losses), 1) if losses else 0.0,
         "profit_factor": round(gross_win / gross_loss, 2) if gross_loss > 0 else float("inf"),
         "total_pnl_pts": round(sum(t["pnl_pts"] for t in trades), 1),
+    }
+
+
+def _compute_stats(result: dict) -> dict:
+    trades    = result["trades"]
+    cancelled = result["cancelled"]
+
+    overall = _stats_from_trades(trades, cancelled)
+
+    # Per-strategy breakdown
+    for strat in ("S1", "S5"):
+        st_trades    = [t for t in trades    if t.get("strategy") == strat]
+        st_cancelled = [c for c in cancelled if c.get("strategy") == strat]
+        overall[f"{strat.lower()}_stats"] = _stats_from_trades(st_trades, st_cancelled)
+
+    return {
+        "name":          result["instrument"],
+        **overall,
         "trades":        trades,
         "cancelled_list":cancelled,
     }
@@ -433,6 +763,35 @@ def build_report(all_stats: list[dict], run_time: str) -> str:
             f'</div>'
         )
 
+    def per_strategy_summary(s):
+        """Render a compact per-strategy summary panel (S1 vs S5)."""
+        rows = ""
+        for strat, label in (("s1", "S1"), ("s5", "S5")):
+            ss = s.get(f"{strat}_stats", {})
+            if not ss or ss.get("filled", 0) == 0:
+                continue
+            sc = "#a371f7" if strat == "s1" else "#60a5fa"
+            rows += (
+                f'<tr>'
+                f'<td><span style="color:{sc};font-weight:700">{label}</span></td>'
+                f'<td>{ss["filled"]}</td>'
+                f'<td style="color:{col(ss["win_rate"] - 50)}">{ss["win_rate"]}%</td>'
+                f'<td style="color:{col(ss["total_pnl_pts"])}">{ss["total_pnl_pts"]:+.1f}</td>'
+                f'<td>{ss["avg_win_pts"]:+.1f}</td>'
+                f'<td style="color:#ff4d6a">{ss["avg_loss_pts"]:+.1f}</td>'
+                f'<td>{ss["profit_factor"]}</td>'
+                f'</tr>'
+            )
+        if not rows:
+            return ""
+        return (
+            f'<h2 style="font-size:13px;margin:18px 0 8px">Per-Strategy Summary</h2>'
+            f'<div style="overflow-x:auto;margin-bottom:16px"><table><thead><tr>'
+            f'<th>Strategy</th><th>Trades</th><th>Win%</th><th>Total PnL</th>'
+            f'<th>Avg Win</th><th>Avg Loss</th><th>PF</th>'
+            f'</tr></thead><tbody>{rows}</tbody></table></div>'
+        )
+
     def trade_table(trades, inst_id):
         if not trades:
             return '<p style="color:#8899aa;padding:20px">No completed trades</p>'
@@ -445,6 +804,8 @@ def build_report(all_stats: list[dict], run_time: str) -> str:
             prt = "✓" if t.get("partial_hit") else "—"
             edt = t["exit_dt"].strftime("%Y-%m-%d %H:%M") if t.get("exit_dt") else "—"
             edt_entry = t["entry_dt"].strftime("%Y-%m-%d %H:%M") if t.get("entry_dt") else "—"
+            strat     = t.get("strategy", "S5")
+            strat_col = "#a371f7" if strat == "S1" else "#60a5fa"
             chart_btn = ""
             if t.get("candles"):
                 cdata = json.dumps(t["candles"])
@@ -455,9 +816,9 @@ def build_report(all_stats: list[dict], run_time: str) -> str:
                     "entry":   t["entry"],
                     "sl":      t["sl"],
                     "tp":      t["tp"],
-                    "tp1":     t["tp1"],
-                    "ob_low":  t["ob_low"],
-                    "ob_high": t["ob_high"],
+                    "tp1":     t.get("tp1", t["tp"]),
+                    "ob_low":  t.get("ob_low", 0),
+                    "ob_high": t.get("ob_high", 0),
                     "exit_price":  t.get("exit_price", 0),
                     "exit_reason": t.get("exit_reason", ""),
                     "partial_hit": t.get("partial_hit", False),
@@ -472,6 +833,7 @@ def build_report(all_stats: list[dict], run_time: str) -> str:
             rows += (
                 f'<tr>'
                 f'<td>{edt_entry}</td>'
+                f'<td style="color:{strat_col}">{strat}</td>'
                 f'<td style="color:{sc}">{sid}</td>'
                 f'<td>{t["entry"]:.1f}</td>'
                 f'<td>{t["sl"]:.1f}</td>'
@@ -486,11 +848,41 @@ def build_report(all_stats: list[dict], run_time: str) -> str:
             )
         return (
             f'<div style="overflow-x:auto"><table><thead><tr>'
-            f'<th>Entry</th><th>Side</th><th>Entry$</th><th>SL</th><th>TP</th>'
+            f'<th>Entry</th><th>Strategy</th><th>Side</th><th>Entry$</th><th>SL</th><th>TP</th>'
             f'<th>Partial</th><th>Exit Reason</th><th>Exit Time</th>'
             f'<th>Exit$</th><th>PnL (pts)</th><th></th>'
             f'</tr></thead><tbody>{rows}</tbody></table></div>'
         )
+
+    def grid_table(grid_rows: list[dict]) -> str:
+        """Render a ranked combo table for grid search results."""
+        if not grid_rows:
+            return ""
+        header = (
+            f'<h2 style="font-size:13px;margin:20px 0 8px">Grid Search Results (S1 — ranked by PnL)</h2>'
+            f'<div style="overflow-x:auto"><table><thead><tr>'
+            f'<th>#</th><th>SL mult</th><th>TP mult</th>'
+            f'<th>Consol%</th><th>BrkBuf%</th>'
+            f'<th>Trades</th><th>Win%</th><th>Total PnL</th><th>Max DD</th>'
+            f'</tr></thead><tbody>'
+        )
+        rows = ""
+        for rank, r in enumerate(grid_rows, 1):
+            pc = col(r["total_pnl"])
+            rows += (
+                f'<tr>'
+                f'<td>{rank}</td>'
+                f'<td>{r["s1_sl_atr_mult"]}</td>'
+                f'<td>{r["s1_tp_atr_mult"]}</td>'
+                f'<td>{r["s1_consolidation_range_pct"]*100:.2f}</td>'
+                f'<td>{r["s1_breakout_buffer_pct"]*100:.3f}</td>'
+                f'<td>{r["trade_count"]}</td>'
+                f'<td>{r["win_rate"]}%</td>'
+                f'<td style="color:{pc}">{r["total_pnl"]:+.1f}</td>'
+                f'<td style="color:#ff4d6a">{r["max_drawdown"]:.1f}</td>'
+                f'</tr>'
+            )
+        return header + rows + "</tbody></table></div>"
 
     # Build per-instrument sections
     inst_sections = ""
@@ -508,11 +900,15 @@ def build_report(all_stats: list[dict], run_time: str) -> str:
 
     for s in all_stats:
         iid = s["name"].lower()
+        inst_grid_rows = s.get("grid_rows", [])
         inst_sections += (
             f'<div id="t{iid}" class="tc">'
             f'<h2>{s["name"]}</h2>'
             f'{stats_grid(s)}'
+            f'{per_strategy_summary(s)}'
+            f'<h2 style="font-size:13px;margin:18px 0 8px">Trades</h2>'
             f'{trade_table(s["trades"], iid)}'
+            f'{grid_table(inst_grid_rows)}'
             f'</div>'
         )
 
@@ -548,7 +944,7 @@ tr:hover td{{background:#1a2535}}
 .close-btn:hover{{border-color:#f85149;color:#f85149}}
 canvas{{display:block;width:100%;height:380px}}
 </style></head><body>
-<h1>IG S5 Backtest Report</h1>
+<h1>IG Backtest Report</h1>
 <div class="meta">Run: {run_time} | Instruments: {", ".join(s["name"] for s in all_stats)}</div>
 
 <h2>Overall</h2>
@@ -708,14 +1104,74 @@ document.querySelectorAll('.tab').forEach((el,i)=>{{
 
 # ── CLI ────────────────────────────────────────────────────────────── #
 
+def _run_grid_s1(instrument: dict, df_1d: pd.DataFrame, df_1h: pd.DataFrame,
+                 df_15m: pd.DataFrame, df_3m: pd.DataFrame) -> list[dict]:
+    """
+    Run S1 backtest across S1_GRID_PARAMS cartesian product.
+    Returns rows sorted by total_pnl descending.
+    """
+    keys   = list(S1_GRID_PARAMS.keys())
+    values = list(S1_GRID_PARAMS.values())
+    rows: list[dict] = []
+
+    combos = list(product(*values))
+    total  = len(combos)
+    print(f"  Grid search: {total} S1 combos...")
+
+    for idx, combo in enumerate(combos):
+        cfg = dict(instrument)
+        cfg["s1_enabled"] = True   # force enabled for grid
+        for k, v in zip(keys, combo):
+            cfg[k] = v
+
+        result = run_instrument(cfg, df_1d, df_1h, df_15m, df_3m, strategy_mode="s1")
+        trades = result["trades"]
+        wins   = [t for t in trades if t["pnl_pts"] > 0]
+
+        # Compute max drawdown (running cumulative PnL series)
+        pnl_series = [t["pnl_pts"] for t in sorted(trades, key=lambda x: x["entry_dt"])]
+        max_dd = 0.0
+        peak   = 0.0
+        cum    = 0.0
+        for p in pnl_series:
+            cum  += p
+            peak  = max(peak, cum)
+            max_dd = max(max_dd, peak - cum)
+
+        rows.append({
+            "s1_sl_atr_mult":             combo[keys.index("s1_sl_atr_mult")],
+            "s1_tp_atr_mult":             combo[keys.index("s1_tp_atr_mult")],
+            "s1_consolidation_range_pct": combo[keys.index("s1_consolidation_range_pct")],
+            "s1_breakout_buffer_pct":     combo[keys.index("s1_breakout_buffer_pct")],
+            "trade_count": len(trades),
+            "win_rate":    round(len(wins) / len(trades) * 100, 1) if trades else 0.0,
+            "total_pnl":   round(sum(t["pnl_pts"] for t in trades), 1),
+            "max_drawdown": round(max_dd, 1),
+        })
+
+    rows.sort(key=lambda r: r["total_pnl"], reverse=True)
+    return rows
+
+
 def main():
-    parser = argparse.ArgumentParser(description="IG S5 walk-forward backtest")
+    parser = argparse.ArgumentParser(description="IG walk-forward backtest (S5 + S1)")
     parser.add_argument("--no-fetch",    action="store_true",
                         help="Use cached parquet only (skip yfinance)")
     parser.add_argument("--instrument",  default=None,
                         help="Run single instrument only (e.g. US30)")
     parser.add_argument("--output",      default="backtest_ig_report.html",
                         help="Output HTML file path")
+    parser.add_argument("--strategy",    default="both",
+                        choices=["s5", "s1", "both"],
+                        help="Strategy to backtest: s5 (15m walk, original behavior), "
+                             "s1 (3m walk; yfinance limits 3m history to ~60 days), "
+                             "both (3m walk, S5 at 15m boundaries + S1 every bar). "
+                             "Default: both")
+    parser.add_argument("--grid",        default=None,
+                        choices=["s1"],
+                        help="Run grid search over S1 parameters (cartesian product of "
+                             "sl/tp ATR multiples, consolidation pct, breakout buffer pct). "
+                             "Appends ranked table to report per instrument.")
     args = parser.parse_args()
 
     instruments = [
@@ -726,6 +1182,9 @@ def main():
         print(f"No instruments matched '{args.instrument}'. Available: "
               f"{[i['display_name'] for i in INSTRUMENTS]}")
         return
+
+    strategy_mode = args.strategy   # "s5", "s1", or "both"
+    run_grid      = args.grid == "s1"
 
     all_stats = []
     for instrument in instruments:
@@ -739,6 +1198,20 @@ def main():
             print(f"  Failed to load candles: {e}")
             continue
 
+        # Load 3m candles when S1 is in scope
+        df_3m: pd.DataFrame | None = None
+        if strategy_mode in ("s1", "both") or run_grid:
+            try:
+                df_3m = load_candles(name, "3m", no_fetch=args.no_fetch)
+                print(f"  3m:  {len(df_3m)} bars")
+            except FileNotFoundError as e:
+                print(f"  Warning: 3m cache missing ({e}). "
+                      f"S1 will be skipped for {name}.")
+                df_3m = None
+            except Exception as e:
+                print(f"  Warning: could not load 3m candles: {e}")
+                df_3m = None
+
         print(f"  1D:  {len(df_1d)} bars")
         print(f"  1H:  {len(df_1h)} bars")
         print(f"  15m: {len(df_15m)} bars")
@@ -747,9 +1220,24 @@ def main():
             print(f"  Empty data — skipping {name}")
             continue
 
-        print(f"[{name}] Running simulation...")
-        result = run_instrument(instrument, df_1d, df_1h, df_15m)
-        stats  = _compute_stats(result)
+        print(f"[{name}] Running simulation (strategy={strategy_mode})...")
+        result = run_instrument(
+            instrument, df_1d, df_1h, df_15m,
+            df_3m=df_3m, strategy_mode=strategy_mode
+        )
+        stats = _compute_stats(result)
+
+        # Optionally run grid search
+        if run_grid and df_3m is not None and not df_3m.empty:
+            grid_rows = _run_grid_s1(instrument, df_1d, df_1h, df_15m, df_3m)
+            stats["grid_rows"] = grid_rows
+            print(f"  Grid search complete. Top combo: "
+                  f"SL={grid_rows[0]['s1_sl_atr_mult']} "
+                  f"TP={grid_rows[0]['s1_tp_atr_mult']} "
+                  f"→ PnL={grid_rows[0]['total_pnl']:+.1f} pts")
+        else:
+            stats["grid_rows"] = []
+
         all_stats.append(stats)
 
         print(f"  Signals:    {stats['signals']}")

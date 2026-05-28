@@ -85,7 +85,7 @@ DISABLE_SATURDAY_TRADING = True
 # Format: List of (start_hour, end_hour, multiplier) tuples
 # Based on trade analysis: European Main (16:00-19:00 PH) has 59.1% win rate, +593% P&L
 ENHANCED_TRADING_WINDOWS = [
-    (16, 19, 2.0),  # 4:00 PM - 7:00 PM PH (08:00-11:00 UTC) - European Main Session - 2x position size
+    (16, 19, 1.5),  # 4:00 PM - 7:00 PM PH (08:00-11:00 UTC) - European Main Session - 1.5x position size
 ]
 
 # Optional: Reduce position size during risky days

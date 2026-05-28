@@ -41,7 +41,7 @@ SETTLE_COIN = "USDT"
 # When True, bybit_trader.open_long/open_short LOG intended orders and return
 # a simulated fill without calling /v5/order/create. Flip to False ONLY after
 # observing at least one full evaluation cycle in the logs.
-DRY_RUN = True
+DRY_RUN = False
 
 # --- Pair Scanner ---
 MIN_VOLUME_USDT         = 5_000_000   # 24h quote volume floor (USDT)
@@ -51,7 +51,7 @@ LIQUIDITY_CHECK_ENABLED = False
 MIN_OB_DEPTH_USDT       = 50_000
 
 # --- Bot Behaviour ---
-MAX_CONCURRENT_TRADES = 10
+MAX_CONCURRENT_TRADES = 4
 POLL_INTERVAL_SEC     = 15
 
 # --- Initial Balance (for PnL% calculation) ---
@@ -87,15 +87,15 @@ STATE_FILE = str(_DATA_DIR / "bybit_state.json")
 
 # --- Non-Trading Hours --- (PH time, UTC+8) — mirror Bitget defaults
 NON_TRADING_HOURS = [
-    (6, 11),
+    #(6, 11),
 ]
 
 # --- Weekend Trading ---
-DISABLE_SATURDAY_TRADING = True
+DISABLE_SATURDAY_TRADING = False
 
 # --- Enhanced Trading Windows ---
 ENHANCED_TRADING_WINDOWS = [
-    (16, 19, 2.0),
+    #(16, 19, 1.5),  # 4pm-7pm PH time (UTC+8) — 1.5x position size
 ]
 
 REDUCE_TUESDAY_SIZE = False

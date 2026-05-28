@@ -27,6 +27,7 @@ import ig_stream
 import config_ig
 
 from strategies.s5 import evaluate_s5
+from strategies.s1 import evaluate_s1, compute_s1_sl_atr, compute_s1_tp_atr, maybe_trail_sl_ig
 from indicators import calculate_ema
 from tools import find_swing_low_target, find_swing_high_target
 
@@ -96,6 +97,12 @@ _TRADE_FIELDS = [
     "snap_s5_ob_low", "snap_s5_ob_high", "snap_s5_tp",
     "result", "pnl", "exit_reason",
     "session_date", "mode",
+    # T13 — S1 columns (additive; existing S5 rows leave these blank)
+    "snap_strategy",
+    "snap_s1_rsi", "snap_s1_adx",
+    "snap_s1_box_high", "snap_s1_box_low",
+    "snap_s1_atr", "snap_s1_sr_clearance_atr",
+    "exit_price",
 ]
 
 _REQUIRED_INSTRUMENT_KEYS = {
@@ -103,6 +110,7 @@ _REQUIRED_INSTRUMENT_KEYS = {
     "contract_size", "partial_size", "point_value",
     "session_start", "session_end",
     "daily_limit", "htf_limit", "m15_limit",
+    "price_decimals", "min_deal_distance", "pending_expiry_hours",
     "s5_enabled", "s5_daily_ema_fast", "s5_daily_ema_med", "s5_daily_ema_slow",
     "s5_htf_bos_lookback", "s5_ltf_interval", "s5_ob_lookback",
     "s5_ob_min_impulse", "s5_ob_min_range_pct", "s5_choch_lookback",
@@ -113,6 +121,21 @@ _REQUIRED_INSTRUMENT_KEYS = {
 }
 
 
+_S1_REQUIRED_KEYS = {
+    "s1_htf_interval", "s1_ltf_interval", "s1_daily_interval",
+    "s1_adx_trend_threshold", "s1_daily_ema_slow",
+    "s1_daily_rsi_long_thresh", "s1_daily_rsi_short_thresh",
+    "s1_rsi_period", "s1_rsi_long_thresh", "s1_rsi_short_thresh",
+    "s1_consolidation_candles", "s1_consolidation_range_pct",
+    "s1_breakout_buffer_pct",
+    "s1_atr_period", "s1_sl_atr_mult", "s1_tp_atr_mult",
+    "s1_sl_buffer_pct", "s1_sr_clearance_atr_mult",
+    "s1_contract_size", "s1_partial_size",
+    "s1_use_swing_trail", "s1_swing_lookback",
+    "m3_limit",
+}
+
+
 def _validate_instruments() -> None:
     for inst in config_ig.INSTRUMENTS:
         missing = _REQUIRED_INSTRUMENT_KEYS - inst.keys()
@@ -120,6 +143,14 @@ def _validate_instruments() -> None:
             raise KeyError(
                 f"Instrument config '{inst.get('display_name', '?')}' missing keys: {missing}"
             )
+        # T17: S1 keys required only when s1_enabled=True
+        if inst.get("s1_enabled", False):
+            s1_missing = _S1_REQUIRED_KEYS - inst.keys()
+            if s1_missing:
+                raise KeyError(
+                    f"Instrument '{inst.get('display_name', '?')}' has s1_enabled=True "
+                    f"but is missing S1 keys: {sorted(s1_missing)}"
+                )
 
 
 _validate_instruments()
@@ -347,6 +378,274 @@ class _PaperState:
             self._save()
 
 
+# ── Strategy Adapters ───────────────────────────────────────── #
+
+
+class _StrategyAdapter:
+    """
+    Per-strategy namespace exposing evaluate / handle_signal.
+
+    Subclasses set `name` and `enabled_key` and implement the methods. Instances
+    are stateless; all state lives on the IGBot instance and the instrument CONFIG.
+    """
+    name: str        = ""    # "S5", "S1", ...
+    enabled_key: str = ""    # CONFIG key gating this strategy on the instrument
+
+    def evaluate(self, bot, instrument: dict) -> dict:
+        """Return a result dict. Must include 'signal' (HOLD or strategy-specific value)
+        and 'reason'. Strategy-specific fields (e.g. ob_low, sl, tp) are included too."""
+        raise NotImplementedError
+
+    def handle_signal(self, bot, instrument: dict, result: dict) -> None:
+        """Side-effects: place orders, update bot._positions / bot._pending_orders, persist state."""
+        raise NotImplementedError
+
+    def update_scan_state(self, bot, instrument: dict, result: dict) -> None:
+        """Persist the latest evaluate() result into bot._scan_signals. Always called after evaluate,
+        regardless of signal — keeps the dashboard fresh."""
+        raise NotImplementedError
+
+    def monitor_position(self, bot, instrument: dict, pos: dict) -> None:
+        """Per-tick monitoring while a position is open. Dispatched by pos['strategy']."""
+        raise NotImplementedError
+
+
+class _S5Adapter(_StrategyAdapter):
+    name        = "S5"
+    enabled_key = "s5_enabled"
+
+    def evaluate(self, bot, instrument: dict) -> dict:
+        name = instrument["display_name"]
+        daily_df = bot._get_candles("1D",  instrument["daily_limit"])
+        htf_df   = bot._get_candles("1H",  instrument["htf_limit"])
+        m15_df   = bot._get_candles("15m", instrument["m15_limit"])
+        if daily_df.empty or htf_df.empty or m15_df.empty:
+            logger.warning(f"[{name}] [S5] Candle fetch returned empty — skipping tick")
+            return {"signal": "HOLD", "reason": "candle fetch empty"}
+
+        ema_fast = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_fast"]).iloc[-1])
+        ema_med  = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_med"]).iloc[-1])
+        ema_slow = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_slow"]).iloc[-1])
+        ema_bull = ema_fast > ema_med > ema_slow
+        ema_bear = ema_slow > ema_med > ema_fast
+        if ema_bull:    allowed_direction = "BULLISH"
+        elif ema_bear:  allowed_direction = "BEARISH"
+        else:           allowed_direction = "BULLISH" if ema_fast > ema_slow else "BEARISH"
+
+        epic = instrument["epic"]
+        sig, trigger, sl, tp, ob_low, ob_high, reason = evaluate_s5(
+            epic, daily_df, htf_df, m15_df, allowed_direction, cfg=instrument
+        )
+        logger.info(f"[{name}] [S5] {reason}")
+        return {
+            "signal": sig, "trigger": trigger, "sl": sl, "tp": tp,
+            "ob_low": ob_low, "ob_high": ob_high, "reason": reason,
+        }
+
+    def handle_signal(self, bot, instrument: dict, result: dict) -> None:
+        """Place S5 pending limit order. Verbatim extraction from _tick_instrument."""
+        name = instrument["display_name"]
+        epic = instrument["epic"]
+        sig     = result["signal"]
+        trigger = result["trigger"]
+        sl      = result["sl"]
+        tp      = result["tp"]
+        ob_low  = result["ob_low"]
+        ob_high = result["ob_high"]
+
+        if sig not in ("PENDING_LONG", "PENDING_SHORT"):
+            # T8: dispatcher should not call handle_signal on HOLD signals. Defensive.
+            logger.error(f"[{name}] [S5] handle_signal called with non-PENDING signal {sig!r} — skipping")
+            return
+
+        mark = ig.get_mark_price(epic)
+        if mark <= 0:
+            return
+
+        side = "LONG" if sig == "PENDING_LONG" else "SHORT"
+        if not _entry_in_window(side, mark, trigger, instrument):
+            logger.info(f"[{name}] [S5] Skipping limit order — mark {mark:.1f} invalid vs trigger {trigger:.1f}")
+            return
+
+        dec = instrument["price_decimals"]
+        sl  = round(sl, dec)
+        tp  = round(tp, dec) if tp else round(trigger + abs(trigger - sl) if side == "LONG" else trigger - abs(trigger - sl), dec)
+        contract_size = instrument["contract_size"]
+        try:
+            if side == "LONG":
+                deal_id = ig.place_limit_long(epic, trigger, sl, tp, contract_size, currency=instrument["currency"])
+            else:
+                deal_id = ig.place_limit_short(epic, trigger, sl, tp, contract_size, currency=instrument["currency"])
+        except Exception as e:
+            logger.error(f"[{name}] [S5] Failed to place limit {side}: {e}")
+            return
+        bot._pending_orders[name] = {
+            "deal_id":  deal_id,
+            "side":     side,
+            "strategy": "S5",
+            "ob_low":   ob_low,
+            "ob_high":  ob_high,
+            "sl":       sl,
+            "tp":       tp,
+            "trigger":  trigger,
+            "size":     contract_size,
+            "expires":  time.time() + instrument["pending_expiry_hours"] * 3600,
+        }
+        bot._save_state()
+        logger.info(
+            f"[{name}] [S5] {side} limit order placed | trigger={trigger:.1f} | "
+            f"SL={sl:.1f} | TP={tp:.1f} | deal_id={deal_id}"
+        )
+
+    def update_scan_state(self, bot, instrument: dict, result: dict) -> None:
+        name = instrument["display_name"]
+        bot._update_scan_state(
+            name, result.get("signal", "HOLD"), result.get("reason", ""),
+            result.get("ob_low"), result.get("ob_high"),
+            result.get("trigger"), result.get("sl"), result.get("tp"),
+        )
+        bot._save_state()
+
+    def monitor_position(self, bot, instrument: dict, pos: dict) -> None:
+        # Delegate to IGBot's existing monitor (no S5-specific extraction in T8 — T11 may revisit)
+        bot._monitor_position(instrument)
+
+
+_S5_ADAPTER = _S5Adapter()
+
+
+class _S1Adapter(_StrategyAdapter):
+    name        = "S1"
+    enabled_key = "s1_enabled"
+
+    def evaluate(self, bot, instrument: dict) -> dict:
+        name = instrument["display_name"]
+        # Always fetch daily + HTF (cheap; cached-delta)
+        daily_df = bot._get_candles("1D", instrument["daily_limit"])
+        htf_df   = bot._get_candles("1H", instrument["htf_limit"])
+        if daily_df.empty or htf_df.empty:
+            return {"signal": "HOLD", "reason": "[S1] daily/htf candle fetch empty"}
+
+        # Direction from daily price vs s1_daily_ema_slow (lighter than S5's EMA waterfall)
+        ema_slow_period = instrument["s1_daily_ema_slow"]
+        ema_slow = float(calculate_ema(daily_df["close"].astype(float), ema_slow_period).iloc[-1])
+        last_close = float(daily_df["close"].iloc[-1])
+        allowed_direction = "BULLISH" if last_close > ema_slow else "BEARISH"
+
+        # Lazy 3m fetch — only after daily+HTF are in hand
+        try:
+            m3_df = bot._get_candles("3m", instrument["m3_limit"])
+        except Exception as e:
+            return {"signal": "HOLD", "reason": f"[S1] 3m fetch failed: {e}"}
+        if m3_df.empty:
+            return {"signal": "HOLD", "reason": "[S1] 3m candle fetch empty"}
+
+        sig, rsi, bh, bl, adx, daily_rsi = evaluate_s1(
+            instrument["epic"], htf_df, m3_df, daily_df, allowed_direction, cfg=instrument,
+        )
+        atr = instrument.get("_last_atr", 0.0)
+        return {
+            "signal": sig,
+            "rsi": rsi, "adx": adx, "daily_rsi": daily_rsi,
+            "box_high": bh, "box_low": bl, "atr": atr,
+            "allowed_direction": allowed_direction,
+            "reason": f"[S1] {sig} rsi={rsi:.1f} adx={adx:.1f} atr={atr:.4f}",
+        }
+
+    def handle_signal(self, bot, instrument: dict, result: dict) -> None:
+        sig = result["signal"]
+        if sig not in ("LONG", "SHORT"):
+            logger.error(f"[{instrument['display_name']}] [S1] handle_signal called with non-LONG/SHORT signal {sig!r}")
+            return
+
+        name = instrument["display_name"]
+        epic = instrument["epic"]
+        atr  = result["atr"]
+        if atr <= 0:
+            logger.warning(f"[{name}] [S1] ATR=0; skipping {sig}")
+            return
+
+        mark = ig.get_mark_price(epic) if not bot.paper else (bot._paper.last_mark if bot._paper else 0.0)
+        if not mark or mark <= 0:
+            # Paper mode without last_mark seen yet — fall back to daily close (no real price feed)
+            logger.warning(f"[{name}] [S1] mark price unavailable; skipping")
+            return
+
+        side = sig
+        sl  = compute_s1_sl_atr(side, mark, result["box_high"], result["box_low"], atr, instrument)
+        tp1 = compute_s1_tp_atr(side, mark, atr, instrument)
+        dec = instrument["price_decimals"]
+        sl  = round(sl, dec)
+        tp1 = round(tp1, dec)
+        contract_size = instrument["s1_contract_size"]
+        trade_id = uuid.uuid4().hex[:8]
+
+        try:
+            if bot.paper:
+                trade = bot._paper.open(side, mark, sl, tp1, tp1, contract_size, trade_id,
+                                        result["box_low"], result["box_high"])
+                bot._positions[name] = bot._paper.position
+                bot._positions[name]["strategy"] = "S1"
+                bot._positions[name]["swing_trail_ref"] = None
+                bot._positions[name]["box_low"]  = result["box_low"]
+                bot._positions[name]["box_high"] = result["box_high"]
+            else:
+                if side == "LONG":
+                    trade = ig.open_long(epic, sl, tp1, tp1, currency=instrument["currency"])
+                else:
+                    trade = ig.open_short(epic, sl, tp1, tp1, currency=instrument["currency"])
+                bot._positions[name] = {
+                    "side": side, "deal_id": trade["deal_id"], "entry": trade["entry"],
+                    "sl": sl, "tp1": tp1, "tp": tp1,
+                    "initial_qty": contract_size, "current_qty": contract_size,
+                    "partial_done": False,
+                    "trade_id": trade_id, "opened_at": _now_et().isoformat(),
+                    "box_low": result["box_low"], "box_high": result["box_high"],
+                    "strategy": "S1",
+                    "swing_trail_ref": None,
+                }
+        except Exception as e:
+            logger.error(f"[{name}] [S1] Failed to open {side}: {e}")
+            return
+
+        entry = bot._positions[name]["entry"]
+        _log_trade(f"S1_{side}", {
+            "symbol": name, "trade_id": trade_id, "side": side,
+            "qty": contract_size, "entry": round(entry, dec),
+            "sl": sl, "tp": tp1,
+            "snap_strategy": "S1",
+            "snap_s1_rsi": result["rsi"], "snap_s1_adx": result["adx"],
+            "snap_s1_box_high": result["box_high"], "snap_s1_box_low": result["box_low"],
+            "snap_s1_atr": atr,
+            "snap_s1_sr_clearance_atr": instrument.get("_last_sr_clearance_long_atr"
+                                                       if side == "LONG"
+                                                       else "_last_sr_clearance_short_atr", 0.0),
+            "mode": "paper" if bot.paper else "live",
+        })
+        bot._save_state()
+        logger.info(
+            f"[{name}] [S1] {side} opened @ {entry:.5f} | SL={sl:.5f} | TP1={tp1:.5f} | trade_id={trade_id}"
+        )
+
+    def monitor_position(self, bot, instrument: dict, pos: dict) -> None:
+        epic = instrument["epic"]
+        mark = (ig.get_mark_price(epic) if not bot.paper
+                else (bot._paper.last_mark if bot._paper and bot._paper.last_mark else pos.get("entry", 0.0)))
+        m3_df = bot._candle_cache.get((epic, "3m"))
+        if m3_df is not None and not m3_df.empty:
+            try:
+                maybe_trail_sl_ig(instrument, pos, ig, m3_df, mark)
+            except Exception as e:
+                logger.error(f"[{instrument['display_name']}] [S1] swing trail error: {e}")
+        bot._maybe_log_partial_s1(instrument, pos, mark)
+
+    def update_scan_state(self, bot, instrument: dict, result: dict) -> None:
+        bot._update_scan_state_s1(instrument["display_name"], result)
+
+
+_S1_ADAPTER = _S1Adapter()
+
+
 # ── Main bot ─────────────────────────────────────────────────── #
 
 class IGBot:
@@ -443,6 +742,17 @@ class IGBot:
         self._scan_signals = raw.get("scan_signals", {})
         self._scan_log     = raw.get("scan_log", [])
 
+        # T10: migrate old flat scan_signals[name] (pre-S1) → strategy-keyed {"S5": old}.
+        # An entry is "flat" when it's a dict with 'signal' at the top level (S5 fields)
+        # rather than the new {"S5": ..., "S1": ...} shape.
+        try:
+            for name, entry in list(self._scan_signals.items()):
+                if isinstance(entry, dict) and "signal" in entry and "S5" not in entry and "S1" not in entry:
+                    self._scan_signals[name] = {"S5": entry}
+        except Exception as e:
+            logger.warning(f"scan_signals migration failed; starting fresh: {e}")
+            self._scan_signals = {}
+
     def _get_candles(self, interval: str, limit: int, epic: str | None = None) -> pd.DataFrame:
         """
         Return candles from in-memory cache.  Only calls IG's price history API
@@ -463,7 +773,12 @@ class IGBot:
             current = getattr(self, "_current_instrument", None)
             epic = current["epic"] if current else config_ig.INSTRUMENTS[0]["epic"]
         cache_key   = (epic, interval)
-        interval_ms = {"1D": 86_400_000, "1H": 3_600_000, "15m": 900_000}.get(interval, 60_000)
+        interval_ms = {
+            "1D":  86_400_000,
+            "1H":  3_600_000,
+            "15m": 900_000,
+            "3m":  180_000,
+        }.get(interval, 60_000)
         now_ms      = int(time.time() * 1000)
         cached      = self._candle_cache.get(cache_key)
 
@@ -551,7 +866,7 @@ class IGBot:
         bos_ok = "BOS \u2705" in reason or signal in ("PENDING_LONG", "PENDING_SHORT")
         ob_ok  = "OB \u2705"  in reason or signal in ("PENDING_LONG", "PENDING_SHORT")
 
-        self._scan_signals[instrument] = {
+        s5_entry = {
             "signal":        signal,
             "reason":        reason,
             "ema_ok":        ema_ok,
@@ -564,6 +879,15 @@ class IGBot:
             "tp":            tp if tp else None,
             "updated_at":    datetime.now(timezone.utc).isoformat(),
         }
+        # T10: strategy-keyed shape. Migrate any in-place flat entry first.
+        existing = self._scan_signals.get(instrument)
+        if isinstance(existing, dict) and "signal" in existing and "S5" not in existing and "S1" not in existing:
+            self._scan_signals[instrument] = {"S5": existing}
+        elif not isinstance(existing, dict):
+            self._scan_signals[instrument] = {}
+        else:
+            self._scan_signals.setdefault(instrument, {})
+        self._scan_signals[instrument]["S5"] = s5_entry
 
         self._scan_log.insert(0, {
             "ts":         now_et.strftime("%H:%M"),
@@ -571,6 +895,72 @@ class IGBot:
             "message":    reason,
         })
         self._scan_log = self._scan_log[:20]
+
+    def _update_scan_state_s1(self, instrument_name: str, result: dict) -> None:
+        """S1 scan state — written each tick after _S1_ADAPTER.evaluate.
+        Writes under self._scan_signals[name]["S1"]. T10 harmonized the shape."""
+        now_et = datetime.now(ET)
+        sig = result.get("signal", "HOLD")
+        entry = {
+            "signal":         sig,
+            "reason":         result.get("reason", ""),
+            "rsi":            result.get("rsi"),
+            "adx":            result.get("adx"),
+            "daily_rsi":      result.get("daily_rsi"),
+            "box_high":       result.get("box_high"),
+            "box_low":        result.get("box_low"),
+            "atr":            result.get("atr"),
+            "updated_at":     datetime.now(timezone.utc).isoformat(),
+            "strategy":       "S1",
+        }
+        # Migrate any in-place flat entry first.
+        existing = self._scan_signals.get(instrument_name)
+        if isinstance(existing, dict) and "signal" in existing and "S5" not in existing and "S1" not in existing:
+            self._scan_signals[instrument_name] = {"S5": existing}
+        elif not isinstance(existing, dict):
+            self._scan_signals[instrument_name] = {}
+        else:
+            self._scan_signals.setdefault(instrument_name, {})
+        self._scan_signals[instrument_name]["S1"] = entry
+
+        self._scan_log.insert(0, {
+            "ts":         now_et.strftime("%H:%M"),
+            "instrument": instrument_name,
+            "message":    result.get("reason", ""),
+        })
+        self._scan_log = self._scan_log[:20]
+
+    def _maybe_log_partial_s1(self, instrument: dict, pos: dict, mark: float) -> None:
+        """Log S1_PARTIAL when live qty drops below 75% of initial qty (TP1 hit) and not yet logged.
+
+        Mirrors the S5 partial-TP convention: detect via qty drop rather than price level
+        so it works for both paper-mode synthetic fills and live broker fills.
+        """
+        if pos.get("partial_done"):
+            return
+        try:
+            current = float(pos.get("current_qty", 0))
+            initial = float(pos.get("initial_qty", 0))
+        except (TypeError, ValueError):
+            return
+        if initial <= 0 or current >= initial * 0.75:
+            return
+
+        dec = instrument.get("price_decimals", 2)
+        _log_trade("S1_PARTIAL", {
+            "symbol":        instrument["display_name"],
+            "trade_id":      pos.get("trade_id", ""),
+            "side":          pos["side"],
+            "qty":           round(initial - current, 4),
+            "entry":         pos.get("entry", 0.0),
+            "sl":            pos.get("sl", 0.0),
+            "exit_price":    round(mark, dec) if mark else None,
+            "exit_reason":   "PARTIAL_TP",
+            "snap_strategy": "S1",
+            "mode":          "paper" if self.paper else "live",
+        })
+        pos["partial_done"] = True
+        self._save_state()
 
     def _on_stream_event(self, event_type: str, deal_id: str, fill_price: float) -> None:
         """
@@ -623,6 +1013,27 @@ class IGBot:
         self.running = False
         self._stop_event.set()
 
+    # ── Strategy dispatcher helpers ──────────────────────────── #
+
+    def _enabled_strategies(self, instrument: dict) -> list:
+        """Return strategy adapters enabled on this instrument, in dispatch order."""
+        out = []
+        for adapter in (_S5_ADAPTER, _S1_ADAPTER):
+            if instrument.get(adapter.enabled_key, False):
+                out.append(adapter)
+        return out
+
+    def _adapter_for(self, strategy_name: str):
+        """Return the adapter matching the pos['strategy'] tag.
+
+        Falls back to _S5_ADAPTER for unknown / missing tags (legacy positions
+        written before T11 added the 'strategy' field).
+        """
+        for adapter in (_S5_ADAPTER, _S1_ADAPTER):
+            if adapter.name == strategy_name:
+                return adapter
+        return _S5_ADAPTER
+
     # ── Main tick ─────────────────────────────────────────────── #
 
     def _tick(self) -> None:
@@ -672,9 +1083,10 @@ class IGBot:
             self._session_end_close(instrument)
             return
 
-        # 2. Monitor open position (always, even outside entry window)
+        # 2. Monitor open position (dispatched by pos['strategy'] tag; legacy positions fall back to S5)
         if pos:
-            self._monitor_position(instrument)
+            adapter = self._adapter_for(pos.get("strategy", "S5"))
+            adapter.monitor_position(self, instrument, pos)
 
         # 3. Outside session window or weekend → no new entries
         if not _in_trading_window(now):
@@ -694,84 +1106,18 @@ class IGBot:
                 self._check_pending_order(mark)
             return
 
-        # 5. Fetch candles (cached — only hits API when new candle has formed)
-        # _get_candles resolves epic from self._current_instrument when not supplied.
-        daily_df = self._get_candles("1D",  instrument["daily_limit"])
-        htf_df   = self._get_candles("1H",  instrument["htf_limit"])
-        m15_df   = self._get_candles("15m", instrument["m15_limit"])
-
-        if daily_df.empty or htf_df.empty or m15_df.empty:
-            logger.warning(f"[{name}] Candle fetch returned empty — skipping tick")
-            return
-
-        # 6. Derive allowed_direction from daily EMA waterfall (must match strategy.py logic)
-        ema_fast = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_fast"]).iloc[-1])
-        ema_med  = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_med"]).iloc[-1])
-        ema_slow = float(calculate_ema(daily_df["close"].astype(float), instrument["s5_daily_ema_slow"]).iloc[-1])
-
-        ema_bull = ema_fast > ema_med > ema_slow
-        ema_bear = ema_slow > ema_med > ema_fast
-
-        if ema_bull:
-            allowed_direction = "BULLISH"
-        elif ema_bear:
-            allowed_direction = "BEARISH"
-        else:
-            allowed_direction = "BULLISH" if ema_fast > ema_slow else "BEARISH"
-
-        # 7. Evaluate S5
-        epic = instrument["epic"]
-        sig, trigger, sl, tp, ob_low, ob_high, reason = evaluate_s5(
-            epic, daily_df, htf_df, m15_df, allowed_direction, cfg=instrument
-        )
-        logger.info(f"[{name}] [S5] {reason}")
-
-        # Update scan state so dashboard always shows latest signal — save regardless of signal
-        self._update_scan_state(name, sig, reason, ob_low, ob_high, trigger, sl, tp)
-        self._save_state()
-
-        if sig not in ("PENDING_LONG", "PENDING_SHORT"):
-            return
-
-        # 8. Get mark price for limit order placement
-        mark = ig.get_mark_price(epic)
-        if mark <= 0:
-            return
-
-        # 9. Guard: reject if mark has already crossed the trigger level
-        side = "LONG" if sig == "PENDING_LONG" else "SHORT"
-        if not _entry_in_window(side, mark, trigger, instrument):
-            logger.info(f"[{name}] [S5] Skipping limit order — mark {mark:.1f} invalid vs trigger {trigger:.1f}")
-            return
-
-        # 10. Place limit working order
-        sl   = round(sl, 1)
-        tp   = round(tp, 1) if tp else round(trigger + abs(trigger - sl) if side == "LONG" else trigger - abs(trigger - sl), 1)
-        contract_size = instrument["contract_size"]
-        try:
-            if side == "LONG":
-                deal_id = ig.place_limit_long(epic, trigger, sl, tp, contract_size, currency=instrument["currency"])
-            else:
-                deal_id = ig.place_limit_short(epic, trigger, sl, tp, contract_size, currency=instrument["currency"])
-        except Exception as e:
-            logger.error(f"[{name}] [S5] Failed to place limit {side}: {e}")
-            return
-        self._pending_orders[name] = {
-            "deal_id":  deal_id,
-            "side":     side,
-            "ob_low":   ob_low,
-            "ob_high":  ob_high,
-            "sl":       sl,
-            "tp":       tp,
-            "trigger":  trigger,
-            "size":     contract_size,
-            "expires":  time.time() + 4 * 3600,
-        }
-        self._save_state()
-        logger.info(
-            f"[{name}] [S5] {side} limit order placed | trigger={trigger:.1f} | "
-            f"SL={sl:.1f} | TP={tp:.1f} | deal_id={deal_id}"
-        )
+        # 5. Walk enabled strategies in CONFIG order — first non-HOLD wins.
+        any_evaluated = False
+        for adapter in self._enabled_strategies(instrument):
+            result = adapter.evaluate(self, instrument)
+            adapter.update_scan_state(self, instrument, result)
+            any_evaluated = True
+            if result.get("signal", "HOLD") not in ("HOLD",):
+                adapter.handle_signal(self, instrument, result)
+                return
+        # No non-HOLD signal: scan state already persisted by update_scan_state for each adapter
+        if any_evaluated:
+            self._save_state()
 
     # ── Open trade ─────────────────────────────────────────────── #
 
@@ -785,10 +1131,10 @@ class IGBot:
             logger.warning(f"[{name}] [S5] risk=0, skipping")
             return
 
-        tp1 = round(mark + risk if sig == "LONG" else mark - risk, 1)
-        # Round SL/TP to nearest whole point (US30 convention)
-        sl  = round(sl, 1)
-        tp  = round(tp, 1) if tp else tp1
+        dec = instrument["price_decimals"]
+        tp1 = round(mark + risk if sig == "LONG" else mark - risk, dec)
+        sl  = round(sl, dec)
+        tp  = round(tp, dec) if tp else tp1
 
         trade_id   = uuid.uuid4().hex[:8]
 
@@ -797,6 +1143,7 @@ class IGBot:
                 trade = self._paper.open(sig, mark, sl, tp1, tp,
                                          contract_size, trade_id, ob_low, ob_high)
                 self._positions[name] = self._paper.position
+                self._positions[name]["strategy"] = "S5"
             else:
                 epic = instrument["epic"]
                 if sig == "LONG":
@@ -817,6 +1164,7 @@ class IGBot:
                     "opened_at":    _now_et().isoformat(),
                     "ob_low":       ob_low,
                     "ob_high":      ob_high,
+                    "strategy":     "S5",
                 }
                 self._save_state()
         except Exception as e:
@@ -832,15 +1180,16 @@ class IGBot:
             "trade_id":           trade_id,
             "side":               sig,
             "qty":                contract_size,
-            "entry":              round(entry, 1),
+            "entry":              round(entry, dec),
             "sl":                 sl,
             "tp":                 tp,
-            "snap_entry_trigger": round(trigger, 1),
+            "snap_entry_trigger": round(trigger, dec),
             "snap_sl":            sl,
             "snap_rr":            rr,
-            "snap_s5_ob_low":     round(ob_low, 1),
-            "snap_s5_ob_high":    round(ob_high, 1),
+            "snap_s5_ob_low":     round(ob_low, dec),
+            "snap_s5_ob_high":    round(ob_high, dec),
             "snap_s5_tp":         tp,
+            "snap_strategy":      "S5",
         }, paper=self.paper)
 
         logger.info(
@@ -971,7 +1320,7 @@ class IGBot:
         # Apply same exec buffer as Bitget (0.5% slippage for non-guaranteed stops)
         sl_exec = sl * 0.995 if side == "LONG" else sl * 1.005
         risk = abs(fill_price - sl_exec)
-        tp1  = round(fill_price + risk if side == "LONG" else fill_price - risk, 1)
+        tp1  = round(fill_price + risk if side == "LONG" else fill_price - risk, instrument["price_decimals"])
 
         trade_id = uuid.uuid4().hex[:8]
 
@@ -979,6 +1328,7 @@ class IGBot:
             trade = self._paper.open(side, fill_price, sl, tp1, tp,
                                      size, trade_id, ob_low, ob_high)
             self._positions[name] = self._paper.position
+            self._positions[name]["strategy"] = "S5"
         else:
             self._positions[name] = {
                 "side":         side,
@@ -994,25 +1344,28 @@ class IGBot:
                 "opened_at":    _now_et().isoformat(),
                 "ob_low":       ob_low,
                 "ob_high":      ob_high,
+                "strategy":     "S5",
             }
             self._save_state()
 
         rr = round(abs(tp - fill_price) / risk, 2) if risk > 0 else 0
 
+        dec = instrument["price_decimals"]
         _log_trade(f"S5_{side}", {
             "symbol":             name,
             "trade_id":           trade_id,
             "side":               side,
             "qty":                size,
-            "entry":              round(fill_price, 1),
+            "entry":              round(fill_price, dec),
             "sl":                 sl,
             "tp":                 tp,
-            "snap_entry_trigger": round(trigger, 1),
+            "snap_entry_trigger": round(trigger, dec),
             "snap_sl":            sl,
             "snap_rr":            rr,
-            "snap_s5_ob_low":     round(ob_low, 1),
-            "snap_s5_ob_high":    round(ob_high, 1),
+            "snap_s5_ob_low":     round(ob_low, dec),
+            "snap_s5_ob_high":    round(ob_high, dec),
             "snap_s5_tp":         tp,
+            "snap_strategy":      "S5",
         }, paper=self.paper)
 
         logger.info(
@@ -1087,6 +1440,7 @@ class IGBot:
         if self.paper:
             partial_pnl = self._paper.do_partial(mark, instrument["partial_size"], instrument["point_value"])
             self._positions[name] = self._paper.position
+            self._positions[name].setdefault("strategy", "S5")   # preserve tag through paper-state swap
         else:
             ok = ig.partial_close(pos["deal_id"], instrument["partial_size"], close_dir)
             if not ok:
@@ -1094,7 +1448,7 @@ class IGBot:
                 return
             partial_pnl = _calc_partial_pnl(pos, mark, instrument)
             # Move SL to breakeven
-            ig.update_sl(pos["deal_id"], pos["entry"])
+            ig.update_sl(pos["deal_id"], pos["entry"], epic=instrument["epic"])
             pos["sl"]           = pos["entry"]
             pos["partial_done"] = True
             pos["current_qty"]  = pos["initial_qty"] - instrument["partial_size"]
@@ -1105,10 +1459,11 @@ class IGBot:
             "trade_id":    pos["trade_id"],
             "side":        pos["side"],
             "qty":         instrument["partial_size"],
-            "entry":       round(pos["entry"], 1),
+            "entry":       round(pos["entry"], instrument["price_decimals"]),
             "pnl":         round(partial_pnl, 2),
             "result":      "WIN" if partial_pnl >= 0 else "LOSS",
             "exit_reason": "PARTIAL_TP",
+            "snap_strategy": "S5",
         }, paper=self.paper)
 
         logger.info(
@@ -1130,13 +1485,14 @@ class IGBot:
             if cs_df.empty or len(cs_df) < 3:
                 return
 
+            dec = instrument["price_decimals"]
             if pos["side"] == "LONG":
                 raw      = find_swing_low_target(cs_df, mark, lookback=instrument["s5_swing_lookback"])
-                new_sl   = round(raw * (1 - instrument["s5_sl_buffer_pct"]), 1) if raw else None
+                new_sl   = round(raw * (1 - instrument["s5_sl_buffer_pct"]), dec) if raw else None
                 improves = new_sl is not None and new_sl > pos["sl"]
             else:
                 raw      = find_swing_high_target(cs_df, mark, lookback=instrument["s5_swing_lookback"])
-                new_sl   = round(raw * (1 + instrument["s5_sl_buffer_pct"]), 1) if raw else None
+                new_sl   = round(raw * (1 + instrument["s5_sl_buffer_pct"]), dec) if raw else None
                 improves = new_sl is not None and new_sl < pos["sl"]
 
             if not improves:
@@ -1146,7 +1502,7 @@ class IGBot:
                 self._paper.update_sl(new_sl)
                 self._positions[name]["sl"] = new_sl
             else:
-                if ig.update_sl(pos["deal_id"], new_sl):
+                if ig.update_sl(pos["deal_id"], new_sl, epic=instrument["epic"]):
                     pos["sl"] = new_sl
                     self._save_state()
 
@@ -1188,10 +1544,11 @@ class IGBot:
             "trade_id":    pos["trade_id"],
             "side":        pos["side"],
             "qty":         pos["current_qty"],
-            "entry":       round(pos["entry"], 1),
+            "entry":       round(pos["entry"], instrument["price_decimals"]),
             "pnl":         round(realized, 2),
             "result":      result,
             "exit_reason": exit_reason,
+            "snap_strategy": "S5",
         }, paper=self.paper)
 
         logger.info(
@@ -1268,10 +1625,11 @@ class IGBot:
             "trade_id":    pos["trade_id"],
             "side":        pos["side"],
             "qty":         pos["current_qty"],
-            "entry":       round(pos["entry"], 1),
+            "entry":       round(pos["entry"], instrument["price_decimals"]),
             "pnl":         round(realized, 2),
             "result":      result,
             "exit_reason": "SESSION_END",
+            "snap_strategy": "S5",
         }, paper=self.paper)
 
         logger.info(

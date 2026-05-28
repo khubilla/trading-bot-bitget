@@ -13,7 +13,7 @@ S2_ENABLED = True
 # Scale-in: when True, initial entry is 50% size and the remaining 50% is
 # added 1 hour later if the entry window + sentiment still hold. When False,
 # initial entry uses the full S2_TRADE_SIZE_PCT and no scale-in is queued.
-S2_SCALE_IN_ENABLED = True
+S2_SCALE_IN_ENABLED = False
 
 # ── Big Candle Detection ─────────────────────────────────── #
 S2_BIG_CANDLE_BODY_PCT  = 0.20   # Min 20% body size to qualify as momentum candle

@@ -23,7 +23,7 @@
 
 ## 1. Architecture Overview
 
-### Three Independent Bots
+### Four Independent Bots
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -62,6 +62,15 @@
 │  delegates to bot.MTFBot().run() — no logic duplication.    │
 │  Output: bybit_state.json, bybit_trades.csv, bybit_bot.log │
 └─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│              BINANCE BOT (binance_bot.py)                  │
+│  Crypto USDT-M Futures · S1-S7 strategies                  │
+│  Thin entry point: installs sys.modules aliases then        │
+│  delegates to bot.MTFBot().run() — no logic duplication.    │
+│  Output: binance_state.json, binance_trades.csv,           │
+│          binance_bot.log                                    │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ### Shared Code Contract
@@ -69,9 +78,10 @@
 **Files shared between bots:**
 - `indicators.py` — pure numeric indicators (EMA, RSI, ADX, stoch, MACD, ATR). No config deps.
 - `tools.py` — generic tool helpers (swing highs/lows, order blocks, FVG, support/resistance, HTF check, candle geometry, nearest daily S/R clearance). No config deps, no strategy rules.
-- `strategies/s1.py` — evaluate_s1 (called by both Bitget and IG via `cfg=` param); IG-specific helpers: `compute_s1_sl_atr`, `compute_s1_tp_atr`, `maybe_trail_sl_ig`
-- `strategies/s5.py` — evaluate_s5 (called by both Bitget and IG)
-- `config_s5.py` — S5 parameters (Bitget only; IG now uses per-instrument CONFIG dicts)
+- `strategies/s1.py` — evaluate_s1 (called by Bitget, Bybit, Binance, and IG via `cfg=` param); IG-specific helpers: `compute_s1_sl_atr`, `compute_s1_tp_atr`, `maybe_trail_sl_ig`
+- `strategies/s5.py` — evaluate_s5 (called by Bitget, Bybit, Binance, and IG)
+- `strategies/s2.py`, `s3.py`, `s4.py`, `s6.py`, `s7.py` — used by Bitget, Bybit, and Binance via sys.modules aliasing (`bitget` → exchange module, `trader` → exchange trader)
+- `config_s5.py` — S5 parameters (Bitget; Bybit/Binance use copies; IG uses per-instrument CONFIG dicts)
 - `paper_trader.py` — simulation engine (used by Bitget bot only in paper mode)
 
 **Bot-specific strategy modules (Bitget only):**
@@ -113,17 +123,18 @@ The old monolithic `strategy.py` has been split into:
 - `tools.py` — generic structure/pattern helpers (swing targets, order blocks, FVG, support/resistance, HTF check, candle geometry `body_pct`/`upper_wick`/`body_size`). No config deps. Key new addition: `nearest_daily_sr_clearance(daily_df, direction, lookback=60, swing_window=3)` — returns the distance from current price to the nearest daily S/R level in ATR-multiples; consumed by `strategies/s1.py` (IG path `evaluate_s1`) and `backtest_ig.py`.
 - `strategies/s1.py`..`strategies/s7.py` — one file per strategy. Each file owns its entry/exit rules and imports only from `indicators.py`, `tools.py`, and its own `config_sN.py`. Strategies do NOT import from each other. (Exception: `strategies/s7.py` imports `_place_partial_trail_exits` from `strategies/s4.py` to reuse the shared exit primitive.)
 
-**Shared by all three bots (Bitget, IG, Bybit):**
+**Shared by all four bots (Bitget, IG, Bybit, Binance):**
 - `indicators.py`, `tools.py`, `strategies/s1.py`, `strategies/s5.py`
 
-**Shared by Bitget AND Bybit (via sys.modules aliasing — see § 10.5):**
+**Shared by Bitget, Bybit, AND Binance (via sys.modules aliasing — see § 10.5):**
 - `strategies/s1.py`, `s2.py`, `s3.py`, `s4.py`, `s6.py`, `s7.py`
-- `bot.py` — Bybit reuses the entire main loop; `bybit_bot.py` is a thin entry point that aliases `bitget → bybit`, `trader → bybit_trader`, `scanner → bybit_scanner`, `config_sN → config_bybit_sN`, `config → config_bybit` before importing `bot`.
+- `bot.py` — Bybit and Binance reuse the entire main loop; both `bybit_bot.py` and `binance_bot.py` are thin entry points that alias `bitget → bybit`/`binance`, `trader → bybit_trader`/`binance_trader`, `scanner → bybit_scanner`/`binance_scanner`, `config_sN → config_bybit_sN`/`config_binance_sN`, `config → config_bybit`/`config_binance` before importing `bot`.
 
 **Used by:**
-- `bot.py` (Bitget bot, also reused by Bybit via aliasing) — imports evaluate_s1..evaluate_s7 from respective strategy modules
+- `bot.py` (Bitget bot, also reused by Bybit and Binance via aliasing) — imports evaluate_s1..evaluate_s7 from respective strategy modules
 - `ig_bot.py` (IG bot) — imports evaluate_s5 from `strategies.s5`; imports evaluate_s1 (via `_S1Adapter`) from `strategies.s1`
 - `bybit_bot.py` (Bybit bot) — installs sys.modules aliases then runs `bot.MTFBot().run()`
+- `binance_bot.py` (Binance bot) — installs sys.modules aliases then runs `bot.MTFBot().run()`
 - `backtest.py` — imports indicators + `strategies.s1.detect_consolidation`
 - `backtest_ig.py` — imports evaluate_s5 from `strategies.s5`; imports evaluate_s1 from `strategies.s1` when `--strategy` is `s1` or `both`
 - `startup_recovery.py` — imports evaluate_s5 from `strategies.s5`
@@ -1753,6 +1764,29 @@ called *after* signal returns:
 
 The 15% daily S/R clearance gate (Bitget) becomes the ATR-multiple gate
 (IG: `s1_sr_clearance_atr_mult × daily_ATR`) — same intent, different units.
+
+### 10.8 Binance TP/SL is NOT atomic on entry
+
+Unlike Bybit (where `stopLoss` / `takeProfit` fields on `/v5/order/create`
+attach the exits atomically), Binance USDT-M Futures requires SEPARATE orders:
+
+- `STOP_MARKET` with `closePosition=true` for SL
+- `TAKE_PROFIT_MARKET` with `closePosition=true` for TP
+
+`binance.place_market_order()` handles this by issuing the two follow-up
+orders after the entry market order returns. There is a brief race window
+between entry fill and SL/TP attachment — acceptable for swing strategies
+(seconds matter, not milliseconds), NOT for HFT.
+
+`closePosition=true` means the orders auto-resize with the position, so
+partial closes do not require manual qty tracking on the SL/TP side.
+
+### 10.9 Binance trailing stop callbackRate is clamped to [0.1, 5.0]
+
+Binance's `TRAILING_STOP_MARKET` `callbackRate` field is bounded to the
+range 0.1% — 5.0% inclusive. Strategies that pass a higher trailing range
+(e.g. S2's 10%) are silently clamped to 5.0% on Binance. `binance.place_moving_plan`
+logs a warning when this happens. The Bybit/Bitget paths have no such clamp.
 
 ---
 

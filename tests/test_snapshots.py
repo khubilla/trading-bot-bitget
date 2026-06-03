@@ -174,8 +174,9 @@ def test_do_scale_in_passes_new_trail_trigger_to_refresh(monkeypatch):
 
     captured = {}
 
-    def fake_refresh(symbol, hold_side, new_trail_trigger=0):
+    def fake_refresh(symbol, hold_side, new_trail_trigger=0, sl_price=0):
         captured["new_trail_trigger"] = new_trail_trigger
+        captured["sl_price"] = sl_price
         return True
 
     monkeypatch.setattr(bot.tr, "refresh_plan_exits", fake_refresh)
@@ -224,8 +225,9 @@ def test_do_scale_in_s4_short_passes_new_trail_trigger(monkeypatch):
 
     captured = {}
 
-    def fake_refresh(symbol, hold_side, new_trail_trigger=0):
+    def fake_refresh(symbol, hold_side, new_trail_trigger=0, sl_price=0):
         captured["new_trail_trigger"] = new_trail_trigger
+        captured["sl_price"] = sl_price
         return True
 
     monkeypatch.setattr(bot.tr, "refresh_plan_exits", fake_refresh)

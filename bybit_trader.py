@@ -52,6 +52,10 @@ def get_mark_price(symbol: str) -> float:
     return bb.get_mark_price(symbol)
 
 
+def get_funding_rate(symbol: str) -> float | None:
+    return bb.get_funding_rate(symbol)
+
+
 # ── Account passthroughs ────────────────────────────────────────── #
 
 def get_usdt_balance() -> float:
@@ -113,18 +117,22 @@ def cancel_all_orders(symbol: str):
     bb.cancel_all_orders(symbol)
 
 
-def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0) -> bool:
+def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0,
+                       sl_price: float = 0) -> bool:
     """Resize partial-TP + trailing stop after scale-in. Delegates to bybit.refresh_plan_exits.
 
-    Note: on Bybit, the trailing-stop placement inside this function clears the
-    position's stopLoss. The caller (bot._do_scale_in) must call
-    update_position_sl again after this returns to re-establish the SL.
+    On Bybit, the trailing-stop placement inside this function does a Full-mode
+    /v5/position/trading-stop REPLACE that clears the position's stopLoss. Pass
+    `sl_price` (the recomputed post-scale-in SL) so it is re-asserted ATOMICALLY
+    in the same body as the trailing stop — race-free. (Previously the caller had
+    to call update_position_sl again afterward and relied on a best-effort
+    read-back that could race and leave the position with no SL.)
     """
     if DRY_RUN:
         logger.info(f"[Bybit][DRY_RUN][{symbol}] refresh_plan_exits hold={hold_side} "
-                    f"trigger={new_trail_trigger}")
+                    f"trigger={new_trail_trigger} sl_price={sl_price}")
         return True
-    return bb.refresh_plan_exits(symbol, hold_side, new_trail_trigger)
+    return bb.refresh_plan_exits(symbol, hold_side, new_trail_trigger, sl_price=sl_price)
 
 
 # ── Strategy exit dispatchers ───────────────────────────────────── #

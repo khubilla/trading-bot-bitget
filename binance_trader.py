@@ -50,6 +50,10 @@ def get_mark_price(symbol: str) -> float:
     return bn.get_mark_price(symbol)
 
 
+def get_funding_rate(symbol: str) -> float | None:
+    return bn.get_funding_rate(symbol)
+
+
 # ── Account passthroughs ────────────────────────────────────────── #
 
 def get_usdt_balance() -> float:
@@ -111,13 +115,19 @@ def cancel_all_orders(symbol: str):
     bn.cancel_all_orders(symbol)
 
 
-def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0) -> bool:
-    """Resize partial-TP + trailing stop after scale-in. Delegates to binance.refresh_plan_exits."""
+def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0,
+                       sl_price: float = 0) -> bool:
+    """Resize partial-TP + trailing stop after scale-in. Delegates to binance.refresh_plan_exits.
+
+    sl_price: accepted for signature parity with bybit_trader.refresh_plan_exits
+    (alias swap requires matching signatures). Binance SL is a standalone
+    STOP_MARKET order, so it is forwarded but ignored downstream.
+    """
     if DRY_RUN:
         logger.info(f"[Binance][DRY_RUN][{symbol}] refresh_plan_exits hold={hold_side} "
-                    f"trigger={new_trail_trigger}")
+                    f"trigger={new_trail_trigger} sl_price={sl_price}")
         return True
-    return bn.refresh_plan_exits(symbol, hold_side, new_trail_trigger)
+    return bn.refresh_plan_exits(symbol, hold_side, new_trail_trigger, sl_price=sl_price)
 
 
 # ── Strategy exit dispatchers ───────────────────────────────────── #

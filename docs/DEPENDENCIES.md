@@ -385,6 +385,33 @@ ls data/snapshots/ 2>/dev/null | head -5 || echo "No snapshots yet"
 
 ---
 
+### 2.3 regime.py (shared, all bots)
+
+**Purpose:** Compute market-regime context (`snap_*`) recorded at trade entry. Companion to
+trade_dna.py. Pure helpers; every public function returns `{}`/`""` on error so a trade is never
+blocked.
+
+**Public API:**
+- `time_fields(iso_ts) -> dict` → snap_session, snap_hour_ph, snap_dow (called in `bot._log_trade`).
+- `btc_regime(btc_change) -> str` → RISK_ON / FLAT / RISK_OFF / "".
+- `volatility_fields(ltf_df) -> dict` → snap_atr_pct, snap_atr_pctile, snap_vol_vs_avg
+  (reuses `indicators.calculate_atr`).
+
+**Consumers:** `bot.py` `MTFBot._log_regime(symbol, ltf_df, trade)` — calls all three helpers,
+reads `self.sentiment.btc_change`, calls `tr.get_funding_rate`, and writes one row per entry to the
+**sidecar** `*_regime.csv` (§4.5). trades.csv is NOT touched. No optimize/analytics consumer yet —
+the sidecar is recording-only until a future join is built.
+
+**Cross-bot contract — `SentimentResult.btc_change`:** the dataclass is **duplicated in all three
+scanners** (`scanner.py`, `bybit_scanner.py`, `binance_scanner.py`). The `btc_change: float = 0.0`
+field must exist in all three or `MTFBot._regime_fields` reads blank on whichever bot lacks it.
+
+**Cross-bot contract — funding:** `get_funding_rate(symbol) -> float | None` exists in
+`trader.py`/`bybit_trader.py`/`binance_trader.py` (delegating to `bitget`/`bybit`/`binance`).
+`paper_trader.py` has no such function — `_regime_fields` guards with `getattr` and records blank.
+
+---
+
 ## 3. Bot-Specific Files
 
 [To be populated in Task 7]
@@ -578,20 +605,9 @@ python -c "import json; s=json.load(open('state_paper.json')); ps=s['pair_states
 - `dashboard.py` line 71: Injects CSV history into state (CSV is authoritative source)
 - `optimize.py` line 229: `csv_path.replace("trades.csv", "trades_paper.csv")` — parameter analysis
 
-**Columns (41 fields):**
-
-```csv
-timestamp,trade_id,action,symbol,side,qty,entry,sl,tp,
-box_low,box_high,leverage,margin,tpsl_set,strategy,
-snap_rsi,snap_adx,snap_htf,snap_coil,snap_box_range_pct,snap_sentiment,
-snap_daily_rsi,
-snap_entry_trigger,snap_sl,snap_rr,
-snap_rsi_peak,snap_spike_body_pct,snap_rsi_div,snap_rsi_div_str,
-snap_s5_ob_low,snap_s5_ob_high,snap_s5_tp,
-snap_s6_peak,snap_s6_drop_pct,snap_s6_rsi_at_peak,
-snap_sr_clearance_pct,
-result,pnl,pnl_pct,exit_reason,exit_price
-```
+**Columns (51 fields):** canonical order = `bot.py:_TRADE_FIELDS` (~line 141). Shared by the
+Bitget, Bybit, and Binance bots (the latter two write through `bot._log_trade` via `sys.modules`
+aliasing — see §10.5). IG has its own separate 28-col contract (§4.3).
 
 **Field categories:**
 - **Core trade data:** timestamp, trade_id, action, symbol, side, qty, entry, sl, tp
@@ -604,7 +620,12 @@ result,pnl,pnl_pct,exit_reason,exit_price
 - **S6 snapshot:** snap_s6_peak, snap_s6_drop_pct, snap_s6_rsi_at_peak
 - **S7 snapshot:** snap_box_top, snap_box_low_initial (box levels at entry time; same snap_rsi_peak, snap_spike_body_pct, snap_rsi_div, snap_rsi_div_str columns as S4)
 - **S/R snapshot:** snap_sr_clearance_pct
+- **Trade DNA trend fingerprint:** snap_trend_daily_*, snap_trend_h1_*, snap_trend_m15_*, snap_trend_m3_* (see trade_dna.py)
 - **Close data:** result, pnl, pnl_pct, exit_reason, exit_price
+
+> **Regime context is NOT in trades.csv.** Market-regime fields (session/volatility/BTC/funding)
+> are written to a separate sidecar file to keep this contract frozen — see §4.5. trades.csv is
+> unchanged by the regime-fields work.
 
 **Breaking scenarios:**
 
@@ -847,6 +868,31 @@ python -c "import json; print(json.load(open('ig_state.json')))"
 # Find dashboard reads
 grep -n "ig_state.json" dashboard.py
 ```
+
+---
+
+### 4.5 *_regime.csv (regime sidecar)
+
+**Purpose:** Append-only, entry-only market-regime context, kept SEPARATE from trades.csv so the
+trades.csv contract stays frozen. One row per trade entry, joined back to trades.csv on `trade_id`.
+
+**Path:** derived from the active trade log by `bot._regime_log_path()`:
+`trades.csv → trades_regime.csv`, `trades_paper.csv → trades_paper_regime.csv`,
+`bybit_trades.csv → bybit_trades_regime.csv`, etc. (Bitget/Bybit/Binance only; IG not covered.)
+
+**Write chain:** `bot.MTFBot._log_regime(symbol, ltf_df, trade)` (uses `_REGIME_FIELDS`, ~bot.py
+line 145) — called at each entry path right after `dna_snapshot`. Never raises; each field degrades
+to blank, and a sidecar failure cannot block a trade.
+
+**Columns (14):** `timestamp, trade_id, symbol, strategy, side,` then the regime `snap_*`:
+`snap_session, snap_hour_ph, snap_dow` (time-of-day, `regime.time_fields`);
+`snap_atr_pct, snap_atr_pctile, snap_vol_vs_avg` (`regime.volatility_fields`, whichever TF DF is in
+scope per strategy — S1 ltf, S3/S5 m15, S2/S4/S6/S7 daily, so comparable within a strategy not
+across); `snap_btc_change, snap_btc_regime` (`SentimentResult.btc_change`); `snap_funding_rate`
+(`tr.get_funding_rate`).
+
+**Readers:** none yet — recording-only until a future join/filter is built. Adding columns here is
+safe (new file, no frozen-header risk like §4.2).
 
 ---
 
@@ -1215,13 +1261,28 @@ silently deactivated the SL that had just been set. Confirmed by inspecting
 `/v5/order/history` for closed S4 trades — every `StopLoss` order showed
 `orderStatus=Deactivated`, and positions closed exclusively via TrailingStop.
 
-**Fix location:** `bybit.place_moving_plan` ([bybit.py](../bybit.py)) now
-reads the position's current `stopLoss` via `/v5/position/list` and re-sends
-it inside the trading-stop body. Self-contained — callers (`strategies/s*.py`
-exit primitives, `bybit.refresh_plan_exits`, `bot._do_scale_in`) require no
-changes. Adds one extra read per `place_moving_plan` call. Failure to read
-the SL is logged and the call proceeds (best-effort; no worse than pre-fix
-behaviour).
+**Fix location (two layers):**
+1. **Entry-time calls** — `bybit.place_moving_plan` reads the position's current
+   `stopLoss` via `/v5/position/list` and re-sends it inside the trading-stop
+   body. Best-effort; failure to read the SL is logged and the call proceeds.
+2. **Scale-in calls (race-free, added Jun 2026)** — the best-effort read-back
+   raced during scale-in (it ran microseconds after the SL write, so
+   `/v5/position/list` sometimes still reported no SL) and wiped the stop,
+   liquidating HUSDT (`5ddb3c71`, 2026-06-01, closed −104% at the 10× liq price
+   instead of the −50% SL). Now `bot._do_scale_in` passes the recomputed
+   `sl_price` into `tr.refresh_plan_exits(..., sl_price=new_sl)` →
+   `bybit.refresh_plan_exits` → `bybit.place_moving_plan(..., sl_price=new_sl)`,
+   which writes the SL **and** trailing stop in ONE atomic trading-stop body. No
+   read-back, no race. When `sl_price == 0` (entry-time path) the read-back
+   fallback in layer 1 still applies.
+
+**Signature note:** `sl_price` is an **optional** param (`= 0`) added in
+**alias-lockstep** to `refresh_plan_exits` in all of `trader.py`, `bitget.py`,
+`bybit.py`, `bybit_trader.py`, `binance.py`, `binance_trader.py`, and
+`backtest_engine.py`, plus `place_moving_plan` in `bitget.py`/`bybit.py`/
+`binance.py`. Only the Bybit path uses it; Bitget (separate position-level SL
+endpoint) and Binance (standalone STOP_MARKET order) accept-and-ignore it, so
+their behaviour is unchanged.
 
 **Bitget equivalent:** `bitget.place_moving_plan` posts to
 `/api/v2/mix/order/place-tpsl-order` — a *separate* endpoint from
@@ -1669,7 +1730,7 @@ python optimize_ig.py
 ```bash
 # Check Bitget CSV column count
 head -1 trades_paper.csv | tr ',' '\n' | wc -l
-# Expected: 37 columns
+# Expected: 51 columns (regime fields live in the *_regime.csv sidecar, not here — see §4.5)
 
 # Check IG CSV column count
 head -1 ig_trades.csv | tr ',' '\n' | wc -l
@@ -1864,3 +1925,4 @@ head -1 ig_trades.csv
 - 2026-05-11: S7 entry fix — replaced the freeze-on-lock walking Darvas algo with `detect_consolidation_box(h1_slice, min_candles=4)` (max-high / min-low over today's closed 1H candles excluding the latest, which is the breakout test). Removed `S7_BOX_CONFIRM_COUNT` from config_s7.py and optimize.py STRATEGY_PARAMS. `handle_pending_tick` now compares the latest closed 1H close against the *buffered* trigger (`box_top × (1+S7_ENTRY_BUFFER)` / `box_low × (1−S7_ENTRY_BUFFER)`) instead of the raw box edge. S7 candidates now route through the pending watcher (`_queue_s7_pending` → `strategies.s7.queue_pending` → `handle_pending_tick` → `_fire_s7`) instead of immediate-fire; `_execute_s7` removed; "S7": dispatcher removed; S7 added to the pending-tick strategy tuple in bot.py. Function rename: `detect_darvas_box` → `detect_consolidation_box` (4-tuple return). Tests: test_s7_darvas.py rewritten for new detector; test_bot_entry_watcher_all.py::test_execute_best_candidate_queues_s7 now asserts the queue path. ig_bot.py unaffected.
 - 2026-05-22: S1 on IG bot — evaluate_s1(cfg=) shared across both bots; ig_trades.csv 20→28 columns (snap_strategy + 6 S1 snap fields + exit_price); ig_state.json scan_signals restructured to strategy-keyed {name: {"S5": ..., "S1": ...}} with one-shot migration in _load_state; positions[name] and pending_orders[name] gained "strategy" field; added _StrategyAdapter / _S5Adapter / _S1Adapter dispatcher pattern in ig_bot.py with first-non-HOLD-wins + adapter monitor dispatch; added S1 block to all 6 config_ig_*.py (s1_enabled=False by default); _validate_instruments enforces S1 keys when s1_enabled=True; backtest_ig.py gained --strategy {s5,s1,both} and --grid s1 flags with 3m-walking loop, per-strategy stats, grid-search ranked-combo report section; new helpers: indicators.calculate_atr, tools.nearest_daily_sr_clearance, strategies.s1.compute_s1_sl_atr / compute_s1_tp_atr / maybe_trail_sl_ig
 - 2026-05-26: S7 partial TP + trailing fix — `strategies/s4.py:_place_partial_trail_exits` no longer calls `bg.place_pos_sl_only` (SL is already attached to the entry market order via `presetStopLossPrice` in `trader.open_long`/`open_short`). Previously, S7 LONG entries on Bitget passed the unrounded `sl_floor` (e.g. `0.503595` for GRASSUSDT) through `trader.py:409` → `_s7_long_exits(symbol, qty, fill, sl_floor, 0)`, which the S4 helper forwarded to `place_pos_sl_only`. Bitget rejected with `checkBDScale checkScale=4`; all 3 retries failed; profit_plan / moving_plan were never placed; the subsequent scale-in `refresh_plan_exits` logged "profit_plan or moving_plan not found — exits unchanged". The helper now mirrors `strategies/s2.py`'s 2-leg version (TP + trail only). `sl_trig`/`sl_exec` params retained for backwards-compat and logging. Callers: `strategies/s4.py:167` (S4 SHORT), `strategies/s7.py:284` (S7 SHORT), `strategies/s7.py:302` (S7 LONG). Updated DEPENDENCIES.md §2.1 description of `_place_s2_exits` accordingly.
+- 2026-06-02: Bybit scale-in SL race fix — post-scale-in SL was wiped on Bybit, liquidating HUSDT (`5ddb3c71`, 2026-06-01: closed −104% at the 10× liq price instead of the −50% SL). Root cause: both `bybit.update_position_sl` and `bybit.place_moving_plan` post `/v5/position/trading-stop` with `tpslMode="Full"` (a REPLACE that clears omitted fields); after scale-in, `refresh_plan_exits` → `place_moving_plan` re-asserted the SL only via a best-effort `/v5/position/list` read-back that raced (ran microseconds after the SL write) and left the position naked. Fix: added optional `sl_price=0` param (alias-lockstep) to `refresh_plan_exits` in `trader.py`/`bitget.py`/`bybit.py`/`bybit_trader.py`/`binance.py`/`binance_trader.py`/`backtest_engine.py` and to `place_moving_plan` in `bitget.py`/`bybit.py`/`binance.py`. `bot._do_scale_in` now passes `sl_price=new_sl` into `tr.refresh_plan_exits(...)`; on Bybit `place_moving_plan` writes SL + trailing in ONE atomic body (no read-back). Bitget (separate position-level SL endpoint) and Binance (standalone STOP_MARKET) accept-and-ignore `sl_price` → behaviour unchanged. No state.json/CSV/return-value changes. Updated §6.2 SL-preservation note; updated docs/strategies/S7.md §3 "After Scale-in". Tests: new tests/test_bybit_scale_in_sl.py (atomic SL write + refresh forwarding); tests/test_bot_scale_in_exits.py gained test_scale_in_passes_new_sl_to_refresh_plan_exits; updated fake_refresh stubs in tests/test_snapshots.py for the new signature.

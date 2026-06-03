@@ -30,3 +30,5 @@ backtest_ig_report.html
 bybit_trades.csv
 bybit_state.json
 bybit_bot.log
+# Regime sidecar logs (runtime data, one per bot/mode) — see regime.py / bot._log_regime
+*_regime.csv

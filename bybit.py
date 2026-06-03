@@ -241,6 +241,19 @@ def get_mark_price(symbol: str) -> float:
     return float(rows[0].get("markPrice") or rows[0].get("lastPrice") or 0)
 
 
+def get_funding_rate(symbol: str) -> float | None:
+    """Current funding rate (fraction) from /v5/market/tickers. None on any error."""
+    try:
+        data = bc.get_public("/v5/market/tickers", params={"category": CATEGORY, "symbol": symbol})
+        rows = (data.get("result") or {}).get("list") or []
+        if not rows or rows[0].get("fundingRate") in (None, ""):
+            return None
+        return float(rows[0]["fundingRate"])
+    except Exception as e:
+        logger.warning(f"[Bybit][{symbol}] get_funding_rate failed: {e}")
+        return None
+
+
 def get_last_price(symbol: str) -> float:
     data = bc.get_public("/v5/market/tickers", params={"category": CATEGORY, "symbol": symbol})
     rows = (data.get("result") or {}).get("list") or []
@@ -493,7 +506,7 @@ def place_profit_plan(symbol: str, hold_side: str, qty_str: str,
 
 
 def place_moving_plan(symbol: str, hold_side: str, qty_str: str,
-                      trigger: float, range_rate: str) -> None:
+                      trigger: float, range_rate: str, sl_price: float = 0) -> None:
     """
     Trailing stop on a position via /v5/position/trading-stop.
 
@@ -515,11 +528,19 @@ def place_moving_plan(symbol: str, hold_side: str, qty_str: str,
     SL preservation: Bybit V5 /v5/position/trading-stop with tpslMode="Full"
     REPLACES the entire TP/SL/TS config — fields not included are cleared.
     Without preservation, this call would wipe the position's stopLoss
-    (previously set by place_pos_sl_only or update_position_sl). We read the
-    current stopLoss from /v5/position/list and re-send it in the same body
-    so it survives the REPLACE. Self-contained: callers don't need to know
-    about this quirk. Best-effort — if the position read fails or returns no
-    SL, we proceed without it (preserving prior behaviour).
+    (previously set by place_pos_sl_only or update_position_sl).
+
+    Two preservation modes:
+      1. `sl_price > 0` (preferred, race-free): the caller passes the exact SL
+         to re-assert. It is written in the SAME atomic trading-stop body, so
+         the SL and trailing stop land together with no read-back. Used by
+         refresh_plan_exits after a scale-in, where the new average-entry SL is
+         already known.
+      2. `sl_price == 0` (best-effort fallback): we read the position's current
+         stopLoss from /v5/position/list and re-send it. Used by entry-time
+         callers where the SL was just attached to the market order. If the
+         read fails or returns no SL, we proceed without it (no worse than the
+         pre-fix behaviour).
     """
     if _dry_run_skip("place_moving_plan", symbol=symbol, hold=hold_side,
                      trigger=trigger, range_rate=range_rate):
@@ -540,36 +561,45 @@ def place_moving_plan(symbol: str, hold_side: str, qty_str: str,
         "tpslMode":      "Full",
     }
 
-    # Preserve the current stopLoss across this REPLACE. /v5/position/list
-    # returns "stopLoss" as a string price ("0" / "" / missing when unset).
-    try:
-        _pos = bc.get("/v5/position/list",
-                      params={"category": CATEGORY, "symbol": symbol})
-        for _p in (_pos.get("result") or {}).get("list") or []:
-            if str(_p.get("symbol")) != symbol:
-                continue
-            _sl_str = (_p.get("stopLoss") or "").strip()
-            try:
-                _sl_val = float(_sl_str)
-            except ValueError:
-                _sl_val = 0.0
-            if _sl_val > 0:
-                body["stopLoss"]    = round_price(_sl_val, symbol)
-                body["slTriggerBy"] = "MarkPrice"
-                body["slOrderType"] = "Market"
-            break
-    except Exception as e:
-        # Best-effort — log and proceed. Worst case is the pre-fix behaviour
-        # (SL wiped); not worse than what we had before.
-        logger.warning(
-            f"[Bybit][{symbol}] place_moving_plan: could not read current SL "
-            f"for preservation: {e}"
-        )
+    if sl_price and sl_price > 0:
+        # Race-free path: caller supplied the authoritative SL. Write it in the
+        # same body so the Full REPLACE keeps it. No position read needed.
+        body["stopLoss"]    = round_price(sl_price, symbol)
+        body["slTriggerBy"] = "MarkPrice"
+        body["slOrderType"] = "Market"
+    else:
+        # Best-effort: re-read the current stopLoss and re-include it.
+        # /v5/position/list returns "stopLoss" as a string price ("0" / "" /
+        # missing when unset).
+        try:
+            _pos = bc.get("/v5/position/list",
+                          params={"category": CATEGORY, "symbol": symbol})
+            for _p in (_pos.get("result") or {}).get("list") or []:
+                if str(_p.get("symbol")) != symbol:
+                    continue
+                _sl_str = (_p.get("stopLoss") or "").strip()
+                try:
+                    _sl_val = float(_sl_str)
+                except ValueError:
+                    _sl_val = 0.0
+                if _sl_val > 0:
+                    body["stopLoss"]    = round_price(_sl_val, symbol)
+                    body["slTriggerBy"] = "MarkPrice"
+                    body["slOrderType"] = "Market"
+                break
+        except Exception as e:
+            # Best-effort — log and proceed. Worst case is the pre-fix behaviour
+            # (SL wiped); not worse than what we had before.
+            logger.warning(
+                f"[Bybit][{symbol}] place_moving_plan: could not read current SL "
+                f"for preservation: {e}"
+            )
 
     bc.post("/v5/position/trading-stop", body)
 
 
-def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0) -> bool:
+def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0,
+                       sl_price: float = 0) -> bool:
     """
     Resize partial-TP conditional + trailing stop after a scale-in.
 
@@ -585,12 +615,12 @@ def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0
             trailing-stop activePrice. If 0, the previous order's triggerPrice
             is preserved.
 
-    SL preservation note: place_moving_plan called inside this function posts
-    to /v5/position/trading-stop with tpslMode=Full, which wipes the stopLoss.
-    The caller (bot._do_scale_in) must call update_position_sl AGAIN after
-    this function returns, to re-establish the SL. We do not pass sl_price
-    through here because the caller's existing test contract pins this
-    function's signature.
+    SL preservation: place_moving_plan posts to /v5/position/trading-stop with
+    tpslMode=Full, a REPLACE that clears any field not present. When the caller
+    passes `sl_price` (> 0), we forward it to place_moving_plan so the SL is
+    re-asserted in the SAME atomic body as the trailing stop — race-free, no
+    separate update_position_sl call needed. When `sl_price == 0`,
+    place_moving_plan falls back to its best-effort /v5/position/list read-back.
 
     Returns True on success. Logs and returns False if no existing partial-TP
     conditional is found (cannot infer prior trigger / range), or if all 3
@@ -689,14 +719,18 @@ def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0
         try:
             place_profit_plan(symbol, hold_side, half_qty, trigger)
             _time.sleep(0.5)
-            # NOTE: this call wipes the position's stopLoss on Bybit (Full-mode
-            # trading-stop REPLACE). The caller must re-apply SL after this
-            # function returns. See docstring.
-            place_moving_plan(symbol, hold_side, rest_qty_str, trigger, range_rate)
+            # place_moving_plan does a Full-mode trading-stop REPLACE. We pass
+            # sl_price so the SL is re-asserted atomically in the same body and
+            # is NOT wiped (when sl_price > 0). When sl_price == 0 it falls back
+            # to the best-effort read-back preservation.
+            place_moving_plan(symbol, hold_side, rest_qty_str, trigger, range_rate,
+                              sl_price=sl_price)
+            _sl_note = (f"SL re-asserted@{sl_price}" if sl_price and sl_price > 0
+                        else "SL via best-effort read-back")
             logger.info(
                 f"[Bybit][{symbol}] ✅ Plan exits refreshed after scale-in: "
                 f"partial_tp={half_qty}@{trigger}, trailing_stop active@{trigger} "
-                f"(SL must be re-applied by caller)"
+                f"({_sl_note})"
             )
             return True
         except Exception as e:

@@ -124,6 +124,20 @@ def get_mark_price(symbol: str) -> float:
     return float(data["data"][0]["markPrice"])
 
 
+def get_funding_rate(symbol: str) -> float | None:
+    """Current funding rate (fraction, e.g. 0.0001 = 0.01%). None on any error."""
+    try:
+        data = bc.get_public("/api/v2/mix/market/current-fund-rate",
+                             params={"symbol": symbol, "productType": PRODUCT_TYPE})
+        rows = data.get("data") or []
+        if not rows:
+            return None
+        return float(rows[0].get("fundingRate"))
+    except Exception as e:
+        logger.warning(f"[{symbol}] get_funding_rate failed: {e}")
+        return None
+
+
 # ── Account ───────────────────────────────────────────────────────── #
 
 def get_usdt_balance() -> float:
@@ -209,7 +223,8 @@ def _place_tpsl(symbol: str, hold_side: str,
     return False
 
 
-def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0) -> bool:
+def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0,
+                       sl_price: float = 0) -> bool:
     """
     Called after a scale-in to resize profit_plan and moving_plan orders to the
     current total position qty.  The SL (place-pos-tpsl) is position-level on
@@ -217,6 +232,11 @@ def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0
 
     new_trail_trigger: if > 0, re-placed orders use this trigger price instead of
     preserving the existing profit_plan trigger (used after scale-in changes avg entry).
+
+    sl_price: accepted for signature parity with bybit.refresh_plan_exits (the
+    sys.modules alias swap requires matching signatures). Ignored here — Bitget's
+    SL lives on a separate position-level endpoint and is auto-scaled, so the
+    trailing-stop refresh never touches it.
 
     Bitget V2 /orders-plan-pending REQUIRES a `planType` filter. TPSL umbrella values
     are `profit_loss` (covers profit_plan/loss_plan/pos_*) and `track_plan` (trailing

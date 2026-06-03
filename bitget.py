@@ -417,13 +417,18 @@ def get_order_fill(symbol: str, order_id: str) -> dict:
     return {"status": "cancelled", "fill_price": 0.0}
 
 
-def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0) -> bool:
+def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0,
+                       sl_price: float = 0) -> bool:
     """
     Resize profit_plan + moving_plan for the current total position qty.
     Called after a scale-in. SL (place-pos-tpsl) auto-scales — untouched.
 
     new_trail_trigger: if > 0, re-place with this trigger; else preserve the
     existing profit_plan trigger.
+
+    sl_price: accepted for signature parity with bybit.refresh_plan_exits (alias
+    swap requires matching signatures). Ignored — Bitget SL is a separate
+    position-level endpoint and auto-scales.
 
     Note: Bitget V2 /orders-plan-pending REQUIRES the `planType` filter param.
     TPSL umbrella values are `profit_loss` (covers profit_plan/loss_plan/pos_*)

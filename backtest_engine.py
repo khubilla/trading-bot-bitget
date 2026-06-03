@@ -422,7 +422,10 @@ class MockTrader:
     # ── Exit order management ─────────────────────────────────────── #
 
     def refresh_plan_exits(self, symbol: str, hold_side: str,
-                           new_trail_trigger: float = 0) -> bool:
+                           new_trail_trigger: float = 0,
+                           sl_price: float = 0) -> bool:
+        # sl_price accepted for signature parity with the live trader modules;
+        # the backtest engine tracks SL separately via update_position_sl.
         if symbol in self._positions and new_trail_trigger > 0:
             self._positions[symbol]["tp_trig"] = new_trail_trigger
         return True

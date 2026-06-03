@@ -37,6 +37,7 @@ class SentimentResult:
     total_pairs:    int
     green_volume:   float
     red_volume:     float
+    btc_change:     float = 0.0   # BTC 24h percent change at scan time (regime context)
 
 
 def _filter_by_liquidity(pairs: list[str], depth_map: dict[str, float]) -> list[str]:
@@ -159,6 +160,7 @@ def get_qualified_pairs_and_sentiment() -> tuple[list[str], SentimentResult]:
         total_pairs    = len(qualified),
         green_volume   = round(green_volume, 0),
         red_volume     = round(red_volume, 0),
+        btc_change     = round(btc_change, 2),
     )
 
     logger.info(

@@ -235,6 +235,19 @@ def get_mark_price(symbol: str) -> float:
     return float((data or {}).get("markPrice") or 0)
 
 
+def get_funding_rate(symbol: str) -> float | None:
+    """Current funding rate (fraction) from /fapi/v1/premiumIndex. None on any error."""
+    try:
+        data = bc.get_public("/fapi/v1/premiumIndex", params={"symbol": symbol})
+        if isinstance(data, list):
+            data = data[0] if data else {}
+        rate = (data or {}).get("lastFundingRate")
+        return float(rate) if rate not in (None, "") else None
+    except Exception as e:
+        logger.warning(f"[Binance][{symbol}] get_funding_rate failed: {e}")
+        return None
+
+
 def get_last_price(symbol: str) -> float:
     data = bc.get_public("/fapi/v1/ticker/price", params={"symbol": symbol})
     if isinstance(data, list):
@@ -573,7 +586,8 @@ def place_moving_plan(symbol: str, hold_side: str, qty_str: str,
     })
 
 
-def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0) -> bool:
+def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0,
+                       sl_price: float = 0) -> bool:
     """
     Resize partial-TP + trailing stop after a scale-in. Cancels the existing
     reduce-only TAKE_PROFIT_MARKET + TRAILING_STOP_MARKET orders on the close
@@ -583,6 +597,10 @@ def refresh_plan_exits(symbol: str, hold_side: str, new_trail_trigger: float = 0
         new_trail_trigger: if > 0, used as the new partial-TP trigger AND
             trailing-stop activationPrice. If 0, the previous TP order's
             stopPrice is preserved.
+        sl_price: accepted for signature parity with bybit.refresh_plan_exits
+            (alias swap requires matching signatures). Ignored — Binance SL is a
+            standalone STOP_MARKET reduce-only order, not a position-level
+            REPLACE, so the trailing-stop refresh never clears it.
 
     Returns True on success.
     """

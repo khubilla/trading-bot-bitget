@@ -132,6 +132,45 @@ def test_scale_in_updates_partial_tp_and_trailing(mock_logger, mock_st, mock_tr,
 @patch("bot.tr")
 @patch("bot.st")
 @patch("bot.logger")
+def test_scale_in_passes_new_sl_to_refresh_plan_exits(mock_logger, mock_st, mock_tr, mock_bot, mock_s2_position):
+    """
+    Regression (HUSDT 5ddb3c71): after scale-in, the recomputed SL must be
+    forwarded to refresh_plan_exits so Bybit can re-assert it atomically with
+    the trailing stop. Without this, the Full-mode trading-stop REPLACE wiped
+    the SL and the position ran to liquidation.
+    """
+    symbol = "HUSDT"
+    mock_bot.active_positions[symbol] = mock_s2_position
+
+    mock_tr.get_mark_price.return_value = 0.1915
+    mock_tr.get_all_open_positions.return_value = {
+        symbol: {"qty": 326.0, "margin": 6.265, "entry_price": 0.19149}
+    }
+    mock_tr.scale_in_long.return_value = None
+    mock_tr.update_position_sl.return_value = True
+    mock_tr.refresh_plan_exits.return_value = True
+
+    with patch("importlib.import_module") as mock_import:
+        mock_s2 = Mock()
+        mock_s2.scale_in_specs.return_value = {
+            "direction": "BULLISH", "hold_side": "long", "leverage": 10,
+        }
+        mock_s2.is_scale_in_window.return_value = True
+        mock_s2.recompute_scale_in_sl_trigger.return_value = (0.18192, 0.21063)
+        mock_import.return_value = mock_s2
+
+        mock_bot._do_scale_in(symbol, mock_s2_position)
+
+        mock_tr.refresh_plan_exits.assert_called_once()
+        _, kwargs = mock_tr.refresh_plan_exits.call_args
+        assert "sl_price" in kwargs, "refresh_plan_exits must receive sl_price"
+        assert abs(kwargs["sl_price"] - 0.18192) < 1e-6, \
+            f"sl_price forwarded wrong: {kwargs.get('sl_price')}"
+
+
+@patch("bot.tr")
+@patch("bot.st")
+@patch("bot.logger")
 def test_scale_in_skips_refresh_when_api_lags(mock_logger, mock_st, mock_tr, mock_bot, mock_s2_position):
     """
     BUGFIX VERIFICATION: refresh_plan_exits is NOT called when API lags.

@@ -38,6 +38,7 @@ from tools import (
 )
 from claude_filter import claude_approve
 from trade_dna import snapshot as dna_snapshot
+import regime
 import snapshot
 
 def get_position_size_multiplier() -> float:
@@ -165,6 +166,21 @@ _TRADE_FIELDS = [
     # Close fields
     "result", "pnl", "pnl_pct", "exit_reason", "exit_price",
 ]
+
+# Regime context is recorded in a SEPARATE sidecar file (not trades.csv) so the
+# trades.csv contract stays frozen. One row per entry, joined later on trade_id.
+_REGIME_FIELDS = [
+    "timestamp", "trade_id", "symbol", "strategy", "side",
+    "snap_session", "snap_hour_ph", "snap_dow",
+    "snap_atr_pct", "snap_atr_pctile", "snap_vol_vs_avg",
+    "snap_btc_change", "snap_btc_regime", "snap_funding_rate",
+]
+
+def _regime_log_path() -> str:
+    """Sidecar path derived from the active trade log, e.g. trades.csv → trades_regime.csv."""
+    base = config.TRADE_LOG
+    return base[:-4] + "_regime.csv" if base.endswith(".csv") else base + "_regime.csv"
+
 
 def _log_trade(action: str, details: dict):
     row = {"timestamp": datetime.now(timezone.utc).isoformat(), "action": action, **details}
@@ -1814,13 +1830,15 @@ class MTFBot:
                             # (was outside the if block, causing it to be called with new_trig=0.0
                             # when API lags and entry_price is still 0)
                             #
-                            # Bybit SL preservation: bybit.place_moving_plan (called
-                            # inside refresh_plan_exits) auto-reads the position's
-                            # current stopLoss and re-includes it in the trading-stop
-                            # REPLACE call so the SL just set above survives. Bitget
-                            # path is unaffected — its place_moving_plan uses a
-                            # separate endpoint that does not touch position SL.
-                            if not tr.refresh_plan_exits(sym, hold_side, new_trig):
+                            # Bybit SL preservation: refresh_plan_exits -> place_moving_plan
+                            # does a Full-mode /v5/position/trading-stop REPLACE that clears
+                            # any field not in the body. We pass sl_price=new_sl so the SL is
+                            # re-asserted ATOMICALLY in the same body as the new trailing stop
+                            # — race-free. (The earlier update_position_sl call relied on a
+                            # best-effort read-back that raced and left HUSDT unprotected ->
+                            # liquidation.) Bitget/Binance set SL via a separate endpoint and
+                            # ignore sl_price, so their behaviour is unchanged.
+                            if not tr.refresh_plan_exits(sym, hold_side, new_trig, sl_price=new_sl):
                                 logger.warning(f"[{strat}][{sym}] ⚠️ Scale-in exits refresh failed — verify plan orders manually")
                                 st.add_scan_log(f"[{strat}][{sym}] ⚠️ Scale-in exits refresh failed", "WARN")
                         else:
@@ -1849,6 +1867,47 @@ class MTFBot:
             ap["scale_in_pending"] = False
 
     # ── Per-strategy executors ────────────────────────────────────── #
+
+    def _log_regime(self, symbol: str, ltf_df, trade: dict) -> None:
+        """
+        Record market-regime context for an entry into the sidecar CSV
+        (_regime_log_path()), keyed by trade_id for later join to trades.csv.
+        Recording-only; never raises — each piece degrades to a blank column,
+        and the whole call is wrapped so a failure can't block a trade.
+        """
+        try:
+            ts = datetime.now(timezone.utc).isoformat()
+            row = {
+                "timestamp": ts,
+                "trade_id":  trade.get("trade_id", ""),
+                "symbol":    symbol,
+                "strategy":  trade.get("strategy", ""),
+                "side":      trade.get("side", ""),
+            }
+            row.update(regime.time_fields(ts))
+            row.update(regime.volatility_fields(ltf_df))
+            btc = getattr(self.sentiment, "btc_change", None) if self.sentiment else None
+            if btc is not None:
+                row["snap_btc_change"] = btc
+                row["snap_btc_regime"] = regime.btc_regime(btc)
+            fund = getattr(tr, "get_funding_rate", None)
+            if callable(fund):
+                try:
+                    rate = fund(symbol)
+                    if rate is not None:
+                        row["snap_funding_rate"] = rate
+                except Exception as e:
+                    logger.warning(f"[{symbol}] regime funding fetch failed: {e}")
+
+            path = _regime_log_path()
+            write_header = not os.path.exists(path)
+            with open(path, "a", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=_REGIME_FIELDS, extrasaction="ignore", restval="")
+                if write_header:
+                    w.writeheader()
+                w.writerow(row)
+        except Exception as e:
+            logger.warning(f"[{symbol}] regime sidecar log failed: {e}")
 
     def _execute_s1(self, c: dict, balance: float) -> bool:
         symbol = c["symbol"]
@@ -1904,6 +1963,7 @@ class MTFBot:
             # h1 not in S1 candidate dict — snap_trend_h1_* will record as ""
             "m3":    c.get("ltf_df"),
         }))
+        self._log_regime(symbol, c.get("ltf_df"), trade)
         _log_trade(f"S1_{s1_sig}", trade)
         st.add_open_trade(trade)
         try:
@@ -1977,6 +2037,7 @@ class MTFBot:
             trade.update(dna_snapshot("S5", symbol, {
                 "m15": m15_df,
             }))
+            self._log_regime(symbol, m15_df, trade)
             _log_trade("S5_LONG", trade)
             st.add_open_trade(trade)
             try:
@@ -2046,6 +2107,7 @@ class MTFBot:
             trade.update(dna_snapshot("S5", symbol, {
                 "m15": m15_df,
             }))
+            self._log_regime(symbol, m15_df, trade)
             _log_trade("S5_SHORT", trade)
             st.add_open_trade(trade)
             try:
@@ -2158,6 +2220,7 @@ class MTFBot:
         trade.update(dna_snapshot("S2", symbol, {
             "daily": sig.get("daily_df"),
         }))
+        self._log_regime(symbol, sig.get("daily_df"), trade)
         _log_trade("S2_LONG", trade)
         st.add_open_trade(trade)
         try:
@@ -2235,6 +2298,7 @@ class MTFBot:
         trade.update(dna_snapshot("S3", symbol, {
             "m15": sig.get("m15_df"),
         }))
+        self._log_regime(symbol, sig.get("m15_df"), trade)
         _log_trade("S3_LONG", trade)
         st.add_open_trade(trade)
         try:
@@ -2315,6 +2379,7 @@ class MTFBot:
             "daily": sig.get("daily_df"),
             # h1 not carried in sig dict — snap_trend_h1_* will record as ""
         }))
+        self._log_regime(symbol, sig.get("daily_df"), trade)
         _log_trade("S4_SHORT", trade)
         st.add_open_trade(trade)
         try:
@@ -2423,6 +2488,7 @@ class MTFBot:
         trade.update(dna_snapshot("S7", symbol, {
             "daily": sig.get("daily_df"),
         }))
+        self._log_regime(symbol, sig.get("daily_df"), trade)
         # Populate Darvas box levels for the CSV log (open_long/open_short don't receive them)
         trade["box_low"]  = sig["box_low"]
         trade["box_high"] = sig.get("box_top", 0)
@@ -2482,6 +2548,7 @@ class MTFBot:
         trade.update(dna_snapshot("S6", symbol, {
             "daily": sig.get("daily_df"),
         }))
+        self._log_regime(symbol, sig.get("daily_df"), trade)
         _log_trade("S6_SHORT", trade)
         st.add_open_trade(trade)
         try:
@@ -2615,6 +2682,7 @@ class MTFBot:
         trade["snap_s5_tp"]            = round(sig["tp"], 8) if sig.get("tp") else None
         trade["trade_id"] = uuid.uuid4().hex[:8]
         trade.update(dna_snapshot("S5", symbol, {}))  # no DFs available in watcher
+        self._log_regime(symbol, None, trade)
         _log_trade(f"S5_{side}", trade)
         st.add_open_trade(trade)
         if PAPER_MODE:
@@ -2686,6 +2754,7 @@ class MTFBot:
                 "trade_id": trade_id,
             })
             trade.update(dna_snapshot("S5", symbol, {}))  # no DFs available in watcher
+            self._log_regime(symbol, None, trade)
             _log_trade(f"S5_{side}", trade)
             st.add_open_trade(trade)
             tr.tag_strategy(symbol, "S5")
@@ -2734,6 +2803,7 @@ class MTFBot:
             "trade_id": trade_id,
         }
         trade.update(dna_snapshot("S5", symbol, {}))  # no DFs available in watcher
+        self._log_regime(symbol, None, trade)
         _log_trade(f"S5_{side}", trade)
         st.add_open_trade(trade)
         try:

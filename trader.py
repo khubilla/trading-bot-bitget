@@ -49,7 +49,10 @@ def _round_price(price: float, symbol: str) -> str:
 def _round_qty(qty: float, symbol: str) -> str:
     info = _sym_info(symbol)
     mult = info["size_mult"]
-    qty  = math.floor(qty / mult) * mult
+    # +1e-9 absorbs float error so a remainder like 0.05 (stored as
+    # 0.04999999999999) doesn't floor down a tick (AMDUSDT split bug). It does
+    # not change genuine flooring (e.g. 4.5 units still floors to 4).
+    qty  = math.floor(qty / mult + 1e-9) * mult
     qty  = max(qty, info["min_trade_num"])
     return str(round(qty, info["volume_place"]))
 

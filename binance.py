@@ -148,7 +148,10 @@ def round_qty(qty: float, symbol: str, mark_price: float | None = None) -> str:
     """
     info = sym_info(symbol)
     step = info["qty_step"]
-    qty  = math.floor(qty / step) * step
+    # +1e-9 absorbs float error so a remainder like 0.05 (stored as
+    # 0.04999999999999) doesn't floor down a tick (AMDUSDT split bug). It does
+    # not change genuine flooring (e.g. 4.5 steps still floors to 4).
+    qty  = math.floor(qty / step + 1e-9) * step
     qty  = max(qty, info["min_trade_num"])
     min_notional = info.get("min_notional", 0.0)
     if mark_price is not None and mark_price > 0 and min_notional > 0:

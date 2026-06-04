@@ -228,6 +228,7 @@ The bot allows a maximum of `config.MAX_CONCURRENT_TRADES` open positions simult
      - S4: price is between `prev_low * (1 - S4_MAX_ENTRY_BUFFER)` and `prev_low * (1 - S4_ENTRY_BUFFER)`
      - S6: `mark_price < peak_level` (fakeout reversal still intact)
 - After scale-in, the exchange plan exits (`profit_plan` + `moving_plan`) are cancelled and re-placed with the new total qty and updated trail trigger based on the new average entry price.
+- The exit refresh is **deferred until the scale-in fill is confirmed** in the position API (the placement and refresh are separate phases keyed by `scale_in_refresh_pending`). This avoids sizing the exits against the stale pre-scale qty when the exchange REST endpoint lags behind the fill, and it never re-places the scale-in market order on retry.
 - S2: SL cap is recomputed from the new average entry and raised if necessary.
 
 ---

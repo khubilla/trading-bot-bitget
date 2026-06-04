@@ -830,9 +830,34 @@ def update_position_sl(symbol: str, new_sl: float, hold_side: str = "long") -> b
                 "stopLossTriggerType":  "mark_price",
                 "stopLossExecutePrice": str(sl_exec),
             })
+            # The position now has a full-position SL (pos_loss). Cancel any
+            # size-bound preset `loss_plan` left over from the entry order — after
+            # a scale-in it covers only the pre-scale qty and would fire a partial
+            # SL early, alongside the new pos_loss (AMDUSDT bug, 2026-06-03).
+            _cancel_stale_loss_plan(symbol, hold_side)
             return True
         except Exception as e:
             logger.warning(f"[{symbol}] update_position_sl attempt {attempt+1}/3: {e}")
             if attempt < 2:
                 _t.sleep(1.0)
     return False
+
+
+def _cancel_stale_loss_plan(symbol: str, hold_side: str) -> None:
+    """
+    Cancel any pending size-bound `loss_plan` order for `hold_side`. Best-effort:
+    the position-level `pos_loss` already protects the full position, so a failure
+    here is logged but non-fatal. Leaves profit_plan / moving_plan untouched.
+    """
+    try:
+        data = bc.get(
+            "/api/v2/mix/order/orders-plan-pending",
+            {"symbol": symbol, "productType": PRODUCT_TYPE, "planType": "profit_loss"},
+        )
+        for o in (data.get("data") or {}).get("entrustedList") or []:
+            if o.get("planType") == "loss_plan" and o.get("posSide") == hold_side:
+                bc.post("/api/v2/mix/order/cancel-plan-order",
+                        {"symbol": symbol, "productType": PRODUCT_TYPE, "orderId": o["orderId"]})
+                logger.info(f"[{symbol}] cancelled stale preset loss_plan {o['orderId']} after asserting pos_loss")
+    except Exception as e:
+        logger.warning(f"[{symbol}] _cancel_stale_loss_plan: {e}")

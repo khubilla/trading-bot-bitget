@@ -138,6 +138,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# How long to keep retrying the post-scale-in exit refresh while waiting for the
+# exchange position API to reflect the scale-in fill. After this, refresh with
+# whatever data is available (see MTFBot._refresh_scale_in_exits).
+_SCALE_IN_REFRESH_TIMEOUT = 300  # seconds
+
 
 _TRADE_FIELDS = [
     "timestamp", "trade_id", "action", "symbol", "side", "qty", "entry", "sl", "tp",
@@ -372,6 +377,12 @@ class MTFBot:
                     _resumed_ap["initial_qty"] = _pmem["initial_qty"]
                 if _pmem.get("partial_logged"):
                     _resumed_ap["partial_logged"] = _pmem["partial_logged"]
+                # Resume a pending post-scale-in exit refresh if the process
+                # restarted between the scale-in fill and the exit refresh.
+                if _pmem.get("scale_in_refresh_pending"):
+                    _resumed_ap["scale_in_refresh_pending"] = True
+                    _resumed_ap["scale_in_pre_qty"] = _pmem.get("scale_in_pre_qty", 0)
+                    _resumed_ap["scale_in_refresh_deadline"] = _pmem.get("scale_in_refresh_deadline", 0)
                 self.active_positions[sym] = _resumed_ap
                 logger.warning(f"⚠️  Resumed: {sym} {pos['side']} qty={pos['qty']} [{strategy}]"
                                + (f" | initial_qty={_pmem['initial_qty']}" if _pmem.get("initial_qty") else ""))
@@ -999,9 +1010,14 @@ class MTFBot:
                                 logger.warning(f"[{ap['strategy']}][{sym}] partial snapshot failed: {e}")
                             st.update_open_trade_margin(sym, half_margin)
                             logger.info(f"[{ap['strategy']}][{sym}] 📊 Live partial logged: PnL≈{partial_pnl:+.4f} ({partial_pct:+.1f}%)")
-                    # Scale-in check (S2/S4 only)
+                    # Scale-in check (S2/S4/S6/S7). Placement and exit-refresh are
+                    # two phases: _do_scale_in places the order then sets
+                    # scale_in_refresh_pending; _refresh_scale_in_exits resizes the
+                    # exits once the fill is confirmed (retried each tick, no re-order).
                     if ap.get("scale_in_pending") and time.time() >= ap["scale_in_after"]:
                         self._do_scale_in(sym, ap)
+                    elif ap.get("scale_in_refresh_pending"):
+                        self._refresh_scale_in_exits(sym, ap)
 
                     # Strategy-owned structural swing trail — delegated to strategies/sN.py
                     _strat = ap.get("strategy")
@@ -1791,60 +1807,23 @@ class MTFBot:
                         ap["initial_qty"] = new_total_qty
                         st.update_position_memory(sym, initial_qty=new_total_qty)
                 else:
-                    # Refresh plan exits (profit_plan + moving_plan) to reflect new total qty.
-                    # SL (place-pos-tpsl) is position-level and auto-scales on Bitget.
-                    try:
-                        import time as _si_t
-                        # Poll until Bitget's position API reflects the scale-in fill.
-                        # A fixed sleep is unreliable — the REST endpoint can lag several
-                        # seconds behind the actual fill. We wait up to 12 seconds.
-                        _pre_qty = float(ap.get("qty", 0))
-                        _deadline = _si_t.time() + 12
-                        _scale_pos = {}
-                        while _si_t.time() < _deadline:
-                            _scale_pos = tr.get_all_open_positions().get(sym, {})
-                            if float(_scale_pos.get("qty", 0)) > _pre_qty:
-                                break
-                            _si_t.sleep(1.5)
-                        else:
-                            logger.warning(
-                                f"[{strat}][{sym}] ⚠️ Position qty did not increase "
-                                f"after scale-in within 12s (pre={_pre_qty})"
-                            )
-                        hold_side = specs["hold_side"]
-                        # Recompute trail trigger and SL from new average entry after scale-in
-                        # Update initial_qty and margin to reflect scaled-in position
-                        _new_qty = float(_scale_pos.get("qty", 0))
-                        if _new_qty > 0:
-                            ap["initial_qty"] = _new_qty
-                            st.update_position_memory(sym, initial_qty=_new_qty)
-                        if _scale_pos.get("margin"):
-                            st.update_open_trade_margin(sym, float(_scale_pos["margin"]))
-                        new_avg = _scale_pos.get("entry_price", 0)
-                        if new_avg > 0:
-                            new_sl, new_trig = mod.recompute_scale_in_sl_trigger(ap, new_avg)
-                            if tr.update_position_sl(sym, new_sl, hold_side=hold_side):
-                                ap["sl"] = new_sl
-                                st.update_open_trade_sl(sym, new_sl)
-                            # BUGFIX: Only refresh plan exits after we have a valid new_trig
-                            # (was outside the if block, causing it to be called with new_trig=0.0
-                            # when API lags and entry_price is still 0)
-                            #
-                            # Bybit SL preservation: refresh_plan_exits -> place_moving_plan
-                            # does a Full-mode /v5/position/trading-stop REPLACE that clears
-                            # any field not in the body. We pass sl_price=new_sl so the SL is
-                            # re-asserted ATOMICALLY in the same body as the new trailing stop
-                            # — race-free. (The earlier update_position_sl call relied on a
-                            # best-effort read-back that raced and left HUSDT unprotected ->
-                            # liquidation.) Bitget/Binance set SL via a separate endpoint and
-                            # ignore sl_price, so their behaviour is unchanged.
-                            if not tr.refresh_plan_exits(sym, hold_side, new_trig, sl_price=new_sl):
-                                logger.warning(f"[{strat}][{sym}] ⚠️ Scale-in exits refresh failed — verify plan orders manually")
-                                st.add_scan_log(f"[{strat}][{sym}] ⚠️ Scale-in exits refresh failed", "WARN")
-                        else:
-                            logger.warning(f"[{strat}][{sym}] ⚠️ Position entry_price not available after scale-in — exits not refreshed")
-                    except Exception as _ref_e:
-                        logger.warning(f"[{strat}][{sym}] ⚠️ Scale-in exits refresh error: {_ref_e}")
+                    # Placement phase done. DEFER the exit refresh to a separate
+                    # phase keyed by scale_in_refresh_pending: sizing the exits now
+                    # would race the position API and split them against the stale
+                    # pre-scale qty when the REST endpoint lags (AMDUSDT bug
+                    # 2026-06-03). The market order above is placed exactly once;
+                    # the refresh retries each tick and never re-orders.
+                    ap["scale_in_pre_qty"] = float(ap.get("qty", 0))
+                    ap["scale_in_refresh_pending"] = True
+                    ap["scale_in_refresh_deadline"] = time.time() + _SCALE_IN_REFRESH_TIMEOUT
+                    st.update_position_memory(
+                        sym,
+                        scale_in_refresh_pending=True,
+                        scale_in_pre_qty=ap["scale_in_pre_qty"],
+                        scale_in_refresh_deadline=ap["scale_in_refresh_deadline"],
+                    )
+                    # Fast path: try immediately in case the fill already reflects.
+                    self._refresh_scale_in_exits(sym, ap)
                 # Save scale-in snapshot
                 try:
                     interval = _snapshot_interval(strat)
@@ -1865,6 +1844,80 @@ class MTFBot:
         except Exception as e:
             logger.error(f"Scale-in error [{sym}]: {e}")
             ap["scale_in_pending"] = False
+
+    def _refresh_scale_in_exits(self, sym: str, ap: dict) -> None:
+        """
+        Phase 2 of scale-in (real mode): once the scale-in fill is reflected in
+        the position API, resize profit_plan + moving_plan and re-assert the SL
+        against the NEW total position qty, using the new average entry.
+
+        Runs only while ``scale_in_refresh_pending`` is set, NEVER re-places the
+        scale-in market order, and is safe to call every tick. If the fill hasn't
+        reflected yet it leaves the flag set and returns (retry next tick) until
+        ``scale_in_refresh_deadline``, after which it refreshes with whatever data
+        is available so the exits are at least re-asserted.
+        """
+        if not ap.get("scale_in_refresh_pending"):
+            return
+        strat = ap.get("strategy", "?")
+        try:
+            from importlib import import_module
+            mod   = import_module(f"strategies.{strat.lower()}")
+            specs = mod.scale_in_specs(ap["side"]) if strat == "S7" else mod.scale_in_specs()
+            hold_side = specs["hold_side"]
+
+            pre_qty  = float(ap.get("scale_in_pre_qty", 0))
+            pos      = tr.get_all_open_positions().get(sym, {})
+            live_qty = float(pos.get("qty", 0))
+            new_avg  = float(pos.get("entry_price", 0) or 0)
+            past_deadline = time.time() >= ap.get("scale_in_refresh_deadline", 0)
+
+            fill_confirmed = live_qty > pre_qty and new_avg > 0
+            if not fill_confirmed:
+                if not past_deadline:
+                    logger.info(
+                        f"[{strat}][{sym}] ⏳ Scale-in fill not yet reflected "
+                        f"(qty {live_qty}≤{pre_qty}, avg={new_avg}) — exit refresh deferred"
+                    )
+                    return  # keep flag; retry next tick
+                if new_avg <= 0:
+                    logger.error(
+                        f"[{strat}][{sym}] ⚠️ Scale-in fill unconfirmed past deadline and "
+                        f"entry price unavailable — cannot refresh exits; giving up"
+                    )
+                    ap["scale_in_refresh_pending"] = False
+                    st.update_position_memory(sym, scale_in_refresh_pending=False)
+                    return
+                logger.warning(
+                    f"[{strat}][{sym}] ⚠️ Scale-in fill unconfirmed past deadline "
+                    f"(qty {live_qty}≤{pre_qty}) — refreshing exits with available data"
+                )
+
+            # Update initial_qty + margin to reflect the scaled-in position.
+            if live_qty > 0:
+                ap["initial_qty"] = live_qty
+                st.update_position_memory(sym, initial_qty=live_qty)
+            if pos.get("margin"):
+                st.update_open_trade_margin(sym, float(pos["margin"]))
+
+            # Recompute SL + trail trigger from the new average entry.
+            new_sl, new_trig = mod.recompute_scale_in_sl_trigger(ap, new_avg)
+            if tr.update_position_sl(sym, new_sl, hold_side=hold_side):
+                ap["sl"] = new_sl
+                st.update_open_trade_sl(sym, new_sl)
+            # Bybit SL preservation: sl_price is re-asserted atomically with the
+            # trailing stop (Full-mode trading-stop REPLACE). Bitget/Binance set SL
+            # via a separate endpoint and ignore sl_price — behaviour unchanged.
+            if not tr.refresh_plan_exits(sym, hold_side, new_trig, sl_price=new_sl):
+                logger.warning(f"[{strat}][{sym}] ⚠️ Scale-in exits refresh failed — verify plan orders manually")
+                st.add_scan_log(f"[{strat}][{sym}] ⚠️ Scale-in exits refresh failed", "WARN")
+            else:
+                logger.info(f"[{strat}][{sym}] ✅ Scale-in exits refreshed to new total qty={live_qty}")
+
+            ap["scale_in_refresh_pending"] = False
+            st.update_position_memory(sym, scale_in_refresh_pending=False)
+        except Exception as _ref_e:
+            logger.warning(f"[{strat}][{sym}] ⚠️ Scale-in exits refresh error: {_ref_e}")
 
     # ── Per-strategy executors ────────────────────────────────────── #
 

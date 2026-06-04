@@ -680,3 +680,49 @@ class TestOpenShortS1Exits:
         """Return dict entry field must equal fill price."""
         result, _ = self._setup(monkeypatch, mark=0.34, fill=0.337)
         assert result["entry"] == 0.337
+
+
+# ── update_position_sl: cancel stale preset loss_plan (Bitget Bug B) ─── #
+
+class TestUpdatePositionSLCancelsLossPlan:
+    """
+    When scale-in (or swing trail) asserts the position-level SL via
+    place-pos-tpsl (pos_loss), the size-bound preset `loss_plan` left over from
+    the entry order must be cancelled — otherwise a stale half-size SL lingers
+    alongside the full-position pos_loss (AMDUSDT bug, 2026-06-03).
+    Bitget-only: bybit/binance have no loss_plan.
+    """
+
+    def _pending(self):
+        return {"code": "00000", "data": {"entrustedList": [
+            {"planType": "loss_plan",   "posSide": "long",  "orderId": "LP_long"},
+            {"planType": "profit_plan", "posSide": "long",  "orderId": "PP_long"},
+            {"planType": "moving_plan", "posSide": "long",  "orderId": "MP_long"},
+            {"planType": "loss_plan",   "posSide": "short", "orderId": "LP_short"},
+        ]}}
+
+    def _run(self, monkeypatch, hold_side="long"):
+        posts, gets = [], []
+        monkeypatch.setattr(trader, "_sym_info", _sym_info_btcusdt)
+        monkeypatch.setattr(bc, "get",
+                            lambda path, params=None: gets.append((path, params)) or self._pending())
+        monkeypatch.setattr(bc, "post", lambda path, p: posts.append((path, p)) or {})
+        ok = trader.update_position_sl("BTCUSDT", 55000, hold_side=hold_side)
+        return ok, posts
+
+    def test_sl_still_placed(self, monkeypatch):
+        ok, posts = self._run(monkeypatch)
+        assert ok is True
+        assert any("place-pos-tpsl" in path for path, _ in posts), "position SL not placed"
+
+    def test_cancels_stale_loss_plan_for_hold_side(self, monkeypatch):
+        _, posts = self._run(monkeypatch, hold_side="long")
+        cancelled = {p.get("orderId") for path, p in posts if "cancel-plan-order" in path}
+        assert "LP_long" in cancelled, "stale long loss_plan was not cancelled"
+
+    def test_does_not_cancel_profit_or_moving_or_other_side(self, monkeypatch):
+        _, posts = self._run(monkeypatch, hold_side="long")
+        cancelled = {p.get("orderId") for path, p in posts if "cancel-plan-order" in path}
+        assert "PP_long" not in cancelled, "profit_plan must not be cancelled"
+        assert "MP_long" not in cancelled, "moving_plan must not be cancelled"
+        assert "LP_short" not in cancelled, "other-side loss_plan must not be cancelled"

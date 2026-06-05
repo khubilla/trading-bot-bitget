@@ -281,13 +281,22 @@ def place_pos_sl_only(symbol: str, hold_side: str, sl_trig: float, sl_exec: floa
 
 def place_profit_plan(symbol: str, hold_side: str, qty_str: str,
                       trigger: float, execute: str = "0") -> None:
-    """place-tpsl-order planType=profit_plan (absolute-price partial TP)."""
+    """place-tpsl-order planType=profit_plan (absolute-price partial TP).
+
+    `trigger` is rounded to the symbol's price tick (price_place) before
+    posting. Bitget rejects unrounded values with HTTP 400 [40808]
+    `checkBDScale` (HUSDT 4c326063, 2026-06-04: `refresh_plan_exits`
+    failed 3× post-scale-in with `value=0.5019798103443 checkScale=5`,
+    leaving the doubled position without partial-TP or trailing
+    protection; subsequent altcoin pump auto-liquidated at -99.4%).
+    Mirrors `bybit.place_profit_plan` / `binance.place_profit_plan`.
+    """
     bc.post("/api/v2/mix/order/place-tpsl-order", {
         "symbol":       symbol,
         "productType":  PRODUCT_TYPE,
         "marginCoin":   MARGIN_COIN,
         "planType":     "profit_plan",
-        "triggerPrice": str(trigger),
+        "triggerPrice": round_price(trigger, symbol),
         "triggerType":  "mark_price",
         "executePrice": execute,
         "holdSide":     hold_side,
@@ -297,13 +306,17 @@ def place_profit_plan(symbol: str, hold_side: str, qty_str: str,
 
 def place_moving_plan(symbol: str, hold_side: str, qty_str: str,
                       trigger: float, range_rate: str) -> None:
-    """place-tpsl-order planType=moving_plan (trailing stop)."""
+    """place-tpsl-order planType=moving_plan (trailing stop).
+
+    `trigger` is rounded to the symbol's price tick — see
+    `place_profit_plan` docstring for the precision-bug history.
+    """
     bc.post("/api/v2/mix/order/place-tpsl-order", {
         "symbol":       symbol,
         "productType":  PRODUCT_TYPE,
         "marginCoin":   MARGIN_COIN,
         "planType":     "moving_plan",
-        "triggerPrice": str(trigger),
+        "triggerPrice": round_price(trigger, symbol),
         "triggerType":  "mark_price",
         "holdSide":     hold_side,
         "size":         qty_str,

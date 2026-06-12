@@ -177,3 +177,99 @@ def evaluate_s8(
             f"S8 ✅ tri-confluence bounce | zone {zone_low:.5f}–{zone_high:.5f} "
             f"(width {width*100:.1f}%) | green body {gb*100:.1f}% | "
             f"buy > {trigger:.5f}")
+
+
+# ── S8 Pending-Signal Queue ───────────────────────────────── #
+
+def queue_pending(bot, c: dict) -> None:
+    """Queue an S8 LONG bounce on bot.pending_signals for the entry watcher."""
+    import time as _t
+    import state as st
+
+    symbol = c["symbol"]
+    zone_high = c.get("s8_zone_high") or 0.0
+    zone_low  = c.get("s8_zone_low") or 0.0
+    bot.pending_signals[symbol] = {
+        "strategy":           "S8",
+        "side":               "LONG",
+        "trigger":            c["s8_trigger"],
+        "s8_trigger":         c["s8_trigger"],
+        "s8_green_low":       c["s8_green_low"],
+        "s8_zone_low":        zone_low,
+        "s8_zone_high":       zone_high,
+        "s8_box_top":         c.get("s8_box_top"),
+        "s8_ma20":            c.get("s8_ma20"),
+        "s8_fib618":          c.get("s8_fib618"),
+        "priority_rank":      c.get("priority_rank", 999),
+        "priority_score":     c.get("priority_score", 0.0),
+        "snap_daily_rsi":     round(c["s8_rsi"], 1) if c.get("s8_rsi") else None,
+        "snap_box_range_pct": round((zone_high - zone_low) / zone_high * 100, 3)
+                              if zone_high else None,
+        "snap_sentiment":     bot.sentiment.direction if bot.sentiment else "?",
+        "expires":            _t.time() + 86400,
+    }
+    st.save_pending_signals(bot.pending_signals)
+    logger.info(
+        f"[S8][{symbol}] 🕐 PENDING LONG queued | "
+        f"trigger={c['s8_trigger']:.5f} | green_low={c['s8_green_low']:.5f}"
+    )
+    st.add_scan_log(
+        f"[S8][{symbol}] 🕐 PENDING LONG | trigger={c['s8_trigger']:.5f}", "SIGNAL"
+    )
+
+
+# ── S8 Entry Watcher (pending tick) ───────────────────────── #
+
+def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
+                        paper_mode: bool | None = None) -> str | None:
+    """S8 bounce trigger + invalidation check. Return 'break' to stop outer loop."""
+    import state as st
+    import trader as tr
+    import config, config_s8
+
+    ps = st.get_pair_state(symbol)
+    if ps.get("s8_signal", "HOLD") not in ("LONG",):
+        logger.info(f"[S8][{symbol}] 🚫 Signal gone — cancelling pending")
+        st.add_scan_log(f"[S8][{symbol}] 🚫 Pending cancelled (signal gone)", "INFO")
+        bot.pending_signals.pop(symbol, None)
+        st.save_pending_signals(bot.pending_signals)
+        return None
+    try:
+        mark = tr.get_mark_price(symbol)
+    except Exception:
+        return None
+    trigger  = sig["s8_trigger"]
+    zone_low = sig["s8_zone_low"]
+    if mark < zone_low:
+        logger.info(f"[S8][{symbol}] ❌ Invalidated — mark {mark:.5f} < zone_low {zone_low:.5f}")
+        st.add_scan_log(f"[S8][{symbol}] ❌ Pending cancelled (price below zone)", "INFO")
+        bot.pending_signals.pop(symbol, None)
+        st.save_pending_signals(bot.pending_signals)
+        return None
+    in_window = trigger <= mark <= trigger * (1 + config_s8.S8_MAX_ENTRY_BUFFER)
+    if in_window:
+        with bot._trade_lock:
+            if symbol in bot.active_positions:
+                bot.pending_signals.pop(symbol, None)
+                st.save_pending_signals(bot.pending_signals)
+                return None
+            if len(bot.active_positions) >= config.MAX_CONCURRENT_TRADES:
+                return "break"
+            if st.is_pair_paused(symbol):
+                return None
+            bot._fire_s8(symbol, sig, mark, balance)
+        bot.pending_signals.pop(symbol, None)
+        st.save_pending_signals(bot.pending_signals)
+    return None
+
+
+# ── S8 Paper Trail Setup ──────────────────────────────────── #
+
+def compute_paper_trail_long(mark: float, sl_price: float, tp_price_abs: float = 0,
+                             take_profit_pct: float = 0.05) -> tuple[bool, float, float, float, bool]:
+    """Paper-trader LONG trail setup for S8 (same shape as S2's).
+    Returns (use_trailing, trail_trigger, trail_range, tp_price, breakeven_after_partial)."""
+    from config_s8 import S8_TRAILING_TRIGGER_PCT, S8_TRAILING_RANGE_PCT
+    trail_trigger = mark * (1 + S8_TRAILING_TRIGGER_PCT)
+    trail_range   = S8_TRAILING_RANGE_PCT
+    return True, trail_trigger, trail_range, trail_trigger, False

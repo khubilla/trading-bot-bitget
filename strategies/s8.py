@@ -1,12 +1,17 @@
 """
-Strategy 8 — Post-S2 Bounce: breakout-retest at tri-confluence support.
+Strategy 8 — Post-S2 Bounce: retest at tri-confluence support.
 
-Phase: after an S2-style daily breakout that failed to continue upward.
-Price retraces to a zone where three supports cluster:
-  1. The Darvas coil box top that formed BEFORE the S2 breakout
+Phase: after a big momentum move that failed to continue upward.
+A big momentum candle "flies" up out of a pre-flight base, then price
+retraces to a zone where three supports cluster:
+  1. box_top — the high of the pre-flight base the candle flew out of
+     (prior resistance turned support)
   2. The daily 20MA
-  3. The 61.8% fib retracement of the impulse leg (coil box low → post-breakout swing high)
+  3. The 61.8% fib retracement of the impulse leg (base low → swing high)
 A small green daily candle resting on the zone arms a stop-buy above its high.
+
+The base may coil but a tight Darvas coil is NOT required — the only
+structural requirement is the big momentum candle clearing the base high.
 
 LONG only. Daily candles only. Exits copy S2 (preset SL, 50% partial TP at +10%,
 10% trailing callback on the remainder). Single full-size entry — NO scale-in.
@@ -18,7 +23,7 @@ from typing import Literal
 import pandas as pd
 
 from indicators import calculate_rsi
-from tools import body_pct, upper_wick
+from tools import body_pct
 
 logger = logging.getLogger(__name__)
 Signal = Literal["LONG", "HOLD"]
@@ -29,64 +34,33 @@ SNAPSHOT_INTERVAL = "1D"
 _HOLD = ("HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
 
-def _eff_top(row, wick_pct: float) -> float:
-    """Darvas effective top: body top when the upper wick is rejected, else wick high."""
-    bt = max(float(row["close"]), float(row["open"]))
-    return bt if upper_wick(row) > wick_pct * bt else float(row["high"])
-
-
-def _coil_before(daily_df: pd.DataFrame, b: int, big_top: float, cfg) -> tuple[float, float] | None:
-    """
-    Tight Darvas coil (1..S8_CONSOL_CANDLES candles) ending right before index b.
-    Same effective-top/body-bottom math as S2, including S2's containment rule:
-    every coil candle must close at/below the big momentum candle's body top —
-    this is what stops impulse-continuation candles from registering as B.
-    Returns (box_top, box_low) or None.
-    """
-    for n in range(1, cfg.S8_CONSOL_CANDLES + 1):
-        if b - n < 0:
-            return None
-        window = daily_df.iloc[b - n:b]
-        if not all(float(r["close"]) <= big_top for _, r in window.iterrows()):
-            continue
-        eff_tops = window.apply(lambda r: _eff_top(r, cfg.S8_DARVAS_WICK_PCT), axis=1)
-        eff_h = float(eff_tops.max())
-        eff_l = float(window.apply(
-            lambda r: min(float(r["close"]), float(r["open"])), axis=1).min())
-        if eff_h <= 0:
-            continue
-        if (eff_h - eff_l) / eff_h > cfg.S8_CONSOL_RANGE_PCT:
-            continue
-        return eff_h, eff_l
-    return None
-
-
 def _find_structure(daily_df: pd.DataFrame, rsi_ser: pd.Series, cfg) -> dict | None:
     """
-    Most recent S2-like breakout day B within the last S8_PHASE_LOOKBACK completed
-    candles: big momentum candle within S8_BIG_CANDLE_LOOKBACK days before B,
-    tight coil right before B (all coil closes ≤ big candle body top),
-    RSI > S8_RSI_THRESH on B, and B's close above the coil box top.
+    Most recent big momentum candle B within the last S8_PHASE_LOOKBACK completed
+    candles such that:
+      - body ≥ S8_BIG_CANDLE_BODY_PCT and daily RSI > S8_RSI_THRESH at B,
+      - the S8_BASE_LOOKBACK candles immediately before B form the pre-flight
+        base; box_top = base high, box_low = base low (no tightness requirement),
+      - B closes above box_top (it flew up out of the base).
     iloc[-1] is the live forming candle and is never B.
     """
     last_completed = len(daily_df) - 2
-    earliest = max(cfg.S8_CONSOL_CANDLES + 1,
+    earliest = max(cfg.S8_BASE_LOOKBACK,
                    last_completed - cfg.S8_PHASE_LOOKBACK + 1)
     for b in range(last_completed, earliest - 1, -1):
+        row = daily_df.iloc[b]
+        if body_pct(row) < cfg.S8_BIG_CANDLE_BODY_PCT:
+            continue
         if float(rsi_ser.iloc[b]) <= cfg.S8_RSI_THRESH:
             continue
-        lb_start = max(0, b - cfg.S8_BIG_CANDLE_LOOKBACK)
-        big_top = 0.0
-        for _, row in daily_df.iloc[lb_start:b].iterrows():
-            if body_pct(row) >= cfg.S8_BIG_CANDLE_BODY_PCT:
-                big_top = max(big_top, float(row["close"]), float(row["open"]))
-        if big_top <= 0:
+        base = daily_df.iloc[b - cfg.S8_BASE_LOOKBACK:b]
+        if len(base) < cfg.S8_BASE_LOOKBACK:
             continue
-        coil = _coil_before(daily_df, b, big_top, cfg)
-        if coil is None:
+        box_top = float(base["high"].max())
+        box_low = float(base["low"].min())
+        if box_top <= 0:
             continue
-        box_top, box_low = coil
-        if float(daily_df["close"].iloc[b]) <= box_top:
+        if float(row["close"]) <= box_top:   # the big candle must clear the base
             continue
         return {"b": b, "box_top": box_top, "box_low": box_low,
                 "rsi_b": float(rsi_ser.iloc[b])}
@@ -99,7 +73,7 @@ def evaluate_s8(
 ) -> tuple[Signal, float, float, float, float, float, float, float, float, str]:
     """
     Strategy 8 — purely on daily candles. LONG only.
-    Returns (signal, rsi_at_breakout, entry_trigger, green_low,
+    Returns (signal, rsi_at_big_candle, entry_trigger, green_low,
              zone_low, zone_high, box_top, ma, fib, reason)
     """
     import config_s8 as cfg
@@ -109,8 +83,7 @@ def evaluate_s8(
 
     rsi_period = 14
     min_candles = max(
-        rsi_period + cfg.S8_BIG_CANDLE_LOOKBACK + cfg.S8_PHASE_LOOKBACK
-        + cfg.S8_CONSOL_CANDLES + 2,
+        rsi_period + cfg.S8_BASE_LOOKBACK + cfg.S8_PHASE_LOOKBACK + 2,
         cfg.S8_MA_PERIOD + 2,
     )
     if daily_df is None or len(daily_df) < min_candles:
@@ -122,12 +95,12 @@ def evaluate_s8(
     s = _find_structure(daily_df, rsi_ser, cfg)
     if s is None:
         return (*_HOLD,
-                f"No post-S2 structure (big candle + coil + RSI>{cfg.S8_RSI_THRESH} "
-                f"breakout) in last {cfg.S8_PHASE_LOOKBACK}d")
+                f"No post-S2 structure (big momentum candle ≥{cfg.S8_BIG_CANDLE_BODY_PCT*100:.0f}% "
+                f"+ RSI>{cfg.S8_RSI_THRESH} clearing its base) in last {cfg.S8_PHASE_LOOKBACK}d")
 
     b, box_top, box_low, rsi_b = s["b"], s["box_top"], s["box_low"], s["rsi_b"]
 
-    # Impulse leg: breakout day B through the last completed candle
+    # Impulse leg: the big momentum candle B through the last completed candle
     swing_high = float(daily_df["high"].iloc[b:-1].max())
     if swing_high <= box_top * (1 + cfg.S8_MIN_EXTENSION):
         return (*_HOLD,

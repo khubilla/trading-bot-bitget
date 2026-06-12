@@ -1,4 +1,10 @@
-"""Unit tests for evaluate_s8() — post-S2 bounce at tri-confluence."""
+"""Unit tests for evaluate_s8() — post-S2 bounce at tri-confluence.
+
+Structure (no Darvas coil): a big momentum candle "flies" up out of a
+pre-flight base; box_top/box_low come from that base (the S8_BASE_LOOKBACK
+candles immediately BEFORE the big candle). Price retraces to the
+box_top / 20MA / 61.8%-fib confluence and a small green candle arms entry.
+"""
 import pandas as pd
 import pytest
 
@@ -16,46 +22,61 @@ def _mk_df(rows):
 
 
 # Fixture geometry constants — keep tests and fixture in sync.
-_WARMUP = 50          # flat candles at 100 (RSI/MA warm-up; evaluator needs ≥66 rows)
-_B_IDX = _WARMUP + 4  # breakout day index: warmup, big candle, 3 coil candles, B
-_BOX_LOW = 128.0      # smallest-window coil (n=1) → box_low = min body of last coil candle
+_WARMUP   = 40
+_BOX_LOW  = 100.0      # pre-flight base low
+_BOX_TOP  = 104.0      # pre-flight base high
+_BIG_IDX  = _WARMUP + 10   # big momentum candle index (40 warmup + 10 base candles)
+
+# The 10-candle pre-flight base: rising 100 -> 104, lows floored at 100,
+# highs capped at 104 so box_low=100 and box_top=104 exactly.
+_BASE_ROWS = [
+    (100.0, 100.5, 100.0, 100.3),   # low touches box_low (100)
+    (100.3, 101.0, 100.2, 100.8),
+    (100.8, 101.5, 100.6, 101.2),
+    (101.2, 102.0, 101.0, 101.8),
+    (101.8, 102.5, 101.6, 102.3),
+    (102.3, 103.0, 102.0, 102.8),
+    (102.8, 103.5, 102.6, 103.2),
+    (103.2, 104.0, 103.0, 103.8),   # high touches box_top (104)
+    (103.8, 104.0, 103.5, 103.6),
+    (103.6, 103.9, 103.0, 103.3),   # last base candle; big candle opens from here
+]
 
 
-def _post_s2_bounce_rows(green_body=0.02, green_low_on_zone=True,
-                         extension=0.30, pullback_steps=9):
+def _post_s2_bounce_rows(big_body=0.23, green_body=0.02, green_low_on_zone=True,
+                         flew=True, pullback_steps=8):
     """
-    Synthetic post-S2 bounce:
-      50 flat warm-up candles around 100 (RSI/MA seed)
-      big candle: 100 -> 130 (30% body)
-      coil: 3 tight candles 126-130; smallest valid window is n=1 →
-            box_top=130 (Darvas wick high), box_low=128 (body bottom)
-      breakout day B (idx 54): closes at 136 (> box_top), RSI pumped high
-      impulse leg up to swing_high = box_top*(1+extension)
-      slow 9-candle pullback toward the fib (drags the 20MA up near the zone)
-      last completed candle: small green candle sitting on the zone
-      live forming candle on top
-    fib618 = swing_high - 0.618*(swing_high - 128).
+    Build: 40 rising warmup candles, a 10-candle base [100,104], a big
+    momentum candle that flies up out of the base, a retrace toward the
+    confluence, a small green candle on the zone, then the forming candle.
     """
-    rows = [(100, 100.5, 99.5, 100.0)] * _WARMUP
-    rows += [(100, 131, 100, 130)]                      # big candle, body 30%
-    rows += [(129, 130, 126, 128), (128, 130, 126, 129),
-             (129, 130, 126, 128)]                      # coil; n=1 box: 130/128
-    rows += [(130, 137, 129, 136)]                      # breakout day B
-    swing_high = 130 * (1 + extension)                  # e.g. 169
-    rows += [(136, swing_high, 135, swing_high * 0.99)] # impulse peak
+    rows = []
+    for i in range(_WARMUP):
+        px = 96.0 + (100.0 - 96.0) * i / (_WARMUP - 1)   # gentle rise 96 -> 100
+        rows.append((px, px + 0.3, px - 0.3, px))
+    rows += list(_BASE_ROWS)
+
+    b_open = 103.3
+    b_close = b_open * (1 + big_body) if flew else b_open * 1.005   # 23% -> ~127
+    b_high = b_close + 1.0
+    rows.append((b_open, b_high, 103.0, b_close))         # the "flight" candle
+
+    swing_high = b_high
     fib = swing_high - 0.618 * (swing_high - _BOX_LOW)
-    # pullback: drift down towards fib — enough candles to pull the 20MA near the zone
-    top = swing_high * 0.985
+    # retrace from near swing_high down toward the zone top (~fib)
+    top = swing_high * 0.98
+    target = fib * 1.01
     for i in range(pullback_steps):
-        px = top - (top - fib * 1.01) * (i + 1) / pullback_steps
-        rows += [(px * 1.01, px * 1.02, px * 0.995, px)]
-    # green candle on the zone (or floating just above it when green_low_on_zone=False)
-    g_low = fib * (1.001 if green_low_on_zone else 1.06)
-    g_open = g_low * 1.002
+        px = top - (top - target) * (i + 1) / pullback_steps
+        rows.append((px * 1.005, px * 1.01, px * 0.995, px))
+
+    # small green candle landing on the zone (or floating above when not on-zone)
+    g_low = fib * (1.001 if green_low_on_zone else 1.12)
+    g_open = g_low * 1.003
     g_close = g_open * (1 + green_body)
-    rows += [(g_open, g_close * 1.003, g_low, g_close)]
+    rows.append((g_open, g_close * 1.002, g_low, g_close))
     # live forming candle
-    rows += [(g_close, g_close * 1.002, g_close * 0.998, g_close * 1.001)]
+    rows.append((g_close, g_close * 1.002, g_close * 0.997, g_close * 1.001))
     return rows
 
 
@@ -79,7 +100,6 @@ def test_full_setup_returns_long_with_levels(monkeypatch):
     sig, rsi_b, trigger, green_low, zone_low, zone_high, box_top, ma, fib, reason = \
         evaluate_s8("BTCUSDT", df)
     assert sig == "LONG", reason
-    assert box_top == pytest.approx(130, rel=0.01)
     g = df.iloc[-2]
     assert green_low == pytest.approx(float(g["low"]))
     assert trigger == pytest.approx(float(g["high"]) * 1.005, rel=1e-6)
@@ -87,23 +107,32 @@ def test_full_setup_returns_long_with_levels(monkeypatch):
     assert rsi_b > 70
 
 
-def test_no_breakout_in_lookback_returns_hold(monkeypatch):
-    monkeypatch.setattr("config_s8.S8_CONFLUENCE_TOL", 0.10)
-    monkeypatch.setattr("config_s8.S8_PHASE_LOOKBACK", 3)  # breakout is older than 3 candles
-    sig, *_, reason = evaluate_s8("BTCUSDT", _mk_df(_post_s2_bounce_rows()))
-    assert sig == "HOLD"
-    assert "structure" in reason.lower()
-
-
-def test_continuation_candle_is_not_breakout_day(monkeypatch):
-    """The impulse-peak candle closes above the breakout day, but its 'coil'
-    (the breakout candle) closes ABOVE the big candle body top — the S2
-    containment rule must reject it, anchoring B at the true coil breakout."""
+def test_box_levels_come_from_preflight_base(monkeypatch):
+    """box_top/box_low are the base high/low BEFORE the big candle —
+    NOT the big momentum candle's own high/low."""
     monkeypatch.setattr("config_s8.S8_CONFLUENCE_TOL", 0.10)
     df = _mk_df(_post_s2_bounce_rows())
     sig, _, _, _, _, _, box_top, _, _, reason = evaluate_s8("BTCUSDT", df)
     assert sig == "LONG", reason
-    assert box_top == pytest.approx(130, rel=0.01)  # NOT the breakout candle's high (137)
+    assert box_top == pytest.approx(_BOX_TOP, rel=1e-9)        # 104, base high
+    big_high = float(df["high"].iloc[_BIG_IDX])
+    assert box_top < big_high                                  # NOT the flight candle's high (~128)
+
+
+def test_no_big_momentum_candle_returns_hold(monkeypatch):
+    monkeypatch.setattr("config_s8.S8_CONFLUENCE_TOL", 0.10)
+    # flew=False → no candle with body ≥20% → no structure
+    sig, *_, reason = evaluate_s8("BTCUSDT", _mk_df(_post_s2_bounce_rows(flew=False)))
+    assert sig == "HOLD"
+    assert "structure" in reason.lower()
+
+
+def test_big_candle_outside_phase_lookback_returns_hold(monkeypatch):
+    monkeypatch.setattr("config_s8.S8_CONFLUENCE_TOL", 0.10)
+    monkeypatch.setattr("config_s8.S8_PHASE_LOOKBACK", 3)  # big candle is older than 3 candles
+    sig, *_, reason = evaluate_s8("BTCUSDT", _mk_df(_post_s2_bounce_rows()))
+    assert sig == "HOLD"
+    assert "structure" in reason.lower()
 
 
 def test_red_candle_returns_hold(monkeypatch):
@@ -141,9 +170,8 @@ def test_confluence_spread_too_wide_returns_hold(monkeypatch):
 
 def test_leg_too_small_returns_hold(monkeypatch):
     monkeypatch.setattr("config_s8.S8_CONFLUENCE_TOL", 0.10)
-    monkeypatch.setattr("config_s8.S8_MIN_EXTENSION", 0.50)  # demand 50% leg
-    sig, *_, reason = evaluate_s8(
-        "BTCUSDT", _mk_df(_post_s2_bounce_rows(extension=0.30)))
+    monkeypatch.setattr("config_s8.S8_MIN_EXTENSION", 0.50)  # demand a 50% flight
+    sig, *_, reason = evaluate_s8("BTCUSDT", _mk_df(_post_s2_bounce_rows()))
     assert sig == "HOLD"
     assert "leg" in reason.lower() or "extension" in reason.lower()
 
@@ -153,5 +181,5 @@ def test_fib_arithmetic_exact(monkeypatch):
     df = _mk_df(_post_s2_bounce_rows())
     sig, _, _, _, _, _, box_top, _, fib, reason = evaluate_s8("BTCUSDT", df)
     assert sig == "LONG", reason
-    swing_high = float(df["high"].iloc[_B_IDX:-1].max())   # high from breakout day on
+    swing_high = float(df["high"].iloc[_BIG_IDX:-1].max())   # high from big candle on
     assert fib == pytest.approx(swing_high - 0.618 * (swing_high - _BOX_LOW), rel=1e-9)

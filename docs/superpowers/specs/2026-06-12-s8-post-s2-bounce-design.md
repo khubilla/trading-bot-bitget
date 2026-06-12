@@ -22,6 +22,17 @@ callback on the rest, preset SL).
 
 ## 2. Structure detection (Approach B — structural single-pass)
 
+> **Amended 2026-06-12 (post-implementation):** the Darvas-coil requirement was
+> dropped. `box_top`/`box_low` now come from a **pre-flight base** — the
+> `S8_BASE_LOOKBACK` (default 10) candles immediately *before* the big momentum
+> candle (box_top = base high, box_low = base low, no tightness requirement).
+> The only structural requirement is a big momentum candle (body ≥ 20%,
+> RSI > 70) that **closes above the base high** (flies out of the base).
+> Params `S8_CONSOL_CANDLES`, `S8_CONSOL_RANGE_PCT`, `S8_DARVAS_WICK_PCT`,
+> `S8_BIG_CANDLE_LOOKBACK` were removed; `S8_BASE_LOOKBACK` added. The original
+> coil-based description below is retained for historical context. See
+> `docs/strategies/S8.md` for the authoritative current spec.
+
 `evaluate_s8(symbol, daily_df)` scans backward over completed daily candles to
 find the most recent **breakout day B** within `S8_PHASE_LOOKBACK` (default 15)
 days such that, as of day B:

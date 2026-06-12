@@ -1,25 +1,24 @@
 # ============================================================
 #  Strategy 8 Configuration — Post-S2 Bounce (Tri-Confluence) — Bybit
 # ============================================================
-# LONG-only daily bounce play in the phase AFTER an S2-style breakout
+# LONG-only daily bounce play in the phase AFTER a big momentum move
 # that failed to continue upward:
-#   1. S2-like structure found in recent history: big momentum candle,
-#      tight Darvas coil, RSI>70 breakout above the coil box top
+#   1. A big momentum candle "flies" up out of a pre-flight base
+#      (body ≥20%, RSI>70, closing above the base high). The base may
+#      coil but a tight coil is NOT required.
 #   2. Price pulled back to a tri-confluence support zone:
-#      coil box top + daily 20MA + 61.8% fib of the impulse leg
+#      base high (box_top) + daily 20MA + 61.8% fib of the impulse leg
 #   3. A small green daily candle sits on the zone
 #   4. Stop-buy above that green candle's high
 
 S8_ENABLED = True
 
 # ── Post-S2 Structure Detection ──────────────────────────── #
-S8_BIG_CANDLE_BODY_PCT = 0.20   # Min 20% body to qualify as momentum candle (matches S2)
-S8_BIG_CANDLE_LOOKBACK = 30     # Big candle searched within 30 days before breakout day B
-S8_RSI_THRESH          = 70     # Daily RSI on breakout day B must exceed this
-S8_CONSOL_CANDLES      = 5      # Max coil size before B (tries 1 to 5, matches S2)
-S8_CONSOL_RANGE_PCT    = 0.15   # Max 15% effective coil range (matches S2)
-S8_DARVAS_WICK_PCT     = 0.05   # Darvas top rule: wick >5% of body top → use body (matches S2)
-S8_PHASE_LOOKBACK      = 15     # Breakout day B must be within last 15 completed candles
+S8_BIG_CANDLE_BODY_PCT = 0.20   # Min 20% body to qualify as the momentum "flight" candle
+S8_RSI_THRESH          = 70     # Daily RSI on the big momentum candle must exceed this
+S8_BASE_LOOKBACK       = 10     # Candles immediately BEFORE the big candle that form the
+                                # pre-flight base; box_top = base high, box_low = base low
+S8_PHASE_LOOKBACK      = 15     # Big momentum candle must be within last 15 completed candles
 
 # ── Tri-Confluence Zone ──────────────────────────────────── #
 S8_MIN_EXTENSION   = 0.05   # swing_high must exceed box_top by ≥5% (real impulse leg)

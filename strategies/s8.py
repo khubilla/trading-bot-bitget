@@ -263,6 +263,87 @@ def handle_pending_tick(bot, symbol: str, sig: dict, balance: float,
     return None
 
 
+# ── S8 Exit Placement (exits copy S2) ─────────────────────── #
+
+def compute_and_place_long_exits(symbol: str, qty_str: str, fill: float,
+                                 sl_floor: float, stop_loss_pct: float) -> tuple[bool, float, float]:
+    """
+    Compute S8 long-side SL/trail levels and place the S2-style 2-leg TP exits.
+    sl_floor is the structural SL already floored by the caller
+    (green candle low × 0.999); the 5% cap from fill still applies on top.
+    SL itself is attached as a preset on the entry order — the value returned
+    here is the recorded/recomputed level.
+    Returns (ok, sl_trig, trail_trig).
+    """
+    import trader
+    from config_s8 import S8_TRAILING_TRIGGER_PCT, S8_TRAILING_RANGE_PCT
+    import strategies.s2 as _s2   # module ref so test patches of the primitive apply
+
+    trail_trig = float(trader._round_price(fill * (1 + S8_TRAILING_TRIGGER_PCT), symbol))
+    sl_trig    = float(trader._round_price(max(sl_floor, fill * (1 - stop_loss_pct)), symbol))
+    sl_exec    = float(trader._round_price(sl_trig * 0.995, symbol))
+    ok = _s2._place_partial_trail_exits(symbol, "long", qty_str, sl_trig, sl_exec,
+                                        trail_trig, S8_TRAILING_RANGE_PCT)
+    return ok, sl_trig, trail_trig
+
+
+# ── S8 Swing Trail (same reference-gated cycle as S2) ─────── #
+
+def maybe_trail_sl(symbol: str, ap: dict, tr_mod, st_mod, partial_done: bool) -> None:
+    """
+    Structural swing trail for S8 LONG: only active after the partial has fired.
+    Pulls SL up to the 1D swing-low after price exceeds the prior swing-high.
+    """
+    import config_s8
+    from tools import find_swing_high_target, find_swing_low_after_ref
+
+    if not getattr(config_s8, "S8_USE_SWING_TRAIL", False):
+        return
+    if ap.get("side") != "LONG" or not partial_done:
+        return
+    try:
+        lb    = config_s8.S8_SWING_LOOKBACK
+        cs_df = tr_mod.get_candles(symbol, "1D", limit=lb + 5)
+        mark  = tr_mod.get_mark_price(symbol)
+        if cs_df.empty or len(cs_df) < 3:
+            return
+        ref = ap.get("swing_trail_ref")
+        if ref is None:
+            ap["swing_trail_ref"] = find_swing_high_target(cs_df, mark, lookback=lb)
+            return
+        if mark >= ref:
+            raw = find_swing_low_after_ref(cs_df, mark, ref, lookback=lb)
+            if raw:
+                swing_sl = raw * (1 - config_s8.S8_STOP_LOSS_PCT)
+                if swing_sl > ap.get("sl", 0) and tr_mod.update_position_sl(symbol, swing_sl, hold_side="long"):
+                    ap["sl"] = swing_sl
+                    st_mod.update_open_trade_sl(symbol, swing_sl)
+                    ap["swing_trail_ref"] = find_swing_high_target(cs_df, mark, lookback=lb)
+                    logger.info(f"[S8][{symbol}] 📍 Swing trail: SL → {swing_sl:.5f}")
+    except Exception as e:
+        logger.error(f"S8 swing trail error [{symbol}]: {e}")
+
+
+# ── S8 DNA Snapshot Fields ────────────────────────────────── #
+
+def dna_fields(candles: dict) -> dict:
+    """S8 trade fingerprint: daily EMA slope, price vs EMA, RSI bucket (same as S2)."""
+    from indicators import calculate_ema, calculate_rsi
+    from trade_dna import ema_slope, price_vs_ema, rsi_bucket, _is_empty, _closes_from
+
+    out = {}
+    daily = candles.get("daily")
+    if _is_empty(daily):
+        return out
+    closes_d = _closes_from(daily)
+    ema_d    = calculate_ema(closes_d, 20)
+    rsi_d    = calculate_rsi(closes_d)
+    out["snap_trend_daily_ema_slope"]    = ema_slope(closes_d, 20)
+    out["snap_trend_daily_price_vs_ema"] = price_vs_ema(float(closes_d.iloc[-1]), float(ema_d.iloc[-1]))
+    out["snap_trend_daily_rsi_bucket"]   = rsi_bucket(float(rsi_d.iloc[-1]))
+    return out
+
+
 # ── S8 Paper Trail Setup ──────────────────────────────────── #
 
 def compute_paper_trail_long(mark: float, sl_price: float, tp_price_abs: float = 0,

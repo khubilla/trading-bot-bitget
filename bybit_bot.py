@@ -5,7 +5,7 @@ This file is intentionally short. It does NOT clone bot.py's 2700+ lines.
 
 Instead, it installs sys.modules aliases at startup that redirect:
     config       → config_bybit
-    config_s1..7 → config_bybit_s1..7
+    config_s1..8 → config_bybit_s1..8
     bitget       → bybit
     trader       → bybit_trader
     scanner      → bybit_scanner
@@ -50,6 +50,7 @@ import config_bybit_s4
 import config_bybit_s5
 import config_bybit_s6
 import config_bybit_s7
+import config_bybit_s8
 sys.modules["config_s1"] = config_bybit_s1
 sys.modules["config_s2"] = config_bybit_s2
 sys.modules["config_s3"] = config_bybit_s3
@@ -57,6 +58,7 @@ sys.modules["config_s4"] = config_bybit_s4
 sys.modules["config_s5"] = config_bybit_s5
 sys.modules["config_s6"] = config_bybit_s6
 sys.modules["config_s7"] = config_bybit_s7
+sys.modules["config_s8"] = config_bybit_s8
 
 import bybit
 import bybit_trader

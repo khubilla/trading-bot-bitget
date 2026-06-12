@@ -5,7 +5,7 @@ This file is intentionally short. It does NOT clone bot.py's 2700+ lines.
 
 Instead, it installs sys.modules aliases at startup that redirect:
     config       → config_binance
-    config_s1..7 → config_binance_s1..7
+    config_s1..8 → config_binance_s1..8
     bitget       → binance
     trader       → binance_trader
     scanner      → binance_scanner
@@ -49,6 +49,7 @@ import config_binance_s4
 import config_binance_s5
 import config_binance_s6
 import config_binance_s7
+import config_binance_s8
 sys.modules["config_s1"] = config_binance_s1
 sys.modules["config_s2"] = config_binance_s2
 sys.modules["config_s3"] = config_binance_s3
@@ -56,6 +57,7 @@ sys.modules["config_s4"] = config_binance_s4
 sys.modules["config_s5"] = config_binance_s5
 sys.modules["config_s6"] = config_binance_s6
 sys.modules["config_s7"] = config_binance_s7
+sys.modules["config_s8"] = config_binance_s8
 
 import binance
 import binance_trader

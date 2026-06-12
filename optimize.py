@@ -112,6 +112,9 @@ STRATEGY_COLUMNS = {
            "snap_rsi", "snap_rsi_peak", "snap_spike_body_pct",
            "snap_rsi_div", "snap_box_top", "snap_box_low_initial",
            "snap_sentiment", "snap_sl", "snap_sr_clearance_pct"],
+    "S8": ["result", "pnl_pct", "exit_reason",
+           "snap_daily_rsi", "snap_entry_trigger", "snap_sl",
+           "snap_box_range_pct", "snap_sentiment"],
 }
 
 # ── Trade loader ──────────────────────────────────────────────────── #

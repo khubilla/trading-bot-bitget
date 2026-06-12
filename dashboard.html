@@ -1184,6 +1184,7 @@
         <button class="strat-tab"        id="tab-s5" onclick="switchTab('s5')">S5 — SMC OB</button>
         <button class="strat-tab"        id="tab-s6" onclick="switchTab('s6')">S6 — V-Sweep</button>
         <button class="strat-tab"        id="tab-s7" onclick="switchTab('s7')">S7 — Darvas</button>
+        <button class="strat-tab"        id="tab-s8" onclick="switchTab('s8')">S8 — Bounce</button>
       </div>
       <div class="scanner-toolbar">
         <input id="pair-search" type="text" placeholder="Search pair…" oninput="onSearchInput(this.value)" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')">
@@ -1463,6 +1464,7 @@
       <div class="stab"        data-s="S3">S3</div>
       <div class="stab"        data-s="S4">S4</div>
       <div class="stab"        data-s="S7">S7</div>
+      <div class="stab"        data-s="S8">S8</div>
       <div class="stab"        data-s="S5">S5</div>
       <div class="stab"        data-s="S6">S6</div>
     </div>
@@ -1473,6 +1475,7 @@
       <div class="strategy-panel"        data-s="S3"></div>
       <div class="strategy-panel"        data-s="S4"></div>
       <div class="strategy-panel"        data-s="S7"></div>
+      <div class="strategy-panel"        data-s="S8"></div>
       <div class="strategy-panel"        data-s="S5"></div>
       <div class="strategy-panel"        data-s="S6"></div>
     </div>
@@ -1552,7 +1555,7 @@ const Analytics = (() => {
 
   function renderAll() {
     if (!state.data) return;
-    for (const s of ['S1','S2','S3','S4','S5','S6','S7']) {
+    for (const s of ['S1','S2','S3','S4','S5','S6','S7','S8']) {
       renderStrategy(s, state.data.strategies[s]);
     }
   }
@@ -1764,6 +1767,7 @@ const STRATEGY_SNAP_COLS = {
   S5: ['snap_s5_ob_low','snap_s5_ob_high','snap_s5_tp'],
   S6: ['snap_s6_peak','snap_s6_drop_pct','snap_s6_rsi_at_peak'],
   S7: ['snap_rsi_peak','snap_spike_body_pct','snap_rsi_div','snap_box_top','snap_box_low_initial'],
+  S8: ['snap_daily_rsi','snap_entry_trigger','snap_sl','snap_box_range_pct'],
 };
 const SHARED_SNAP_COLS = ['snap_sr_clearance_pct'];
 
@@ -1981,7 +1985,7 @@ function render(s) {
 
   // ── Hide tabs for disabled strategies
   if (s.strategy_enabled) {
-    ['S1','S2','S3','S4','S5','S6','S7'].forEach(k => {
+    ['S1','S2','S3','S4','S5','S6','S7','S8'].forEach(k => {
       const tab = $('tab-' + k.toLowerCase());
       if (tab) tab.style.display = s.strategy_enabled[k] ? '' : 'none';
     });
@@ -2165,7 +2169,7 @@ function render(s) {
 }
 
 // ── Entry Chart Modal ──────────────────────────────────
-const _ENTRY_CHART_INTERVAL = {S1:'3m', S2:'1D', S3:'15m', S4:'1D', S5:'15m', S6:'1D', S7:'1H'};
+const _ENTRY_CHART_INTERVAL = {S1:'3m', S2:'1D', S3:'15m', S4:'1D', S5:'15m', S6:'1D', S7:'1H', S8:'1D'};
 
 async function openCombinedChart(trade) {
   if (!trade || !trade.trade_id) return openEntryChart(trade);
@@ -2849,7 +2853,7 @@ function isoToUnix(iso) {
 
 function openTradeChart(trade) {
   if (!trade || !trade.entry || !trade.open_at) return;
-  const tabMap = { S1: 's1', S2: 's2', S3: 's3', S4: 's4', S5: 's5', S6: 's6', S7: 's7' };
+  const tabMap = { S1: 's1', S2: 's2', S3: 's3', S4: 's4', S5: 's5', S6: 's6', S7: 's7', S8: 's8' };
   chartActiveTab  = tabMap[trade.strategy] || 's1';
   currentInterval = trade.interval || '15m';
   window._tradeOverlay = {
@@ -2959,6 +2963,13 @@ function signalScore(sym, ps, tab) {
     const srClear = (ps.s7_sr_support_pct != null && ps.s7_sr_support_pct >= 15)
                  || (ps.s7_sr_resistance_pct != null && ps.s7_sr_resistance_pct >= 15);
     return (spike ? 1 : 0) + (spike && rsiHot ? 1 : 0) + (spike && rsiHot && boxOk ? 2 : 0) + (srClear ? 1 : 0) + (sig !== 'HOLD' ? 10 : 0);
+  }
+  if (tab === 's8') {
+    const reason    = ps.s8_reason || '';
+    const sig       = ps.s8_signal || 'HOLD';
+    const structure = !reason.includes('No post-S2 structure') && reason !== '';
+    const confluence = reason.includes('Confluence ✅') || sig !== 'HOLD';
+    return (structure ? 1 : 0) + (confluence ? 2 : 0) + (sig !== 'HOLD' ? 10 : 0);
   }
   return 0;
 }
@@ -3229,6 +3240,59 @@ function s7CardHTML(sym, ps) {
     </div>`;
 }
 
+function s8CardHTML(sym, ps) {
+  const sig      = ps.s8_signal || 'HOLD';
+  const reason   = ps.s8_reason || '—';
+  const symShort = sym.replace('USDT', '');
+  const cardClass = sig === 'LONG' ? 'signal-long' : '';
+  const structOk  = reason !== '—' && !reason.includes('No post-S2 structure') && !reason.includes('Not enough');
+  const confluence = reason.includes('Confluence ✅') || sig !== 'HOLD';
+  const structClass = structOk ? 'pass' : 'fail';
+  const confClass   = !structOk ? 'muted' : confluence ? 'pass' : 'fail';
+  const zoneLow  = ps.s8_zone_low;
+  const zoneHigh = ps.s8_zone_high;
+  const zoneLabel = zoneLow ? `${zoneLow.toFixed(4)}–${zoneHigh ? zoneHigh.toFixed(4) : '?'}` : '—';
+  const levelsLabel = ps.s8_box_top
+    ? `box=${ps.s8_box_top.toFixed(4)} ma=${ps.s8_ma20 ? ps.s8_ma20.toFixed(4) : '?'} fib=${ps.s8_fib618 ? ps.s8_fib618.toFixed(4) : '?'}`
+    : '—';
+  const trigger   = ps.s8_trigger;
+  const trigClass = sig === 'LONG' ? 'pass' : 'muted';
+  const trigLabel = trigger ? `> ${trigger.toFixed(4)}` : '—';
+  const reasonClass = sig !== 'HOLD' ? 'signal' : confluence ? 'active' : structOk ? 'active' : '';
+  const age = ps.updated_at ? (() => {
+    const sec = Math.floor((Date.now() - new Date(ps.updated_at).getTime()) / 1000);
+    if (sec < 60) return sec + 's ago';
+    if (sec < 3600) return Math.floor(sec/60) + 'm ago';
+    return Math.floor(sec/3600) + 'h ago';
+  })() : 'not scanned';
+  return `
+    <div class="pair-card ${cardClass}" data-symbol="${sym}">
+      <div class="pair-top">
+        <div class="pair-name" title="${sym}">${symShort}</div>
+        <span class="pair-sig-badge ${sig}">${sig}</span>
+      </div>
+      <div class="pair-checks">
+        <div class="pair-check">
+          <span class="check-label">Post-S2 structure</span>
+          <span class="check-val ${structClass}">${structOk ? 'Found ✓' : 'Not found'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">Tri-confluence</span>
+          <span class="check-val ${confClass}">${!structOk ? '—' : confluence ? zoneLabel : 'No cluster'}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">Levels</span>
+          <span class="check-val ${confClass}">${levelsLabel}</span>
+        </div>
+        <div class="pair-check">
+          <span class="check-label">Buy trigger</span>
+          <span class="check-val ${trigClass}">${trigLabel}</span>
+        </div>
+      </div>
+      <div class="pair-reason ${reasonClass}">${reason.replace(/[✅]/g,'✓').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0,60)} · ${age}</div>
+    </div>`;
+}
+
 function s5CardHTML(sym, ps) {
   const sig      = ps.s5_signal || 'HOLD';
   const reason   = ps.s5_reason || '—';
@@ -3387,7 +3451,9 @@ function renderPairGrid(s) {
   $('pair-count').textContent = pairs.length + ' pairs';
   const grid = $('pair-grid-inner');
   let html = '';
-  if (activeTab === 's7') {
+  if (activeTab === 's8') {
+    html = pairs.map(sym => s8CardHTML(sym, pairStates[sym] || {})).join('');
+  } else if (activeTab === 's7') {
     html = pairs.map(sym => s7CardHTML(sym, pairStates[sym] || {})).join('');
   } else if (activeTab === 's6') {
     html = pairs.map(sym => s6CardHTML(sym, pairStates[sym] || {})).join('');
@@ -3477,6 +3543,7 @@ function openChart(symbol) {
     else if (chartActiveTab === 's4') currentInterval = '1D';
     else if (chartActiveTab === 's6') currentInterval = '1D';
     else if (chartActiveTab === 's7') currentInterval = '1H';
+    else if (chartActiveTab === 's8') currentInterval = '1D';
     else currentInterval = '3m';
   }
   $('chartOverlay').classList.add('open');
@@ -4173,6 +4240,7 @@ function attachCardClicks() {
       else if (strat === 'S5') { chartActiveTab = 's5'; currentInterval = '15m'; }
       else if (strat === 'S6') { chartActiveTab = 's6'; currentInterval = '1D';  }
       else if (strat === 'S7') { chartActiveTab = 's7'; currentInterval = '1H';  }
+      else if (strat === 'S8') { chartActiveTab = 's8'; currentInterval = '1D';  }
       openChart(card.dataset.symbol);
     };
   });

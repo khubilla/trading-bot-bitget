@@ -13,7 +13,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Union
 
-STRATEGIES = ("S1", "S2", "S3", "S4", "S5", "S6", "S7")
+STRATEGIES = ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8")
 
 STRATEGY_SNAP_FIELDS = {
     "S1": ("snap_rsi", "snap_adx", "snap_htf", "snap_coil",
@@ -24,6 +24,7 @@ STRATEGY_SNAP_FIELDS = {
            "snap_rsi_div", "snap_rsi_div_str"),
     "S5": ("snap_s5_ob_low", "snap_s5_ob_high", "snap_s5_tp"),
     "S6": ("snap_s6_peak", "snap_s6_drop_pct", "snap_s6_rsi_at_peak"),
+    "S8": ("snap_daily_rsi", "snap_entry_trigger", "snap_sl", "snap_box_range_pct"),
 }
 
 SHARED_SNAP = ("snap_sr_clearance_pct",)

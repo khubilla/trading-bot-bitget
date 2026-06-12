@@ -21,6 +21,7 @@ import config_s4
 import config_s5
 import config_s6
 import config_s7
+import config_s8
 import state as st
 from scanner import get_qualified_pairs_and_sentiment
 from strategies.s1 import evaluate_s1, detect_consolidation, check_daily_trend, check_exit
@@ -30,6 +31,7 @@ from strategies.s4 import evaluate_s4
 from strategies.s5 import evaluate_s5
 from strategies.s6 import evaluate_s6
 from strategies.s7 import evaluate_s7
+from strategies.s8 import evaluate_s8
 from indicators import calculate_rsi
 from tools import (
     check_htf,
@@ -337,7 +339,7 @@ class MTFBot:
         st.set_status("RUNNING")
         # Rebuild win/loss stats from CSV so header survives restarts
         _rebuild_stats_from_csv(config.TRADE_LOG)
-        st.add_scan_log("Bot initialised (S1 + S2 + S3 + S4 + S5 + S6 + S7)", "INFO")
+        st.add_scan_log("Bot initialised (S1 + S2 + S3 + S4 + S5 + S6 + S7 + S8)", "INFO")
 
         logger.info("🤖 Bitget USDT-Futures MTF Bot — Strategy 1 + 2")
         logger.info(f"   Mode         : {'DEMO' if config.DEMO_MODE else '⚡ LIVE'}")
@@ -414,7 +416,7 @@ class MTFBot:
             #      (covers manually-added rows that never went through bot code)
             if not PAPER_MODE:
                 for sym, ap in list(self.active_positions.items()):
-                    if ap.get("strategy") not in ("S1", "S2", "S3", "S4", "S5", "S6", "S7"):
+                    if ap.get("strategy") not in ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"):
                         continue
                     if ap.get("partial_logged"):
                         continue
@@ -959,7 +961,7 @@ class MTFBot:
                     )
 
                     # Track initial qty and detect live partial close (S1-S6)
-                    if not PAPER_MODE and ap.get("strategy") in ("S1", "S2", "S3", "S4", "S5", "S6", "S7"):
+                    if not PAPER_MODE and ap.get("strategy") in ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"):
                         if "initial_qty" not in ap:
                             ap["initial_qty"] = float(pos["qty"])
                             st.update_position_memory(sym, initial_qty=float(pos["qty"]))
@@ -1030,7 +1032,7 @@ class MTFBot:
                     elif _strat == "S3":
                         from strategies.s3 import maybe_trail_sl as _trail_s3
                         _trail_s3(sym, ap, tr, st)
-                    elif _strat in ("S2", "S4", "S7"):
+                    elif _strat in ("S2", "S4", "S7", "S8"):
                         _partial_done = (
                             tr.is_partial_closed(sym) if PAPER_MODE
                             else ap.get("partial_logged", False)
@@ -1041,6 +1043,9 @@ class MTFBot:
                         elif _strat == "S7":
                             from strategies.s7 import maybe_trail_sl as _trail_s7
                             _trail_s7(sym, ap, tr, st, _partial_done)
+                        elif _strat == "S8":
+                            from strategies.s8 import maybe_trail_sl as _trail_s8
+                            _trail_s8(sym, ap, tr, st, _partial_done)
                         else:
                             from strategies.s4 import maybe_trail_sl as _trail_s4
                             _trail_s4(sym, ap, tr, st, _partial_done)
@@ -1464,6 +1469,16 @@ class MTFBot:
             _s7_res = find_nearest_resistance(daily_df, close)
             s7_sr_res_pct = round((_s7_res - close) / close * 100, 1) if _s7_res else None
 
+        # ── Strategy 8 (post-S2 bounce at tri-confluence) ────────── #
+        (s8_sig, s8_rsi, s8_trigger, s8_green_low, s8_zone_low, s8_zone_high,
+         s8_box_top, s8_ma20, s8_fib618, s8_reason) = (
+            "HOLD", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ""
+        )
+        if config_s8.S8_ENABLED and self.sentiment.direction == "BULLISH":
+            (s8_sig, s8_rsi, s8_trigger, s8_green_low, s8_zone_low, s8_zone_high,
+             s8_box_top, s8_ma20, s8_fib618, s8_reason) = evaluate_s8(symbol, daily_df)
+            logger.info(f"[S8][{symbol}] {s8_reason}")
+
         # ── Strategy 6 ───────────────────────────────────────────── #
         s6_sig, s6_peak_level, s6_sl, s6_drop_pct, s6_rsi_at_peak, s6_reason = "HOLD", 0.0, 0.0, 0.0, 0.0, ""
         if config_s6.S6_ENABLED:
@@ -1493,7 +1508,7 @@ class MTFBot:
 
         st.update_pair_state(symbol, {
             "rsi": rsi_val, "htf_bull": htf_bull, "htf_bear": htf_bear,
-            "signal": s1_sig if s1_sig != "HOLD" else (s2_sig if s2_sig != "HOLD" else (s3_sig if s3_sig != "HOLD" else (s4_sig if s4_sig != "HOLD" else (s7_sig if s7_sig != "HOLD" else ("PENDING" if s5_sig.startswith("PENDING") else (s6_sig if s6_sig != "HOLD" else s5_sig)))))),
+            "signal": s1_sig if s1_sig != "HOLD" else (s2_sig if s2_sig != "HOLD" else (s3_sig if s3_sig != "HOLD" else (s4_sig if s4_sig != "HOLD" else (s7_sig if s7_sig != "HOLD" else (s8_sig if s8_sig != "HOLD" else ("PENDING" if s5_sig.startswith("PENDING") else (s6_sig if s6_sig != "HOLD" else s5_sig))))))),
             "s1_signal": s1_sig,
             "s2_signal": s2_sig,
             "price": close,
@@ -1524,7 +1539,7 @@ class MTFBot:
             "s5_sr_pct":  s5_sr_pct,
             "rsi_ok": rsi_ok,
             "adx": round(adx_val, 1), "trend_ok": trend_ok,
-            "strategy": "S1" if s1_sig != "HOLD" else ("S2" if s2_sig != "HOLD" else ("S3" if s3_sig != "HOLD" else ("S4" if s4_sig != "HOLD" else ("S7" if s7_sig != "HOLD" else ("S6" if s6_sig not in ("HOLD", "") else ("S5" if s5_sig not in ("HOLD", "") else "S1")))))),
+            "strategy": "S1" if s1_sig != "HOLD" else ("S2" if s2_sig != "HOLD" else ("S3" if s3_sig != "HOLD" else ("S4" if s4_sig != "HOLD" else ("S7" if s7_sig != "HOLD" else ("S8" if s8_sig != "HOLD" else ("S6" if s6_sig not in ("HOLD", "") else ("S5" if s5_sig not in ("HOLD", "") else "S1"))))))),
             "s2_daily_rsi": s2_rsi,
             "s2_big_candle": s2_rsi > 0 and ("big_candle" in s2_reason or "Big candle" in s2_reason or s2_bh > 0),
             "s2_coiling":    s2_bl > 0 and s2_bh > 0 and s2_sig == "HOLD",
@@ -1548,6 +1563,16 @@ class MTFBot:
             "s7_div_str":         s7_div_str,
             "s7_sr_support_pct":    s7_sr_sup_pct,
             "s7_sr_resistance_pct": s7_sr_res_pct,
+            "s8_signal":     s8_sig,
+            "s8_reason":     s8_reason,
+            "s8_trigger":    s8_trigger if s8_trigger > 0 else None,
+            "s8_green_low":  s8_green_low if s8_green_low > 0 else None,
+            "s8_zone_low":   s8_zone_low if s8_zone_low > 0 else None,
+            "s8_zone_high":  s8_zone_high if s8_zone_high > 0 else None,
+            "s8_box_top":    s8_box_top if s8_box_top > 0 else None,
+            "s8_ma20":       s8_ma20 if s8_ma20 > 0 else None,
+            "s8_fib618":     s8_fib618 if s8_fib618 > 0 else None,
+            "s8_daily_rsi":  round(s8_rsi, 1) if s8_rsi else None,
             # Reset S5 priority rank each cycle — patched in by _execute_best_s5_candidate
             "s5_priority_rank":  None,
             "s5_priority_score": None,
@@ -1639,6 +1664,18 @@ class MTFBot:
                 "s7_rsi": s7_rsi, "s7_rsi_peak": s7_rsi_peak,
                 "s7_body_pct": s7_body_pct, "s7_div": s7_div, "s7_div_str": s7_div_str,
                 "s7_reason": s7_reason, "daily_df": daily_df,
+            })
+
+        # ── Collect S8 candidate ──────────────────────────────────── #
+        if s8_sig == "LONG" and s8_trigger > 0:
+            s8_rr = round(config_s8.S8_TAKE_PROFIT_PCT / config_s8.S8_STOP_LOSS_PCT, 2)
+            self.candidates.append({
+                "strategy": "S8", "symbol": symbol, "sig": "LONG",
+                "rr": s8_rr, "sr_pct": None,
+                "s8_trigger": s8_trigger, "s8_green_low": s8_green_low,
+                "s8_zone_low": s8_zone_low, "s8_zone_high": s8_zone_high,
+                "s8_box_top": s8_box_top, "s8_ma20": s8_ma20, "s8_fib618": s8_fib618,
+                "s8_rsi": s8_rsi, "s8_reason": s8_reason, "daily_df": daily_df,
             })
 
         # ── Collect S6 candidate ──────────────────────────────────── #
@@ -1745,6 +1782,11 @@ class MTFBot:
                     min_bal = 5.0 / (config_s7.S7_TRADE_SIZE_PCT * config_s7.S7_LEVERAGE)
                     if balance >= min_bal:
                         self._queue_s7_pending(candidate)
+            elif strategy == "S8":
+                if sym not in self.pending_signals:
+                    min_bal = 5.0 / (config_s8.S8_TRADE_SIZE_PCT * config_s8.S8_LEVERAGE)
+                    if balance >= min_bal:
+                        self._queue_s8_pending(candidate)
             elif strategy == "S5":
                 with self._trade_lock:
                     if sym in self.active_positions:
@@ -2216,6 +2258,11 @@ class MTFBot:
         from strategies.s7 import queue_pending
         queue_pending(self, c)
 
+    def _queue_s8_pending(self, c: dict) -> None:
+        """Delegate to strategies.s8.queue_pending."""
+        from strategies.s8 import queue_pending
+        queue_pending(self, c)
+
     def _fire_s2(self, symbol: str, sig: dict, mark: float, balance: float) -> None:
         """Open S2 LONG at fire time. Runs S/R check against pair_states."""
         ps = st.get_pair_state(symbol)
@@ -2575,6 +2622,69 @@ class MTFBot:
             "trade_id": trade["trade_id"],
         }
 
+    def _fire_s8(self, symbol: str, sig: dict, mark: float, balance: float) -> None:
+        """Open S8 LONG at fire time. Single full entry, no scale-in."""
+        sl_floor = max(sig["s8_green_low"] * 0.999,
+                       mark * (1 - config_s8.S8_STOP_LOSS_PCT))
+        if config.CLAUDE_FILTER_ENABLED:
+            _cd = claude_approve("S8", symbol, {
+                "RSI@breakout": sig.get("snap_daily_rsi", "?"),
+                "Confluence width": f"{sig.get('snap_box_range_pct', '?')}%",
+                "Sentiment": sig.get("snap_sentiment", "?"),
+                "Entry": round(mark, 5), "SL": round(sl_floor, 5),
+            })
+            if not _cd["approved"]:
+                logger.info(f"[S8][{symbol}] 🤖 Claude rejected: {_cd['reason']}")
+                st.add_scan_log(f"[S8][{symbol}] 🤖 Rejected: {_cd['reason']}", "WARN")
+                self.pending_signals.pop(symbol, None)
+                st.save_pending_signals(self.pending_signals)
+                return
+        size_multiplier = get_position_size_multiplier()
+        adjusted_size = config_s8.S8_TRADE_SIZE_PCT * size_multiplier
+        size_note = f" ({size_multiplier}x)" if size_multiplier != 1.0 else ""
+        st.add_scan_log(f"[S8][{symbol}] 🟢 LONG fired @ {mark:.5f}{size_note}", "SIGNAL")
+        trade = tr.open_long(
+            symbol, box_low=sig.get("s8_zone_low", 0), sl_floor=sl_floor,
+            leverage=config_s8.S8_LEVERAGE,
+            trade_size_pct=adjusted_size,
+            take_profit_pct=config_s8.S8_TAKE_PROFIT_PCT,
+            stop_loss_pct=config_s8.S8_STOP_LOSS_PCT,
+            strategy       = "S8",
+        )
+        trade["strategy"]           = "S8"
+        trade["box_high"]           = sig.get("s8_zone_high")
+        trade["snap_daily_rsi"]     = sig.get("snap_daily_rsi")
+        trade["snap_box_range_pct"] = sig.get("snap_box_range_pct")
+        trade["snap_entry_trigger"] = sig.get("s8_trigger")
+        trade["snap_sl"]            = round(sl_floor, 8)
+        trade["snap_sentiment"]     = sig.get("snap_sentiment")
+        trade["trade_id"] = uuid.uuid4().hex[:8]
+        _daily_df = None
+        try:
+            _daily_df = tr.get_candles(symbol, "1D", limit=100)
+        except Exception:
+            pass
+        trade.update(dna_snapshot("S8", symbol, {"daily": _daily_df}))
+        self._log_regime(symbol, _daily_df, trade)
+        _log_trade("S8_LONG", trade)
+        st.add_open_trade(trade)
+        try:
+            _candles = _df_to_candles(_daily_df) \
+                if _daily_df is not None and not _daily_df.empty else []
+            snapshot.save_snapshot(
+                trade_id=trade["trade_id"], event="open",
+                symbol=symbol, interval="1D", candles=_candles,
+                event_price=float(trade.get("entry", 0)),
+            )
+        except Exception as e:
+            logger.warning(f"[S8][{symbol}] snapshot save failed: {e}")
+        if PAPER_MODE: tr.tag_strategy(symbol, "S8")
+        self.active_positions[symbol] = {
+            "side": "LONG", "strategy": "S8",
+            "box_high": sig.get("s8_zone_high"), "box_low": sig.get("s8_zone_low"),
+            "trade_id": trade["trade_id"],
+        }
+
     def _fire_s6(self, symbol: str, sig: dict, mark: float, balance: float) -> None:
         """Open S6 SHORT after two-phase fakeout confirmed. Initial entry at 50% size; scale-in queued 1h later."""
         sl_price = mark * (1 + config_s6.S6_SL_PCT / config_s6.S6_LEVERAGE)
@@ -2677,7 +2787,7 @@ class MTFBot:
 
                     strategy = sig.get("strategy")
 
-                    if strategy in ("S2", "S3", "S4", "S5", "S6", "S7"):
+                    if strategy in ("S2", "S3", "S4", "S5", "S6", "S7", "S8"):
                         # Delegate to the strategy module's handle_pending_tick.
                         # Returns "break" to stop the outer for-loop (MAX_CONCURRENT_TRADES hit).
                         from importlib import import_module

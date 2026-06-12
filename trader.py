@@ -362,6 +362,7 @@ def open_long(
     use_s3_exits: bool     = False,
     use_s5_exits: bool     = False,
     use_s7_exits: bool     = False,
+    use_s8_exits: bool     = False,
     strategy: str | None   = None,
     tp_price_abs: float    = 0,
 ) -> dict:
@@ -372,6 +373,7 @@ def open_long(
     position is not yet visible).
     S2: fixed SL at fill * (1 - stop_loss_pct); partial TP + trailing stop.
     S3: structural SL at max(sl_floor, fill * (1 - stop_loss_pct)); same TP/trail.
+    S8: structural SL at max(sl_floor, fill * (1 - stop_loss_pct)); same TP/trail.
     """
     # Map `strategy=` string to the legacy use_sN_exits kwargs (string dispatch is preferred
     # externally; bool kwargs preserved for tests that still call with them).
@@ -380,6 +382,7 @@ def open_long(
     elif strategy == "S3": use_s3_exits = True
     elif strategy == "S5": use_s5_exits = True
     elif strategy == "S7": use_s7_exits = True
+    elif strategy == "S8": use_s8_exits = True
     import time as _t
     balance  = get_usdt_balance()
     equity   = _get_total_equity() or balance
@@ -430,6 +433,9 @@ def open_long(
     elif use_s7_exits:
         from strategies.s7 import compute_and_place_long_exits as _s7_long_exits
         ok, sl_trig, tp_trig = _s7_long_exits(symbol, qty, fill, sl_floor, 0)
+    elif use_s8_exits:
+        from strategies.s8 import compute_and_place_long_exits as _s8_long_exits
+        ok, sl_trig, tp_trig = _s8_long_exits(symbol, qty, fill, sl_floor, stop_loss_pct)
     else:
         tp_trig = float(_round_price(fill * (1 + take_profit_pct), symbol))
         tp_exec = float(_round_price(tp_trig * 1.005, symbol))

@@ -80,7 +80,7 @@
 - `tools.py` — generic tool helpers (swing highs/lows, order blocks, FVG, support/resistance, HTF check, candle geometry, nearest daily S/R clearance). No config deps, no strategy rules.
 - `strategies/s1.py` — evaluate_s1 (called by Bitget, Bybit, Binance, and IG via `cfg=` param); IG-specific helpers: `compute_s1_sl_atr`, `compute_s1_tp_atr`, `maybe_trail_sl_ig`
 - `strategies/s5.py` — evaluate_s5 (called by Bitget, Bybit, Binance, and IG)
-- `strategies/s2.py`, `s3.py`, `s4.py`, `s6.py`, `s7.py` — used by Bitget, Bybit, and Binance via sys.modules aliasing (`bitget` → exchange module, `trader` → exchange trader)
+- `strategies/s2.py`, `s3.py`, `s4.py`, `s6.py`, `s7.py`, `s8.py` — used by Bitget, Bybit, and Binance via sys.modules aliasing (`bitget` → exchange module, `trader` → exchange trader)
 - `config_s5.py` — S5 parameters (Bitget; Bybit/Binance use copies; IG uses per-instrument CONFIG dicts)
 - `paper_trader.py` — simulation engine (used by Bitget bot only in paper mode)
 
@@ -90,6 +90,7 @@
 - `strategies/s4.py` — evaluate_s4
 - `strategies/s6.py` — evaluate_s6
 - `strategies/s7.py` — evaluate_s7 (1H consolidation-box detector, queue_pending, handle_pending_tick, exits)
+- `strategies/s8.py` — evaluate_s8 (post-S2 bounce: tri-confluence of pre-breakout Darvas box top + daily 20MA + 61.8% fib; queue_pending, handle_pending_tick, exits)
 
 **Separation rules:**
 - Each strategy file owns its own entry/exit logic. Strategies do NOT import from each other.
@@ -121,17 +122,17 @@ The old monolithic `strategy.py` has been split into:
 
 - `indicators.py` — pure indicators (EMA, RSI, ADX, stoch, MACD, ATR). No config deps. Key new addition: `calculate_atr(df, period=14)` — returns a pandas Series of Average True Range values; consumed by `strategies/s1.py` (IG ATR-based SL/TP path) and `backtest_ig.py`.
 - `tools.py` — generic structure/pattern helpers (swing targets, order blocks, FVG, support/resistance, HTF check, candle geometry `body_pct`/`upper_wick`/`body_size`). No config deps. Key new addition: `nearest_daily_sr_clearance(daily_df, direction, lookback=60, swing_window=3)` — returns the distance from current price to the nearest daily S/R level in ATR-multiples; consumed by `strategies/s1.py` (IG path `evaluate_s1`) and `backtest_ig.py`.
-- `strategies/s1.py`..`strategies/s7.py` — one file per strategy. Each file owns its entry/exit rules and imports only from `indicators.py`, `tools.py`, and its own `config_sN.py`. Strategies do NOT import from each other. (Exception: `strategies/s7.py` imports `_place_partial_trail_exits` from `strategies/s4.py` to reuse the shared exit primitive.)
+- `strategies/s1.py`..`strategies/s8.py` — one file per strategy. Each file owns its entry/exit rules and imports only from `indicators.py`, `tools.py`, and its own `config_sN.py`. Strategies do NOT import from each other. (Exceptions: `strategies/s7.py` imports `_place_partial_trail_exits` from `strategies/s4.py`, and `strategies/s8.py` imports the same primitive from `strategies/s2.py` — shared exit-primitive reuse only.)
 
 **Shared by all four bots (Bitget, IG, Bybit, Binance):**
 - `indicators.py`, `tools.py`, `strategies/s1.py`, `strategies/s5.py`
 
 **Shared by Bitget, Bybit, AND Binance (via sys.modules aliasing — see § 10.5):**
-- `strategies/s1.py`, `s2.py`, `s3.py`, `s4.py`, `s6.py`, `s7.py`
+- `strategies/s1.py`, `s2.py`, `s3.py`, `s4.py`, `s6.py`, `s7.py`, `s8.py`
 - `bot.py` — Bybit and Binance reuse the entire main loop; both `bybit_bot.py` and `binance_bot.py` are thin entry points that alias `bitget → bybit`/`binance`, `trader → bybit_trader`/`binance_trader`, `scanner → bybit_scanner`/`binance_scanner`, `config_sN → config_bybit_sN`/`config_binance_sN`, `config → config_bybit`/`config_binance` before importing `bot`.
 
 **Used by:**
-- `bot.py` (Bitget bot, also reused by Bybit and Binance via aliasing) — imports evaluate_s1..evaluate_s7 from respective strategy modules
+- `bot.py` (Bitget bot, also reused by Bybit and Binance via aliasing) — imports evaluate_s1..evaluate_s8 from respective strategy modules
 - `ig_bot.py` (IG bot) — imports evaluate_s5 from `strategies.s5`; imports evaluate_s1 (via `_S1Adapter`) from `strategies.s1`
 - `bybit_bot.py` (Bybit bot) — installs sys.modules aliases then runs `bot.MTFBot().run()`
 - `binance_bot.py` (Binance bot) — installs sys.modules aliases then runs `bot.MTFBot().run()`
@@ -532,13 +533,25 @@ Each key is a symbol (e.g., "BTCUSDT"). Value is a dict with 44 fields:
   "s7_sr_support_pct": float | None,    # SHORT: spike base clearance % below entry
   "s7_sr_resistance_pct": float | None, # LONG: nearest resistance clearance % above entry
 
+  # S8 fields
+  "s8_signal": str,              # "LONG" | "HOLD"
+  "s8_reason": str,
+  "s8_trigger": float | None,    # Stop-buy trigger (green candle high * 1.005)
+  "s8_green_low": float | None,  # SL anchor (green candle low)
+  "s8_zone_low": float | None,   # Tri-confluence zone bottom
+  "s8_zone_high": float | None,  # Tri-confluence zone top
+  "s8_box_top": float | None,    # Support #1: pre-breakout Darvas coil top
+  "s8_ma20": float | None,       # Support #2: daily 20MA
+  "s8_fib618": float | None,     # Support #3: 61.8% retracement of impulse leg
+  "s8_daily_rsi": float | None,  # RSI on breakout day B
+
   # Shared S/R fields
   "sr_resistance_pct": float | None,
   "sr_support_pct": float | None,
 
   # Metadata
-  "signal": str,              # Aggregate signal (first non-HOLD from S1-S7)
-  "strategy": str,            # "S1" | "S2" | "S3" | "S4" | "S5" | "S6" | "S7"
+  "signal": str,              # Aggregate signal (first non-HOLD from S1-S8)
+  "strategy": str,            # "S1" | "S2" | "S3" | "S4" | "S5" | "S6" | "S7" | "S8"
   "updated_at": str,          # ISO timestamp
 }
 ```
@@ -619,6 +632,7 @@ aliasing — see §10.5). IG has its own separate 28-col contract (§4.3).
 - **S5 snapshot:** snap_s5_ob_low, snap_s5_ob_high, snap_s5_tp
 - **S6 snapshot:** snap_s6_peak, snap_s6_drop_pct, snap_s6_rsi_at_peak
 - **S7 snapshot:** snap_box_top, snap_box_low_initial (box levels at entry time; same snap_rsi_peak, snap_spike_body_pct, snap_rsi_div, snap_rsi_div_str columns as S4)
+- **S8 snapshot:** NO new columns — reuses snap_daily_rsi (RSI at breakout day B), snap_entry_trigger (stop-buy trigger), snap_sl (initial SL), snap_box_range_pct (confluence zone width %), box_low/box_high (zone bounds). The trades.csv header is frozen; new columns would require migrate_trades_csv.py.
 - **S/R snapshot:** snap_sr_clearance_pct
 - **Trade DNA trend fingerprint:** snap_trend_daily_*, snap_trend_h1_*, snap_trend_m15_*, snap_trend_m3_* (see trade_dna.py)
 - **Close data:** result, pnl, pnl_pct, exit_reason, exit_price
@@ -887,7 +901,7 @@ to blank, and a sidecar failure cannot block a trade.
 **Columns (14):** `timestamp, trade_id, symbol, strategy, side,` then the regime `snap_*`:
 `snap_session, snap_hour_ph, snap_dow` (time-of-day, `regime.time_fields`);
 `snap_atr_pct, snap_atr_pctile, snap_vol_vs_avg` (`regime.volatility_fields`, whichever TF DF is in
-scope per strategy — S1 ltf, S3/S5 m15, S2/S4/S6/S7 daily, so comparable within a strategy not
+scope per strategy — S1 ltf, S3/S5 m15, S2/S4/S6/S7/S8 daily, so comparable within a strategy not
 across); `snap_btc_change, snap_btc_regime` (`SentimentResult.btc_change`); `snap_funding_rate`
 (`tr.get_funding_rate`).
 
@@ -1327,6 +1341,7 @@ Each strategy lives in `strategies/sN.py` and owns:
 | S5 | IG | `strategies/s5.py` | `evaluate_s5` (cfg=instrument) | via `_S5Adapter.handle_signal` → `ig.open_long` | same | N/A (IG uses ig.open_long/short) | `_S5Adapter.monitor` → `ig.update_sl` |
 | S6 | Bitget/Bybit | `strategies/s6.py` | `evaluate_s6` | — | `compute_and_place_short_exits` | `_place_partial_trail_exits` | — |
 | S7 | Bitget/Bybit | `strategies/s7.py` | `evaluate_s7` | `compute_and_place_long_exits` | `compute_and_place_short_exits` | `_place_partial_trail_exits` (from s4) | `maybe_trail_sl` (LONG + SHORT) |
+| S8 | Bitget/Bybit/Binance | `strategies/s8.py` | `evaluate_s8` | `compute_and_place_long_exits` | — | `_place_partial_trail_exits` (from s2) | `maybe_trail_sl` (LONG) |
 
 ### 7.2 `compute_and_place_*_exits(symbol, qty_str, fill, ...) → (ok, sl_trig, trail_trig)`
 
@@ -1441,7 +1456,7 @@ python recover.py [--dry-run] [--symbols SYM1 SYM2 ...]
    `STRATEGY_SNAP_COLS` no longer matches → per-strategy snap columns disappear from the table.
    Fix: keep the two lists in sync.
 
-2. **Adding a new strategy (e.g. S8)** → analytics silently drops its trades (not in `STRATEGIES`). Fix: add to `STRATEGIES` tuple in `analytics.py` and add to `STRATEGY_SNAP_FIELDS` dict.
+2. **Adding a new strategy (e.g. S9)** → analytics silently drops its trades (not in `STRATEGIES`). Fix: add to `STRATEGIES` tuple in `analytics.py` and add to `STRATEGY_SNAP_FIELDS` dict. (S8 added 2026-06-12.)
    Fix: add to `analytics.STRATEGIES` and `STRATEGY_SNAP_FIELDS`; add a strategy tab in `dashboard.html`.
 
 3. **Changing `trades.csv` column names** → `analytics.load_closed_trades` reads by name;

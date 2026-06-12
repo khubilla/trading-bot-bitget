@@ -119,10 +119,16 @@ breakout index B.
 
 Actions: `S8_LONG` (entry), `S8_PARTIAL`, `S8_CLOSE`. No `S8_SCALE_IN`.
 
-Snap columns at entry: `snap_box_top`, `snap_ma20`, `snap_fib618`,
-`snap_confluence_width_pct`, `snap_green_body_pct`, `snap_daily_rsi`,
-`snap_sentiment` (+ standard DNA `snap_trend_daily_*` via `dna_fields`).
-All additive — no existing columns change.
+**No new CSV columns** (amended during implementation): the trades.csv contract
+is frozen — `_TRADE_FIELDS` in bot.py is the DictWriter fieldnames list and must
+match the live file's header, so adding columns would require a
+migrate_trades_csv.py run. Instead S8 reuses generically-named existing columns
+(same precedent as S7 reusing S4's): `snap_daily_rsi` = RSI at breakout day B,
+`snap_entry_trigger` = stop-buy trigger, `snap_sl` = initial SL,
+`snap_box_range_pct` = confluence zone width %, `box_low`/`box_high` = zone
+bounds, `snap_sentiment`, plus standard DNA `snap_trend_daily_*` via
+`dna_fields`. The three confluence levels are persisted in state.json
+(`s8_box_top`/`s8_ma20`/`s8_fib618`) and the reason string.
 
 ## 8. Testing
 

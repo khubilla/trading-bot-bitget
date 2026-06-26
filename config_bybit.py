@@ -51,7 +51,7 @@ LIQUIDITY_CHECK_ENABLED = False
 MIN_OB_DEPTH_USDT       = 50_000
 
 # --- Bot Behaviour ---
-MAX_CONCURRENT_TRADES = 4
+MAX_CONCURRENT_TRADES = 10
 POLL_INTERVAL_SEC     = 15
 
 # --- Initial Balance (for PnL% calculation) ---

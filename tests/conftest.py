@@ -92,6 +92,36 @@ def cleanup_ig_trades_csv():
         os.remove(csv_path)
 
 
+@pytest.fixture(autouse=True)
+def cleanup_trades_csv():
+    """Protect the production Bitget ledger (trades.csv + regime sidecar) from tests.
+
+    Several bot tests exercise the real MTFBot._do_scale_in / entry paths, which
+    call the module-level bot._log_trade() and append rows to config.TRADE_LOG
+    (trades.csv) and its regime sidecar (trades_regime.csv). Without isolation
+    those test rows — e.g. TESTS2USDT / TESTS6USDT / TESTS7USDT — accumulate in
+    the live ledger every pytest run and pollute trade analytics.
+
+    Same back-up-and-restore strategy as cleanup_ig_trades_csv: snapshot before
+    the test, restore after. Clean files (no original) are removed afterwards.
+    """
+    paths = ["trades.csv", "trades_regime.csv"]
+    backups = {}
+    for p in paths:
+        if os.path.exists(p):
+            b = p + ".test_backup"
+            shutil.copy2(p, b)
+            backups[p] = b
+
+    yield
+
+    for p in paths:
+        if p in backups:
+            shutil.move(backups[p], p)
+        elif os.path.exists(p):
+            os.remove(p)
+
+
 import json
 import threading
 import time

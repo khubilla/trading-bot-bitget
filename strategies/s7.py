@@ -26,7 +26,7 @@ SNAPSHOT_INTERVAL = "1H"
 
 def _utcnow() -> pd.Timestamp:
     """Wrapper for monkeypatch-friendly current-UTC timestamp."""
-    return pd.Timestamp.utcnow()
+    return pd.Timestamp.now("UTC")
 
 
 def today_h1_slice(h1_df: pd.DataFrame) -> pd.DataFrame:

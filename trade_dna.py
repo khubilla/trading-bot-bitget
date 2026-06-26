@@ -109,6 +109,8 @@ def _get_handler(strategy: str):
         from strategies.s5 import dna_fields
     elif strategy == "S6":
         from strategies.s6 import dna_fields
+    elif strategy == "S7":
+        from strategies.s7 import dna_fields
     elif strategy == "S8":
         from strategies.s8 import dna_fields
     else:

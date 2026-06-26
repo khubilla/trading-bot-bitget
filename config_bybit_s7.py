@@ -7,7 +7,7 @@
 #   LONG  (BULLISH): confirmed 1H close above box_top × (1 + S7_ENTRY_BUFFER)
 # NEUTRAL sentiment → HOLD (gated in bot.py scan loop).
 
-S7_ENABLED = True
+S7_ENABLED = False
 
 # Scale-in: when True, initial entry is 50% size and the remaining 50% is
 # added 1 hour later when price retests the buffered box edge with matching

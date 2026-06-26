@@ -271,6 +271,59 @@ def _df_to_candles(df) -> list[dict]:
     ]
 
 
+# Timeframes each strategy's dna_fields() reads. Watcher-fired entries (S2–S7)
+# lose their DataFrames because pending signals are JSON-serialized to state.json,
+# so dna_fields would early-return on the missing "daily" and record nothing.
+# _dna_candles() refetches whatever a strategy needs but doesn't already have.
+_DNA_TIMEFRAMES = {
+    "S1": ("daily", "h1", "m3"),
+    "S2": ("daily",),
+    "S3": ("m15",),
+    "S4": ("daily", "h1"),
+    "S5": ("daily", "h1", "m15"),
+    "S6": ("daily",),
+    "S7": ("daily", "h1"),
+    "S8": ("daily",),
+}
+_DNA_FETCH = {"daily": ("1D", 100), "h1": ("1H", 48), "m15": ("15m", 100)}
+
+
+def _ok_df(df) -> bool:
+    """True if df is a non-empty DataFrame."""
+    return df is not None and not getattr(df, "empty", True)
+
+
+def _fetch_df(symbol: str, interval: str, limit: int):
+    """Fetch candles for the DNA trend fingerprint; None on empty/failure.
+
+    Never raises — a fetch problem degrades the fingerprint to "" rather than
+    blocking a trade (matching trade_dna.snapshot's never-block contract).
+    """
+    try:
+        df = tr.get_candles(symbol, interval, limit=limit)
+        return df if _ok_df(df) else None
+    except Exception as exc:
+        logger.debug("[%s] %s fetch for DNA fingerprint failed: %s", symbol, interval, exc)
+        return None
+
+
+def _dna_candles(symbol: str, strategy: str, *, daily=None, h1=None, m15=None, m3=None) -> dict:
+    """Assemble the candles dict for dna_snapshot(), refetching any timeframe the
+    strategy needs that isn't already in scope. In-scope DataFrames (passed as
+    hints) are reused; missing ones are fetched. m3 is only used by S1 and is
+    always in scope, so it is never fetched.
+    """
+    hints = {"daily": daily, "h1": h1, "m15": m15, "m3": m3}
+    out = {}
+    for tf in _DNA_TIMEFRAMES.get(strategy, ()):
+        if _ok_df(hints[tf]):
+            out[tf] = hints[tf]
+        elif tf in _DNA_FETCH:
+            interval, limit = _DNA_FETCH[tf]
+            out[tf] = _fetch_df(symbol, interval, limit)
+    return out
+
+
 def _snapshot_interval(strategy: str) -> str:
     """Return the candle interval this strategy uses for event snapshots.
 
@@ -2084,11 +2137,8 @@ class MTFBot:
             _d_rsi = calculate_rsi(_daily["close"].astype(float))
             trade["snap_daily_rsi"] = round(float(_d_rsi.iloc[-1]), 1)
         trade["trade_id"] = uuid.uuid4().hex[:8]
-        trade.update(dna_snapshot("S1", symbol, {
-            "daily": c.get("daily_df"),
-            # h1 not in S1 candidate dict — snap_trend_h1_* will record as ""
-            "m3":    c.get("ltf_df"),
-        }))
+        trade.update(dna_snapshot("S1", symbol, _dna_candles(
+            symbol, "S1", daily=c.get("daily_df"), m3=c.get("ltf_df"))))
         self._log_regime(symbol, c.get("ltf_df"), trade)
         _log_trade(f"S1_{s1_sig}", trade)
         st.add_open_trade(trade)
@@ -2161,9 +2211,8 @@ class MTFBot:
             trade["snap_s5_ob_high"]     = round(s5_ob_high, 8) if s5_ob_high else None
             trade["snap_s5_tp"]          = round(s5_tp, 8) if s5_tp else None
             trade["trade_id"] = uuid.uuid4().hex[:8]
-            trade.update(dna_snapshot("S5", symbol, {
-                "m15": m15_df,
-            }))
+            trade.update(dna_snapshot("S5", symbol, _dna_candles(
+                symbol, "S5", m15=m15_df)))
             self._log_regime(symbol, m15_df, trade)
             _log_trade("S5_LONG", trade)
             st.add_open_trade(trade)
@@ -2231,9 +2280,8 @@ class MTFBot:
             trade["snap_s5_ob_high"]     = round(s5_ob_high, 8) if s5_ob_high else None
             trade["snap_s5_tp"]          = round(s5_tp, 8) if s5_tp else None
             trade["trade_id"] = uuid.uuid4().hex[:8]
-            trade.update(dna_snapshot("S5", symbol, {
-                "m15": m15_df,
-            }))
+            trade.update(dna_snapshot("S5", symbol, _dna_candles(
+                symbol, "S5", m15=m15_df)))
             self._log_regime(symbol, m15_df, trade)
             _log_trade("S5_SHORT", trade)
             st.add_open_trade(trade)
@@ -2349,9 +2397,8 @@ class MTFBot:
         trade["snap_sr_clearance_pct"] = round((sr_resistance - mark) / mark * 100, 1) \
                                          if sr_resistance else None
         trade["trade_id"] = uuid.uuid4().hex[:8]
-        trade.update(dna_snapshot("S2", symbol, {
-            "daily": sig.get("daily_df"),
-        }))
+        trade.update(dna_snapshot("S2", symbol, _dna_candles(
+            symbol, "S2", daily=sig.get("daily_df"))))
         self._log_regime(symbol, sig.get("daily_df"), trade)
         _log_trade("S2_LONG", trade)
         st.add_open_trade(trade)
@@ -2427,9 +2474,8 @@ class MTFBot:
         trade["snap_sentiment"]        = sig.get("snap_sentiment")
         trade["snap_sr_clearance_pct"] = sig.get("snap_sr_clearance_pct")
         trade["trade_id"] = uuid.uuid4().hex[:8]
-        trade.update(dna_snapshot("S3", symbol, {
-            "m15": sig.get("m15_df"),
-        }))
+        trade.update(dna_snapshot("S3", symbol, _dna_candles(
+            symbol, "S3", m15=sig.get("m15_df"))))
         self._log_regime(symbol, sig.get("m15_df"), trade)
         _log_trade("S3_LONG", trade)
         st.add_open_trade(trade)
@@ -2507,10 +2553,8 @@ class MTFBot:
         trade["snap_sentiment"]        = sig.get("snap_sentiment")
         trade["snap_sr_clearance_pct"] = sr_support_pct
         trade["trade_id"] = uuid.uuid4().hex[:8]
-        trade.update(dna_snapshot("S4", symbol, {
-            "daily": sig.get("daily_df"),
-            # h1 not carried in sig dict — snap_trend_h1_* will record as ""
-        }))
+        trade.update(dna_snapshot("S4", symbol, _dna_candles(
+            symbol, "S4", daily=sig.get("daily_df"))))
         self._log_regime(symbol, sig.get("daily_df"), trade)
         _log_trade("S4_SHORT", trade)
         st.add_open_trade(trade)
@@ -2617,9 +2661,9 @@ class MTFBot:
         trade["snap_sentiment"]        = sig.get("snap_sentiment")
         trade["snap_sr_clearance_pct"] = sr_pct
         trade["trade_id"] = uuid.uuid4().hex[:8]
-        trade.update(dna_snapshot("S7", symbol, {
-            "daily": sig.get("daily_df"),
-        }))
+        _h1_df = _fetch_df(symbol, "1H", 48)   # reused for both the DNA fingerprint and the open snapshot
+        trade.update(dna_snapshot("S7", symbol, _dna_candles(
+            symbol, "S7", daily=sig.get("daily_df"), h1=_h1_df)))
         self._log_regime(symbol, sig.get("daily_df"), trade)
         # Populate Darvas box levels for the CSV log (open_long/open_short don't receive them)
         trade["box_low"]  = sig["box_low"]
@@ -2627,7 +2671,7 @@ class MTFBot:
         _log_trade(trade_action, trade)
         st.add_open_trade(trade)
         try:
-            h1_df = tr.get_candles(symbol, "1H", limit=48)
+            h1_df = _h1_df if _h1_df is not None else tr.get_candles(symbol, "1H", limit=48)
             snapshot.save_snapshot(
                 trade_id=trade["trade_id"], event="open",
                 symbol=symbol, interval="1H",
@@ -2696,7 +2740,8 @@ class MTFBot:
             _daily_df = tr.get_candles(symbol, "1D", limit=100)
         except Exception:
             pass
-        trade.update(dna_snapshot("S8", symbol, {"daily": _daily_df}))
+        trade.update(dna_snapshot("S8", symbol, _dna_candles(
+            symbol, "S8", daily=_daily_df)))
         self._log_regime(symbol, _daily_df, trade)
         _log_trade("S8_LONG", trade)
         st.add_open_trade(trade)
@@ -2740,9 +2785,8 @@ class MTFBot:
         trade["snap_sentiment"]        = sig.get("snap_sentiment")
         trade["snap_sr_clearance_pct"] = None
         trade["trade_id"] = uuid.uuid4().hex[:8]
-        trade.update(dna_snapshot("S6", symbol, {
-            "daily": sig.get("daily_df"),
-        }))
+        trade.update(dna_snapshot("S6", symbol, _dna_candles(
+            symbol, "S6", daily=sig.get("daily_df"))))
         self._log_regime(symbol, sig.get("daily_df"), trade)
         _log_trade("S6_SHORT", trade)
         st.add_open_trade(trade)
@@ -2876,7 +2920,7 @@ class MTFBot:
         trade["snap_s5_ob_high"]       = round(sig["ob_high"], 8) if sig.get("ob_high") else None
         trade["snap_s5_tp"]            = round(sig["tp"], 8) if sig.get("tp") else None
         trade["trade_id"] = uuid.uuid4().hex[:8]
-        trade.update(dna_snapshot("S5", symbol, {}))  # no DFs available in watcher
+        trade.update(dna_snapshot("S5", symbol, _dna_candles(symbol, "S5")))  # watcher: trend candles fetched at fire time
         self._log_regime(symbol, None, trade)
         _log_trade(f"S5_{side}", trade)
         st.add_open_trade(trade)
@@ -2948,7 +2992,7 @@ class MTFBot:
                 "snap_s5_tp":            round(sig["tp"], 8)      if sig.get("tp")      else None,
                 "trade_id": trade_id,
             })
-            trade.update(dna_snapshot("S5", symbol, {}))  # no DFs available in watcher
+            trade.update(dna_snapshot("S5", symbol, _dna_candles(symbol, "S5")))  # watcher: trend candles fetched at fire time
             self._log_regime(symbol, None, trade)
             _log_trade(f"S5_{side}", trade)
             st.add_open_trade(trade)
@@ -2997,7 +3041,7 @@ class MTFBot:
             "snap_s5_tp":            round(sig["tp"], 8)      if sig.get("tp")      else None,
             "trade_id": trade_id,
         }
-        trade.update(dna_snapshot("S5", symbol, {}))  # no DFs available in watcher
+        trade.update(dna_snapshot("S5", symbol, _dna_candles(symbol, "S5")))  # watcher: trend candles fetched at fire time
         self._log_regime(symbol, None, trade)
         _log_trade(f"S5_{side}", trade)
         st.add_open_trade(trade)

@@ -9,7 +9,7 @@
 # Exit mirrors S2: 50% close at -10%, trailing stop on remainder.
 # Sentiment gate: only fires when market is NOT BULLISH.
 
-S4_ENABLED              = True
+S4_ENABLED              = False
 
 # Scale-in: when True, initial entry is 50% size and the remaining 50% is
 # added 1 hour later if the entry window + BEARISH sentiment still hold.

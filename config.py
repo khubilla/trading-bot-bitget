@@ -78,7 +78,7 @@ NON_TRADING_HOURS = [
 
 # --- Weekend Trading ---
 # Disable trading on Saturdays (low liquidity, 25% win rate, -242% net P&L)
-DISABLE_SATURDAY_TRADING = True
+DISABLE_SATURDAY_TRADING = False
 
 # --- Enhanced Trading Windows ---
 # Increase position size during high-performance sessions (PH time, UTC+8)

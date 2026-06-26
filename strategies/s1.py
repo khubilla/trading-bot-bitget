@@ -247,6 +247,49 @@ def check_ltf_short(ltf_df: pd.DataFrame, cfg: dict | None = None) -> tuple[bool
     return False, rsi_val, box_high, box_low
 
 
+# ── Anchored-Box Breakout Decision ────────────────────────── #
+
+def s1_anchor_decision(
+    armed: dict | None, *, direction: str, last_close: float, last_ts: int,
+    rsi_val: float, rsi_thresh: float, gates_ok: bool, is_coil: bool,
+    box_high: float, box_low: float, buffer_pct: float,
+    interval_ms: int, max_age: int,
+) -> tuple[dict | None, str]:
+    """Anchored-box breakout state machine for S1 (pure / stateless).
+
+    Returns (new_armed_state, signal). new_armed_state is the box dict to keep
+    (or None to clear). signal is "LONG"/"SHORT" on a fired breakout, else "HOLD".
+    """
+    in_zone = rsi_val > rsi_thresh if direction == "LONG" else rsi_val < rsi_thresh
+
+    if armed is not None:
+        # Disarm conditions (no trade)
+        if not gates_ok or not in_zone:
+            return None, "HOLD"
+        if int((last_ts - armed["armed_at_ts"]) // interval_ms) > max_age:
+            return None, "HOLD"
+        if direction == "LONG" and last_close < armed["box_low"]:
+            return None, "HOLD"
+        if direction == "SHORT" and last_close > armed["box_high"]:
+            return None, "HOLD"
+        # Fire on close-confirmed breakout of the anchored box
+        if direction == "LONG" and last_close > armed["box_high"] * (1 + buffer_pct):
+            return None, "LONG"
+        if direction == "SHORT" and last_close < armed["box_low"] * (1 - buffer_pct):
+            return None, "SHORT"
+        return armed, "HOLD"
+
+    # Arm: valid coil, gates pass, RSI in zone, price not already broken out
+    if not (gates_ok and in_zone and is_coil):
+        return None, "HOLD"
+    if direction == "LONG" and last_close > box_high * (1 + buffer_pct):
+        return None, "HOLD"
+    if direction == "SHORT" and last_close < box_low * (1 - buffer_pct):
+        return None, "HOLD"
+    return ({"dir": direction, "box_high": box_high, "box_low": box_low,
+             "rsi_thresh": rsi_thresh, "armed_at_ts": last_ts}, "HOLD")
+
+
 # ── Dynamic Exit Check ────────────────────────────────────── #
 
 def check_exit(

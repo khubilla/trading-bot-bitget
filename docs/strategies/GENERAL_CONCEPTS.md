@@ -19,6 +19,7 @@ A **Darvas Box** (also called a **coil** or **consolidation zone**) is a tight p
 - The number of candles in the coil must be within the configured range (e.g., 1–5 candles for S2, 2 candles for S1 on 3m).
 - **RSI zone constraint (S1/S2):** All consolidation candles must have RSI above the long threshold (>70) or below the short threshold (<30) throughout the coil. A single candle outside the zone invalidates the setup.
 - The box is **not** formed by candles that have already broken out. The current forming candle is excluded from the box calculation.
+- **S1 anchoring (3m):** when `S1_ANCHOR_BOX = True`, S1 locks the coil box once it forms and watches that fixed box for a close-confirmed breakout, rather than recomputing a sliding 2-candle box every tick. This prevents entries that chase a re-anchored window several candles into a move.
 
 ### Darvas Box Top Rule (S2)
 

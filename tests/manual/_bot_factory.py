@@ -22,6 +22,7 @@ def make_bot() -> bot.MTFBot:
     b = object.__new__(bot.MTFBot)
     b.pending_signals  = {}
     b.active_positions = {}
+    b.s1_armed         = {}
     b._trade_lock      = threading.Lock()
     b.running          = True
     b.sentiment        = type("Sentiment", (), {"direction": "NEUTRAL"})()

@@ -33,6 +33,13 @@ CONSOLIDATION_RANGE_PCT = 0.04  # Max range = 4% (decimal ratio: (box_high - box
 # ── Breakout Confirmation (3m chart) ─────────────────────── #
 BREAKOUT_BUFFER_PCT = 0.005   # 0.5% buffer above/below box edge
 
+# ── Anchored-box breakout entry ─────────────────────────────── #
+# When True, S1 anchors the consolidation box when it forms and enters on
+# the first candle that closes beyond it + BREAKOUT_BUFFER_PCT, instead of
+# the legacy per-tick sliding 2-bar window. False = legacy sliding behavior.
+S1_ANCHOR_BOX = True
+S1_BOX_MAX_AGE = 10   # 3m candles an unbroken armed box survives before expiring
+
 # ── Risk Management ──────────────────────────────────────── #
 LEVERAGE         = 10
 TRADE_SIZE_PCT   = 0.04    # 4% of total portfolio as margin
